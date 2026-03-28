@@ -39,6 +39,7 @@ class PortfolioState:
     kill_switch_engaged: bool = False
     last_stock_screen_date: str | None = None
     last_polymarket_scan_date: str | None = None
+    last_predictions_scan_date: str | None = None
     realized_pnl: float = 0.0
     rotation_data: dict[str, Any] = field(default_factory=dict)
     # rotation_data stores: {
@@ -60,6 +61,7 @@ class PortfolioState:
             "kill_switch_engaged": self.kill_switch_engaged,
             "last_stock_screen_date": self.last_stock_screen_date,
             "last_polymarket_scan_date": self.last_polymarket_scan_date,
+            "last_predictions_scan_date": self.last_predictions_scan_date,
             "realized_pnl": self.realized_pnl,
             "rotation_data": self.rotation_data,
         }

@@ -116,6 +116,8 @@ class CoinbasePredictionStrategy:
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
                 )
 
+            state.last_predictions_scan_date = now.date().isoformat()
+
         except Exception as exc:
             self.logger.error("Prediction strategy failed: %s", exc, exc_info=True)
             result["status"] = "error"
