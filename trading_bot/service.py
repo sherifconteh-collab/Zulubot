@@ -285,11 +285,21 @@ class TradingBotService:
             # Set cash to real Coinbase USD balance
             state.cash = usd_cash
 
-            # Update peak equity if this is a fresh start
+            # Calculate real equity from Coinbase
             equity = usd_cash + sum(
                 pos.quantity * pos.current_price for pos in state.positions.values()
             )
-            if equity > 0 and (state.peak_equity == 0 or state.peak_equity == self.config.initial_cash):
+            # Reset peak/baseline if they look stale (from old paper-mode state
+            # or different initial_cash) to prevent false kill-switch triggers
+            if equity > 0 and (
+                state.peak_equity <= 0
+                or state.peak_equity == self.config.initial_cash
+                or state.peak_equity > equity * 5  # peak is impossibly high vs reality
+            ):
+                self.logger.info(
+                    "Resetting peak equity from $%.2f to real equity $%.2f",
+                    state.peak_equity, equity,
+                )
                 state.peak_equity = equity
                 state.daily_baseline_equity = equity
 

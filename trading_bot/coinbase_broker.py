@@ -85,10 +85,12 @@ class CoinbaseBroker:
         resp.raise_for_status()
         return resp.json()
 
-    def _get(self, path: str) -> dict[str, Any]:
-        headers = self._auth_headers("GET", path)
-        url = f"{self.BASE_URL}{path}"
-        resp = self.session.get(url, headers=headers, timeout=15)
+    def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        # JWT must be signed with just the path (no query string)
+        clean_path = path.split("?")[0]
+        headers = self._auth_headers("GET", clean_path)
+        url = f"{self.BASE_URL}{clean_path}"
+        resp = self.session.get(url, headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
@@ -409,10 +411,10 @@ class CoinbaseBroker:
         all_accounts: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(20):  # safety limit
-            path = "/api/v3/brokerage/accounts"
+            params: dict[str, str] = {}
             if cursor:
-                path = f"{path}?cursor={cursor}"
-            result = self._get(path)
+                params["cursor"] = cursor
+            result = self._get("/api/v3/brokerage/accounts", params=params or None)
             accounts = result.get("accounts", [])
             all_accounts.extend(accounts)
             self.logger.debug(
