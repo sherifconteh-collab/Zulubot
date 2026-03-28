@@ -161,6 +161,8 @@ class AltcoinRotationConfig:
 @dataclass(frozen=True)
 class PredictionConfig:
     enabled: bool = False                # OFF by default
+    kalshi_key_id: str = ""              # Kalshi API key ID
+    kalshi_private_key: str = ""         # Kalshi RSA private key PEM
     buy_yes_threshold: float = 0.30      # Buy YES below this price
     buy_no_threshold: float = 0.70       # Buy NO above this price
     take_profit_threshold: float = 0.50  # Take profit at 0.50
@@ -298,6 +300,8 @@ class AppConfig:
             ),
             predictions=PredictionConfig(
                 enabled=_env_bool("PREDICTION_ENABLED", False),
+                kalshi_key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
+                kalshi_private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
                 buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.30),
                 buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.70),
                 take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),

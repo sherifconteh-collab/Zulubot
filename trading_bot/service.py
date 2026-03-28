@@ -11,6 +11,7 @@ from trading_bot.clients import (
     CoinbaseClient,
     FinancialModelingPrepClient,
 )
+from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGammaClient
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AppConfig
@@ -128,11 +129,16 @@ class TradingBotService:
             logger=logger,
         )
 
-        # Coinbase prediction markets strategy
+        # Kalshi prediction markets strategy
+        self.kalshi_client = KalshiClient(
+            key_id=config.predictions.kalshi_key_id,
+            private_key_pem=config.predictions.kalshi_private_key,
+            timeout_seconds=config.request_timeout_seconds,
+            logger=logger,
+        )
         self.prediction_strategy = CoinbasePredictionStrategy(
             config=config.predictions,
-            coinbase_client=self.coinbase_client,
-            coinbase_broker=self.coinbase_broker,
+            kalshi_client=self.kalshi_client,
             logger=logger,
         )
 
