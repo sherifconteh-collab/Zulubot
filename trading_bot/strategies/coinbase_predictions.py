@@ -1,11 +1,15 @@
-"""Coinbase prediction market strategy.
+"""Prediction market strategy using Kalshi API.
 
-Trades Coinbase event contracts (powered by Kalshi) using the Advanced Trade API.
-These use KX-prefixed product IDs and YES/NO sides with prices from 0.00 to 1.00.
+Kalshi powers the prediction markets visible in the Coinbase app, but
+Coinbase doesn't expose them through their trading API.  This strategy
+connects directly to Kalshi for market discovery and order execution.
+
+Market discovery (public, no auth) always works.
+Order placement requires Kalshi API credentials (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY).
 
 Signal logic:
-  BUY YES when price < buy_yes_threshold (default 0.30)
-  BUY NO  when price > buy_no_threshold  (default 0.70)
+  BUY YES when mid_price < buy_yes_threshold (default 0.30)
+  BUY NO  when mid_price > buy_no_threshold  (default 0.70)
   SELL    when price crosses take_profit_threshold (0.50) toward our side
   SELL    when price moves against by stop_loss_pct (0.15)
 
@@ -20,37 +24,38 @@ from datetime import datetime
 from typing import Any
 
 from trading_bot.broker import PaperBroker
-from trading_bot.clients import CoinbaseClient
-from trading_bot.coinbase_broker import CoinbaseBroker
+from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.config import PredictionConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 
 
+# Series tickers to scan on Kalshi (crypto + economics focus)
+CRYPTO_SERIES = ["KXBTC", "KXETH", "KXSOL", "KXDOGE", "KXXRP"]
+ECONOMICS_SERIES = ["KXCPI", "KXCPIYOY", "KXGDP", "KXFED", "KXFOMC", "KXNFP", "KXRECESSION", "KXTARIFF"]
+OTHER_SERIES = ["KXNEWPOPE", "KXINX", "KXSPY"]
+
+SERIES_BY_CATEGORY: dict[str, list[str]] = {
+    "crypto": CRYPTO_SERIES,
+    "economics": ECONOMICS_SERIES,
+    "other": OTHER_SERIES,
+}
+
+
 class CoinbasePredictionStrategy:
-    """Prediction market strategy for Coinbase event contracts.
-
-    Discovers KX-prefixed products from the Coinbase API, evaluates
-    price-based entry signals, and manages positions with stop-loss
-    and take-profit logic.  All bookkeeping flows through PaperBroker;
-    live execution (when enabled) goes through CoinbaseBroker.
-    """
-
-    SYMBOL_PREFIX = "KX"
+    """Prediction market strategy using Kalshi for discovery and execution."""
 
     def __init__(
         self,
         *,
         config: PredictionConfig,
-        coinbase_client: CoinbaseClient,
-        coinbase_broker: CoinbaseBroker | None = None,
+        kalshi_client: KalshiClient,
         logger: logging.Logger,
         ai_service: Any | None = None,
     ) -> None:
         self.config = config
-        self.coinbase_client = coinbase_client
-        self.coinbase_broker = coinbase_broker
-        self.logger = logger.getChild("strategy.coinbase_predictions")
+        self.kalshi = kalshi_client
+        self.logger = logger.getChild("strategy.predictions")
         self.ai_service = ai_service
 
     # ------------------------------------------------------------------
@@ -66,21 +71,9 @@ class CoinbasePredictionStrategy:
         now: datetime,
         fear_greed_value: int | None = None,
     ) -> dict[str, Any]:
-        """Execute one Coinbase prediction-market strategy cycle.
-
-        Args:
-            state: Current portfolio state.
-            broker: PaperBroker for equity/risk calculations and bookkeeping.
-            risk_manager: Risk manager for position sizing.
-            now: Current timestamp.
-            fear_greed_value: Optional Fear & Greed index (0-100) for
-                crypto-tagged market filtering.
-
-        Returns:
-            Strategy result dict with status, buys, sells, markets_scanned, etc.
-        """
+        """Execute one prediction-market strategy cycle."""
         if not self.config.enabled:
-            self.logger.debug("Coinbase predictions strategy is disabled.")
+            self.logger.debug("Prediction strategy is disabled.")
             return {"status": "disabled", "buys": [], "sells": [], "markets_scanned": 0}
 
         result: dict[str, Any] = {
@@ -91,6 +84,7 @@ class CoinbasePredictionStrategy:
             "markets_discovered": 0,
             "resolved_closed": [],
             "fear_greed": fear_greed_value,
+            "can_trade": self.kalshi.can_trade,
         }
 
         try:
@@ -100,14 +94,12 @@ class CoinbasePredictionStrategy:
             # Step 2: Manage existing positions (stop-loss / take-profit)
             self._manage_existing_positions(state, broker, result)
 
-            # Step 3: Discover available prediction markets
+            # Step 3: Discover available prediction markets from Kalshi
             markets = self._discover_markets()
             result["markets_discovered"] = len(markets)
 
             if not markets:
-                self.logger.info(
-                    "No Coinbase prediction markets available (API may not expose KX products)."
-                )
+                self.logger.info("No prediction markets found on Kalshi.")
                 return result
 
             result["markets_scanned"] = len(markets)
@@ -119,89 +111,91 @@ class CoinbasePredictionStrategy:
                 )
 
         except Exception as exc:
-            self.logger.error("Coinbase predictions strategy failed: %s", exc, exc_info=True)
+            self.logger.error("Prediction strategy failed: %s", exc, exc_info=True)
             result["status"] = "error"
             result["error"] = str(exc)
 
         self.logger.info(
-            "Coinbase predictions cycle complete. scanned=%d discovered=%d buys=%s sells=%s "
-            "resolved=%s fear_greed=%s",
+            "Predictions cycle complete. scanned=%d discovered=%d buys=%s sells=%s "
+            "resolved=%s can_trade=%s",
             result["markets_scanned"],
             result["markets_discovered"],
             result["buys"],
             result["sells"],
             result["resolved_closed"],
-            fear_greed_value,
+            result["can_trade"],
         )
         return result
 
     # ------------------------------------------------------------------
-    # Market discovery
+    # Market discovery (public Kalshi API, no auth needed)
     # ------------------------------------------------------------------
 
     def _discover_markets(self) -> list[dict[str, Any]]:
-        """Fetch prediction-market products from Coinbase and filter them.
+        """Fetch open markets from Kalshi for our configured categories."""
+        import time
 
-        Returns only active markets whose product_id starts with ``KX``
-        and whose category matches ``config.market_categories``.
-        """
-        try:
-            raw_markets = self.coinbase_client.get_prediction_markets()
-        except Exception as exc:
-            self.logger.warning("Failed to fetch prediction markets: %s", exc)
-            return []
+        series_to_scan: list[str] = []
+        for cat in self.config.market_categories:
+            series_to_scan.extend(SERIES_BY_CATEGORY.get(cat, []))
+        if not series_to_scan:
+            # Default: scan all known series
+            for s_list in SERIES_BY_CATEGORY.values():
+                series_to_scan.extend(s_list)
 
-        if not raw_markets:
-            return []
-
-        filtered: list[dict[str, Any]] = []
-        for market in raw_markets:
-            product_id: str = market.get("product_id", "")
-            if not product_id.startswith("KX"):
-                continue
-            status = market.get("status", "").lower()
-            if status not in ("online", "active", ""):
-                self.logger.debug("Skipping %s with status=%s", product_id, status)
-                continue
-
-            # Category filtering (best-effort; field may not be present)
-            category = self._infer_category(market)
-            if self.config.market_categories and category not in self.config.market_categories:
-                self.logger.debug(
-                    "Skipping %s: category '%s' not in %s",
-                    product_id, category, self.config.market_categories,
+        all_markets: list[dict[str, Any]] = []
+        for series in series_to_scan:
+            try:
+                markets, _ = self.kalshi.get_markets(
+                    series_ticker=series, status="open", limit=20,
                 )
-                continue
+                for m in markets:
+                    m["_series"] = series
+                    m["_category"] = self._series_to_category(series)
+                    # Parse dollar prices
+                    m["_yes_bid"] = _parse_dollars(m.get("yes_bid_dollars"))
+                    m["_yes_ask"] = _parse_dollars(m.get("yes_ask_dollars"))
+                    m["_no_bid"] = _parse_dollars(m.get("no_bid_dollars"))
+                    m["_no_ask"] = _parse_dollars(m.get("no_ask_dollars"))
+                    m["_last"] = _parse_dollars(m.get("last_price_dollars"))
+                    m["_volume"] = _parse_dollars(m.get("volume_fp"))
+                    m["_mid"] = self._mid_price(m)
+                    # Only include markets with some price data
+                    if m["_yes_ask"] > 0.01 or m["_yes_bid"] > 0 or m["_volume"] > 0:
+                        all_markets.append(m)
+                time.sleep(0.3)  # Rate limit
+            except Exception as exc:
+                self.logger.debug("Failed to fetch series %s: %s", series, exc)
 
-            filtered.append(market)
+        # Sort by volume (most active first)
+        all_markets.sort(key=lambda m: m["_volume"], reverse=True)
 
         self.logger.info(
-            "Discovered %d prediction markets (%d after filtering).",
-            len(raw_markets), len(filtered),
+            "Discovered %d active prediction markets from %d series.",
+            len(all_markets), len(series_to_scan),
         )
-        return filtered
+        return all_markets
 
     @staticmethod
-    def _infer_category(market: dict[str, Any]) -> str:
-        """Best-effort category inference from product metadata."""
-        product_id: str = market.get("product_id", "").upper()
-        base: str = market.get("base_currency_id", "").upper()
-
-        if any(tok in product_id or tok in base for tok in ("BTC", "ETH", "SOL", "CRYPTO")):
-            return "crypto"
-        if any(tok in product_id or tok in base for tok in ("CPI", "GDP", "FOMC", "NFP", "ECON")):
-            return "economics"
-        if any(tok in product_id or tok in base for tok in ("ELEC", "PRES", "GOV", "VOTE")):
-            return "politics"
-
+    def _series_to_category(series: str) -> str:
+        for cat, series_list in SERIES_BY_CATEGORY.items():
+            if series in series_list:
+                return cat
         return "other"
 
+    @staticmethod
+    def _mid_price(m: dict[str, Any]) -> float:
+        bid = m["_yes_bid"]
+        ask = m["_yes_ask"]
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2
+        return ask or bid or m["_last"]
+
     # ------------------------------------------------------------------
-    # Position management helpers
+    # Position management
     # ------------------------------------------------------------------
 
     def _get_prediction_positions(self, state: PortfolioState) -> dict[str, Any]:
-        """Return all positions with asset_type='prediction' and our strategy tag."""
         return {
             symbol: pos
             for symbol, pos in state.positions.items()
@@ -220,62 +214,37 @@ class CoinbasePredictionStrategy:
             return
 
         for symbol, position in list(positions.items()):
-            product_id = position.meta.get("product_id", "")
-            if not product_id:
+            ticker = position.meta.get("ticker", "")
+            if not ticker:
                 continue
 
             try:
-                # Re-fetch market data to check status
-                markets = self.coinbase_client.get_prediction_markets()
-                market_data = next(
-                    (m for m in markets if m.get("product_id") == product_id), None,
-                )
+                market = self.kalshi.get_market(ticker)
+                status = market.get("status", "").lower()
 
-                if market_data is None:
-                    # Product disappeared -- treat as expired/delisted
-                    self.logger.warning(
-                        "Product %s no longer found; closing position %s as expired.",
-                        product_id, symbol,
-                    )
-                    close_price = 0.0
-                elif market_data.get("status", "").lower() in ("resolved", "settled", "expired"):
-                    # Determine settlement price
-                    outcome = market_data.get("outcome", "").upper()
-                    side = position.meta.get("side", "YES")
-                    if outcome == side:
+                if status in ("settled", "finalized", "closed"):
+                    result_val = market.get("result", "").lower()
+                    side = position.meta.get("side", "yes")
+                    if result_val == side:
                         close_price = 1.0
-                    elif outcome:
+                    elif result_val:
                         close_price = 0.0
                     else:
                         close_price = position.current_price
+
                     self.logger.info(
-                        "Product %s resolved: outcome=%s side=%s close_price=%.2f",
-                        product_id, outcome, side, close_price,
-                    )
-                else:
-                    continue  # Still active
-
-                # Execute close via CoinbaseBroker if available
-                if self.coinbase_broker is not None:
-                    side = position.meta.get("side", "YES")
-                    self.coinbase_broker.place_prediction_sell(
-                        product_id=product_id,
-                        side=side,
-                        size=int(position.quantity),
+                        "Market %s resolved: result=%s side=%s close_price=%.2f",
+                        ticker, result_val, side, close_price,
                     )
 
-                broker.close_position(
-                    state,
-                    symbol=symbol,
-                    price=close_price,
-                    reason=f"resolved:{market_data.get('outcome', 'expired') if market_data else 'delisted'}",
-                )
-                result["resolved_closed"].append(symbol)
+                    broker.close_position(
+                        state, symbol=symbol, price=close_price,
+                        reason=f"resolved:{result_val or 'expired'}",
+                    )
+                    result["resolved_closed"].append(symbol)
 
             except Exception as exc:
-                self.logger.warning(
-                    "Failed to check resolution for %s (%s): %s", symbol, product_id, exc,
-                )
+                self.logger.warning("Failed to check resolution for %s: %s", ticker, exc)
 
     def _manage_existing_positions(
         self,
@@ -283,54 +252,44 @@ class CoinbasePredictionStrategy:
         broker: PaperBroker,
         result: dict[str, Any],
     ) -> None:
-        """Apply take-profit and stop-loss rules to existing prediction positions."""
+        """Apply take-profit and stop-loss rules to existing positions."""
         positions = self._get_prediction_positions(state)
         if not positions:
             return
 
         for symbol, position in list(positions.items()):
-            product_id = position.meta.get("product_id", "")
-            if not product_id:
+            ticker = position.meta.get("ticker", "")
+            if not ticker:
                 continue
 
             try:
-                current_price = self._get_current_price(product_id)
-                if current_price is None or current_price <= 0:
-                    self.logger.debug("No price available for %s; skipping management.", product_id)
+                market = self.kalshi.get_market(ticker)
+                yes_bid = _parse_dollars(market.get("yes_bid_dollars"))
+                yes_ask = _parse_dollars(market.get("yes_ask_dollars"))
+                current_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else (yes_bid or yes_ask)
+
+                if current_price <= 0:
                     continue
 
-                # Update tracked price
                 position.current_price = current_price
                 state.last_prices[symbol] = current_price
 
-                side = position.meta.get("side", "YES")
+                side = position.meta.get("side", "yes")
                 entry_price = position.entry_price
 
                 # Take profit
                 if self._should_take_profit(side, entry_price, current_price):
-                    self._close_prediction_position(
-                        state, broker, symbol, position, current_price, "take_profit", result,
-                    )
-                    self.logger.info(
-                        "Take profit %s: side=%s entry=%.4f current=%.4f",
-                        symbol, side, entry_price, current_price,
-                    )
+                    self._close_position(state, broker, symbol, position, current_price, "take_profit", result)
                     continue
 
                 # Stop loss
                 if self._should_stop_loss(side, entry_price, current_price):
-                    self._close_prediction_position(
-                        state, broker, symbol, position, current_price, "stop_loss", result,
-                    )
-                    self.logger.info(
-                        "Stop loss %s: side=%s entry=%.4f current=%.4f",
-                        symbol, side, entry_price, current_price,
-                    )
+                    self._close_position(state, broker, symbol, position, current_price, "stop_loss", result)
 
             except Exception as exc:
                 self.logger.warning("Failed to manage position %s: %s", symbol, exc)
 
-    def _close_prediction_position(
+    def _close_position(
         self,
         state: PortfolioState,
         broker: PaperBroker,
@@ -340,50 +299,43 @@ class CoinbasePredictionStrategy:
         reason: str,
         result: dict[str, Any],
     ) -> None:
-        """Close a prediction position through both live and paper brokers."""
-        product_id = position.meta.get("product_id", "")
-        side = position.meta.get("side", "YES")
+        """Close a prediction position (live on Kalshi + paper bookkeeping)."""
+        ticker = position.meta.get("ticker", "")
+        side = position.meta.get("side", "yes")
 
-        if self.coinbase_broker is not None and product_id:
-            self.coinbase_broker.place_prediction_sell(
-                product_id=product_id,
-                side=side,
-                size=int(position.quantity),
-            )
+        # Sell on Kalshi if we can trade
+        if self.kalshi.can_trade and ticker:
+            try:
+                self.kalshi.place_order(
+                    ticker=ticker,
+                    side=side,
+                    action="sell",
+                    count=int(position.quantity),
+                )
+            except Exception as exc:
+                self.logger.warning("Kalshi sell failed for %s: %s", ticker, exc)
 
         closed = broker.close_position(state, symbol=symbol, price=price, reason=reason)
         if closed is not None:
             result["sells"].append(symbol)
+            self.logger.info(
+                "%s %s: side=%s entry=%.4f exit=%.4f",
+                reason, symbol, side, position.entry_price, price,
+            )
 
     def _should_take_profit(self, side: str, entry: float, current: float) -> bool:
-        """Check whether the position should be closed for profit.
-
-        For YES positions bought cheaply: take profit when price rises above
-        the take_profit_threshold.
-        For NO positions (entry is the NO price): take profit when the
-        equivalent YES price drops below the take_profit_threshold (i.e.
-        the NO price rises above it).
-        """
         threshold = self.config.take_profit_threshold
-        if side == "YES":
+        if side == "yes":
             return entry < threshold and current >= threshold
         else:
-            # NO side: entry is the NO price (1 - YES price at open).
-            # Current is the YES price.  NO value = 1 - current.
             no_current = 1.0 - current
             return entry < threshold and no_current >= threshold
 
     def _should_stop_loss(self, side: str, entry: float, current: float) -> bool:
-        """Check whether the position should be stopped out.
-
-        A move of ``stop_loss_pct`` against entry triggers the stop.
-        """
         max_loss = self.config.stop_loss_pct
-        if side == "YES":
-            # YES loses value when current drops below entry
+        if side == "yes":
             return (entry - current) >= max_loss
         else:
-            # NO loses value when YES rises (NO value = 1 - current)
             no_current = 1.0 - current
             return (entry - no_current) >= max_loss
 
@@ -401,13 +353,9 @@ class CoinbasePredictionStrategy:
         fear_greed_value: int | None,
         result: dict[str, Any],
     ) -> None:
-        """Scan discovered markets for new entry signals."""
         existing_count = len(self._get_prediction_positions(state))
         if existing_count >= self.config.max_positions:
-            self.logger.info(
-                "At max prediction positions (%d/%d). Skipping new entries.",
-                existing_count, self.config.max_positions,
-            )
+            self.logger.info("At max prediction positions (%d/%d).", existing_count, self.config.max_positions)
             return
 
         slots_available = self.config.max_positions - existing_count
@@ -417,73 +365,71 @@ class CoinbasePredictionStrategy:
             if slots_available <= 0:
                 break
 
-            product_id: str = market.get("product_id", "")
-            if not product_id:
+            ticker = market.get("ticker", "")
+            if not ticker:
                 continue
 
-            # Skip if already holding this product (either side)
-            yes_symbol = f"KX:{product_id}:YES"
-            no_symbol = f"KX:{product_id}:NO"
+            # Skip if already holding
+            yes_symbol = f"KX:{ticker}:yes"
+            no_symbol = f"KX:{ticker}:no"
             if yes_symbol in state.positions or no_symbol in state.positions:
                 continue
 
-            # Get current YES price
-            yes_price = self._extract_price(market)
-            if yes_price is None or yes_price <= 0 or yes_price >= 1.0:
-                self.logger.debug("Skipping %s: invalid price %.4f", product_id, yes_price or 0)
+            mid = market["_mid"]
+            if mid <= 0 or mid >= 1.0:
                 continue
 
             # Evaluate signal
-            signal = self._evaluate_signal(market, yes_price, fear_greed_value)
+            signal = self._evaluate_signal(market, mid, fear_greed_value)
             if signal is None:
                 continue
 
             side, price = signal
 
-            # Position sizing — use prediction allocation of total equity
+            # Position sizing
             prediction_budget = equity * self.config.capital_allocation_pct
-            # Subtract value of existing prediction positions
-            existing_prediction_value = sum(
+            existing_value = sum(
                 pos.market_value for pos in state.positions.values()
                 if pos.strategy == "coinbase_predictions"
             )
-            remaining_budget = max(0.0, prediction_budget - existing_prediction_value)
-            # Size each position as a fraction of remaining budget
-            per_position = remaining_budget / max(1, slots_available)
+            remaining = max(0.0, prediction_budget - existing_value)
+            per_position = remaining / max(1, slots_available)
             notional = min(per_position, state.cash * 0.95)
             notional = max(notional, 0.0)
 
             if notional < self.config.min_trade_usd:
-                self.logger.info(
-                    "Insufficient funds for prediction entry on %s (notional=$%.2f, min=$%.2f).",
-                    product_id, notional, self.config.min_trade_usd,
-                )
+                self.logger.info("Insufficient funds for %s (notional=$%.2f).", ticker, notional)
                 break
 
-            # Determine quantity (prediction contracts are integer-quantity)
             quantity = int(notional / price) if price > 0 else 0
             if quantity <= 0:
-                self.logger.info("Position size rounds to zero for %s at price %.4f.", product_id, price)
                 continue
 
             actual_notional = quantity * price
-            symbol = f"KX:{product_id}:{side}"
+            symbol = f"KX:{ticker}:{side}"
 
-            # Execute on Coinbase (live)
-            if self.coinbase_broker is not None:
-                order = self.coinbase_broker.place_prediction_buy(
-                    product_id=product_id,
-                    side=side,
-                    price=price,
-                    size=quantity,
-                )
-                if order is None:
-                    self.logger.warning(
-                        "Live prediction buy failed for %s side=%s; skipping.", product_id, side,
+            # Execute on Kalshi (live)
+            if self.kalshi.can_trade:
+                try:
+                    yes_price_cents = int(price * 100) if side == "yes" else None
+                    order = self.kalshi.place_order(
+                        ticker=ticker,
+                        side=side,
+                        action="buy",
+                        count=quantity,
+                        yes_price=yes_price_cents,
                     )
+                    self.logger.info("Kalshi order placed: %s", order)
+                except Exception as exc:
+                    self.logger.warning("Kalshi buy failed for %s: %s", ticker, exc)
                     continue
+            else:
+                self.logger.info(
+                    "Paper-only: would buy %s %s x%d @ $%.2f (no Kalshi credentials)",
+                    side, ticker, quantity, price,
+                )
 
-            # Bookkeep in PaperBroker
+            # Bookkeep
             position = broker.open_position(
                 state,
                 symbol=symbol,
@@ -493,11 +439,13 @@ class CoinbasePredictionStrategy:
                 notional=actual_notional,
                 opened_at=now,
                 meta={
-                    "product_id": product_id,
+                    "ticker": ticker,
                     "side": side,
                     "entry_price": price,
-                    "category": self._infer_category(market),
+                    "category": market.get("_category", "other"),
                     "fear_greed": fear_greed_value,
+                    "title": market.get("title", ""),
+                    "subtitle": market.get("subtitle", ""),
                 },
             )
 
@@ -505,81 +453,49 @@ class CoinbasePredictionStrategy:
                 result["buys"].append(symbol)
                 slots_available -= 1
                 self.logger.info(
-                    "Prediction entry: %s side=%s price=%.4f qty=%d notional=$%.2f",
+                    "Prediction entry: %s side=%s price=$%.2f qty=%d notional=$%.2f | %s",
                     symbol, side, price, quantity, actual_notional,
+                    market.get("subtitle", market.get("title", "")),
                 )
 
     def _evaluate_signal(
         self,
         market: dict[str, Any],
-        yes_price: float,
+        mid: float,
         fear_greed_value: int | None,
     ) -> tuple[str, float] | None:
         """Evaluate whether a market has a buy signal.
 
-        Returns:
-            ``(side, price)`` tuple if signal found, ``None`` otherwise.
+        Returns (side, price) if signal found, None otherwise.
         """
-        no_price = max(0.0, 1.0 - yes_price)
-        category = self._infer_category(market)
+        category = market.get("_category", "other")
+        yes_ask = market["_yes_ask"]
+        no_ask = market["_no_ask"]
 
-        # Crypto-tagged markets: require Fear & Greed confirmation
+        # Crypto markets: require Fear & Greed confirmation
         if category == "crypto" and fear_greed_value is not None:
-            if yes_price < self.config.buy_yes_threshold:
-                # Cheap YES -- contrarian buy when fear is high
+            if mid < self.config.buy_yes_threshold:
                 if fear_greed_value <= 30:
-                    self.logger.debug(
-                        "Crypto prediction signal: BUY YES %s (price=%.4f, F&G=%d)",
-                        market.get("product_id"), yes_price, fear_greed_value,
-                    )
-                    return ("YES", yes_price)
-            elif yes_price > self.config.buy_no_threshold:
-                # Expensive YES -- contrarian NO when greed is high
+                    return ("yes", yes_ask if yes_ask > 0 else mid)
+            elif mid > self.config.buy_no_threshold:
                 if fear_greed_value >= 70:
-                    self.logger.debug(
-                        "Crypto prediction signal: BUY NO %s (price=%.4f, F&G=%d)",
-                        market.get("product_id"), yes_price, fear_greed_value,
-                    )
-                    return ("NO", no_price)
+                    return ("no", no_ask if no_ask > 0 else (1.0 - mid))
             return None
 
-        # Non-crypto / no F&G data: pure threshold signals
-        if yes_price < self.config.buy_yes_threshold:
-            return ("YES", yes_price)
-        elif yes_price > self.config.buy_no_threshold:
-            return ("NO", no_price)
+        # Non-crypto: pure threshold signals
+        if mid < self.config.buy_yes_threshold:
+            return ("yes", yes_ask if yes_ask > 0 else mid)
+        elif mid > self.config.buy_no_threshold:
+            return ("no", no_ask if no_ask > 0 else (1.0 - mid))
 
         return None
 
-    # ------------------------------------------------------------------
-    # Pricing helpers
-    # ------------------------------------------------------------------
 
-    def _extract_price(self, market: dict[str, Any]) -> float | None:
-        """Extract the YES price from a market product dict.
-
-        Tries ``price``, ``yes_price``, and ``mid_market_price`` keys.
-        """
-        for key in ("price", "yes_price", "mid_market_price"):
-            raw = market.get(key)
-            if raw is not None:
-                try:
-                    return float(raw)
-                except (ValueError, TypeError):
-                    continue
-        return None
-
-    def _get_current_price(self, product_id: str) -> float | None:
-        """Fetch the current YES price for a single product.
-
-        Falls back to scanning the full market list if no single-product
-        endpoint is available.
-        """
-        try:
-            markets = self.coinbase_client.get_prediction_markets()
-            for market in markets:
-                if market.get("product_id") == product_id:
-                    return self._extract_price(market)
-        except Exception as exc:
-            self.logger.warning("Failed to get price for %s: %s", product_id, exc)
-        return None
+def _parse_dollars(value: Any) -> float:
+    """Parse a dollar-string field like '0.0100' to float."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
