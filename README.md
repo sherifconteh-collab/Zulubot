@@ -117,6 +117,40 @@ The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and la
 
 ---
 
+## Telegram Bot
+
+When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes interactive commands and sends automatic notifications.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Portfolio dashboard (equity, P&L, positions) |
+| `/positions` | List open positions |
+| `/risk` | Risk metrics (drawdown, kill switch state) |
+| `/history` | Recent trade log |
+| `/crypto` | Force a crypto sentiment cycle |
+| `/rotation` | Force an altcoin rotation cycle |
+| `/predict` | Force a Kalshi prediction scan |
+| `/stocks` | Force a stock screen |
+| `/polymarket` | Force a Kalshi prediction scan (alias) |
+| `/backtest [range]` | Run a Freqtrade backtest |
+| `/pause` | Pause trading |
+| `/resume` | Resume trading |
+| `/kill` | Emergency stop (kill switch) |
+| `/config` | Show current configuration |
+| `/ai` | AI cost & budget summary |
+
+### Notifications
+
+- **Trade alerts** are sent after each scheduled cycle when trades are executed or errors occur.
+- **No-signal cycles** (no trades, no errors) are suppressed to reduce spam.
+- **Risk events** (kill switch, daily halt) always surface even when there are no trades.
+- **Interactive commands** always return a completion message (including "no trades executed" when applicable).
+- **Heartbeat** runs on a configurable interval showing equity, positions, strategy status, and last scan dates.
+
+---
+
 ## Kalshi Latency Arb — Configuration
 
 | Env Var | Default | Description |
@@ -151,7 +185,7 @@ All strategies optionally use Claude (Haiku + Sonnet) for signal validation. Ena
 |----------|-------|-----------|---------|
 | Stocks | Haiku → Sonnet | 6 h | Validate fundamentals screen |
 | Crypto | Haiku → Sonnet | 6 h | Validate F&G + funding signal |
-| Polymarket | Sonnet | 6 h | Estimate fair probability |
+| Polymarket (legacy) | Sonnet | 6 h | Estimate fair probability |
 | Kalshi predictions | Haiku → Sonnet | 6 h | Estimate fair probability |
 | Latency arb — entry | Haiku only | 10 min | Filter noise from momentum signals |
 | Latency arb — exit | Haiku only | 5 min | Veto premature stop-loss / take-profit exits |
