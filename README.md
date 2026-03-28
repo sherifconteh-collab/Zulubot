@@ -1,108 +1,145 @@
-# Trading Bot
+# ZuluBot — Multi-Strategy Trading Bot
 
-Two modules share the same paper portfolio, persistent state, and risk controls:
+An automated trading system combining value investing, crypto sentiment, altcoin rotation, prediction markets, and latency arbitrage. All modules share the same paper portfolio, persistent state, and risk controls.
 
-- `stocks`: value investing screener for S&P 500 names using Financial Modeling Prep stable endpoints.
-- `crypto`: BTC/ETH sentiment plus Binance funding-rate bot using Alternative.me and Binance futures market data.
+## Strategies
 
-## What It Does
+### 1. Value Investing — Stocks
+Screens S&P 500 constituents weekly:
+- Requires P/E < 20, P/B < 3, debt-to-equity < 0.5, positive FCF
+- Buys top 3 ranked names only when VIX > 25
+- Sells on next weekly review if any fundamental breaches threshold
 
-### Module 1: Value Investing Stocks
+### 2. Crypto Sentiment + Funding
+Trades BTC and ETH on Coinbase:
+- **Buy**: Fear & Greed < 25 AND Binance funding rate < 0
+- **Sell**: Fear & Greed > 75
 
-- Screens S&P 500 constituents.
-- Requires:
-  - P/E ratio below 20
-  - P/B ratio below 3
-  - debt-to-equity below 0.5
-  - positive free-cash-flow signal
-- Ranks qualified names with a composite value score built from P/E, P/B, debt-to-equity, and price-to-free-cash-flow.
-- Buys the top 3 qualified names only when VIX is above 25.
-- Sells held stock positions when any tracked fundamental breaches the threshold on the next weekly review.
-- Self-throttles so the stock screen runs at most once every 7 days unless `--force` is used.
+### 3. Altcoin Rotation
+Rotates capital into the best-performing altcoin vs BTC/ETH ratio:
+- Tracks top 50 altcoins by volume
+- Switches positions when a better ratio opportunity appears
+- Uses 60% of total capital allocation
 
-### Module 2: Crypto Sentiment And Funding
+### 4. Prediction Markets — Kalshi
+Trades binary prediction contracts directly via the Kalshi API:
+- Scans crypto and economics categories
+- **Buy YES** when contract price < 0.30
+- **Buy NO** when contract price > 0.70
+- Optional Fear & Greed confirmation for crypto-tagged markets
+- Market discovery works without credentials; trading requires Kalshi API key
 
-- Trades `BTCUSDT` and `ETHUSDT`.
-- Buy signal:
-  - Fear and Greed index below 25
-  - Binance funding rate below 0
-- Sell signal:
-  - Fear and Greed index above 75
-- The Alternative.me index is Bitcoin-centric, so this bot uses the same market-regime reading for both BTC and ETH and combines it with symbol-specific Binance funding data.
+### 5. Latency Arbitrage — Kalshi (NEW)
+High-frequency strategy that exploits Kalshi contract mispricing:
+- Polls Coinbase BTC-USD / ETH-USD spot prices every ~2 seconds
+- Detects sharp momentum moves (≥ 0.30% in 30 seconds)
+- When contract odds are stale relative to the price move, buys the correct side
+- Uses fractional Kelly criterion (25% of full Kelly) for position sizing
+- Manages exits via take-profit (20%) and stop-loss (15%)
+- Paper mode by default; goes live when `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY` are set and `LATENCY_ARB_ENABLED=true`
 
 ### Shared Risk Controls
-
-- 2% position size per new trade
+- Configurable position size per trade (default 2% of equity)
 - 5% daily drawdown halt on new entries
-- 15% peak-to-equity kill switch
-- `PAPER_MODE=true` by default
-- All runs, signals, order actions, and risk events are logged
+- 15% peak-to-equity kill switch (closes all positions)
+- `PAPER_MODE=true` by default — no real money until explicitly enabled
+- All signals, orders, and risk events logged and Telegram-notified
+
+---
 
 ## Setup
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
-
-```powershell
+```bash
 python -m pip install -r requirements.txt
 ```
 
-3. Copy `.env.example` to `.env` and set `FMP_API_KEY`.
+Copy `.env.example` to `.env` and configure credentials:
+
+```env
+# Required for live Coinbase trading
+COINBASE_API_KEY=your_key
+COINBASE_API_SECRET=your_secret
+
+# Required for Kalshi prediction markets + latency arb
+KALSHI_KEY_ID=your_kalshi_key_id
+KALSHI_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+
+# Telegram notifications (optional)
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+
+# Risk and mode
+PAPER_MODE=true
+INITIAL_CASH=10000
+
+# Enable latency arb
+LATENCY_ARB_ENABLED=true
+PREDICTION_ENABLED=true
+```
+
+### Security Notes
+- **Never commit `.env`** — it is gitignored
+- Private keys are read from env vars only, never hardcoded
+- `PAPER_MODE=true` is the safe default; real execution requires explicit opt-in
+- Kalshi RSA private key should use `\n` for newlines when stored in `.env`
+- All API credentials are stored as environment variables, not in config files
+- The bot never logs or exposes credentials
+
+---
 
 ## Usage
 
-Run everything:
-
-```powershell
+Run all strategies once:
+```bash
 python -m trading_bot all
 ```
 
-Run only the weekly stock screen:
-
-```powershell
-python -m trading_bot stocks
+Run individual modules:
+```bash
+python -m trading_bot stocks          # value stock screener
+python -m trading_bot crypto          # BTC/ETH sentiment
+python -m trading_bot rotation        # altcoin rotation
+python -m trading_bot predictions     # Kalshi prediction markets
+python -m trading_bot latency_arb     # single latency arb scan
 ```
 
-Force the stock screen immediately:
-
-```powershell
-python -m trading_bot stocks --force
-```
-
-Run only the crypto module:
-
-```powershell
-python -m trading_bot crypto
-```
-
-Show current portfolio and risk state:
-
-```powershell
+Show portfolio status (including Kalshi positions):
+```bash
 python -m trading_bot status
 ```
 
+Run as a continuous daemon (recommended):
+```bash
+python -m trading_bot scheduler
+```
+
+The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and latency arb every 2 seconds when enabled.
+
+---
+
+## Kalshi Latency Arb — Configuration
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `LATENCY_ARB_ENABLED` | `false` | Enable the strategy |
+| `LATENCY_ARB_MOMENTUM_THRESHOLD` | `0.30` | Min % spot move to trigger signal |
+| `LATENCY_ARB_MIN_EDGE` | `0.05` | Min probability edge to enter |
+| `LATENCY_ARB_KELLY_FRACTION` | `0.25` | Fraction of full Kelly to bet |
+| `LATENCY_ARB_MAX_POSITION_PCT` | `0.08` | Max 8% of equity per trade |
+| `LATENCY_ARB_MAX_OPEN_CONTRACTS` | `4` | Max simultaneous open positions |
+| `LATENCY_ARB_SCAN_INTERVAL` | `2.0` | Seconds between scans |
+| `LATENCY_ARB_TAKE_PROFIT` | `0.20` | Exit at +20% price gain |
+| `LATENCY_ARB_STOP_LOSS` | `0.15` | Exit at -15% price loss |
+
+---
+
 ## Files
 
-- Default state path: `%LOCALAPPDATA%\TradingBot\data\state.json`
-- Default log path: `%LOCALAPPDATA%\TradingBot\logs\trading_bot.log`
-- Override storage with `BOT_STORAGE_DIR`, `BOT_DATA_DIR`, or `BOT_LOG_DIR`
-
-## Scheduling
-
-The simplest production-like setup on Windows is to schedule:
-
-- `python -m trading_bot all`
-
-to run hourly in Task Scheduler. The crypto module will evaluate every run, while the stock module will only execute once every 7 days unless forced.
+- State: `%LOCALAPPDATA%\TradingBot\data\state.json` (or `BOT_STORAGE_DIR`)
+- Logs: `%LOCALAPPDATA%\TradingBot\logs\` (or `BOT_LOG_DIR`)
 
 ## Testing
 
-```powershell
-python -m unittest discover -s tests -v
+```bash
+python -m pytest tests/ -v
 ```
-
-## Assumptions
-
-- The stock ranking rule was not specified, so the bot uses a composite value rank across P/E, P/B, debt-to-equity, and price-to-free-cash-flow.
-- Positive free cash flow is inferred from FMP free-cash-flow fields when present, otherwise from a positive price-to-free-cash-flow ratio.
-- Live order routing is intentionally not implemented. Setting `PAPER_MODE=false` will raise an error instead of silently trading live.

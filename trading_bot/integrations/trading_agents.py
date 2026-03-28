@@ -2,11 +2,18 @@
 
 Wraps the TradingAgents package from TauricResearch/TradingAgents with:
   1. Two-tier model selection (Haiku pre-screen → Sonnet deep analysis)
-  2. In-memory cache with configurable TTL (default 4 hours)
-  3. Per-run and per-month hard budget caps
+  2. In-memory cache with configurable TTL (default 6 hours)
+  3. Per-run ($0.10) and per-month ($10) hard budget caps
   4. Three confirmation modes: log_only, boost, require
 
-Falls back gracefully if the tradingagents package is not installed.
+Evaluation methods and their cost profiles:
+  evaluate_stock()         — Haiku→Sonnet, 6h cache, ~$0.03/call
+  evaluate_crypto()        — Haiku→Sonnet, 6h cache, ~$0.03/call
+  evaluate_kalshi_market() — Haiku→Sonnet, 6h cache, ~$0.03/call  (prediction markets)
+  evaluate_arb_signal()    — Haiku-only,   10m cache, ~$0.002/call (latency arb)
+  detect_market_regime()   — Haiku-only,   1h cache,  ~$0.002/call (regime filter)
+
+Falls back gracefully if the tradingagents package or anthropic SDK is not installed.
 """
 
 from __future__ import annotations
@@ -83,11 +90,25 @@ class TradingAgentsService:
         if not config.enabled:
             return
 
+        # Validate API key format before attempting connection
+        if not config.api_key:
+            self.logger.warning("ANTHROPIC_API_KEY not set. AI analysis disabled.")
+            return
+        if not config.api_key.startswith("sk-ant-"):
+            self.logger.warning(
+                "ANTHROPIC_API_KEY looks invalid (expected 'sk-ant-...'). "
+                "AI analysis may fail. Key prefix: %s***",
+                config.api_key[:8],
+            )
+
         # Try to import Anthropic SDK
         try:
             import anthropic
             self._anthropic_client = anthropic.Anthropic(api_key=config.api_key)
-            self.logger.info("Anthropic SDK loaded. Models: quick=%s deep=%s", config.quick_model, config.deep_model)
+            self.logger.info(
+                "Anthropic SDK loaded. Models: quick=%s deep=%s budget=$%.2f/mo",
+                config.quick_model, config.deep_model, config.max_cost_per_month,
+            )
         except ImportError:
             self.logger.warning("anthropic package not installed. AI analysis disabled.")
             return
@@ -229,6 +250,141 @@ class TradingAgentsService:
             self._set_cache(cache_key, verdict)
         return verdict
 
+    def evaluate_kalshi_market(
+        self,
+        ticker: str,
+        title: str,
+        mid_price: float,
+        category: str,
+        fear_greed_value: int | None = None,
+    ) -> AgentVerdict | None:
+        """Estimate fair probability for a Kalshi binary contract.
+
+        Identical pipeline to evaluate_polymarket() but tailored for Kalshi
+        market metadata. Uses two-tier analysis: Haiku pre-screen then Sonnet.
+        Results cached for config.cache_ttl_hours.
+        """
+        if not self.is_available:
+            return None
+
+        cache_key = f"kalshi:{ticker}"
+        cached = self._check_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        sentiment_line = ""
+        if fear_greed_value is not None:
+            sentiment_line = f"  Crypto Fear & Greed Index: {fear_greed_value} (0=extreme fear, 100=extreme greed)\n"
+
+        prompt = (
+            f"You are a prediction market analyst. Estimate the fair probability for this Kalshi contract.\n\n"
+            f"Contract: {title}\n"
+            f"Ticker: {ticker}\n"
+            f"Category: {category}\n"
+            f"Current YES mid-price: {mid_price:.4f} (market-implied probability)\n"
+            f"{sentiment_line}\n"
+            f"Assess whether the market price accurately reflects the true probability. "
+            f"Consider current news, macro conditions, and base rates.\n\n"
+            f"Respond with JSON only: {{\"action\": \"buy\"|\"sell\"|\"hold\"|\"skip\", "
+            f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\", "
+            f"\"estimated_probability\": 0.0-1.0}}\n\n"
+            f"estimated_probability is your TRUE probability assessment, independent of market price."
+        )
+
+        verdict = self._two_tier_analysis(cache_key, prompt, expect_probability=True)
+        return verdict
+
+    def evaluate_arb_signal(
+        self,
+        asset: str,
+        momentum_pct: float,
+        contract_title: str,
+        contract_price: float,
+        edge: float,
+    ) -> AgentVerdict | None:
+        """Quick Haiku-only validation of a latency arb opportunity.
+
+        Used to filter low-quality momentum signals before executing.
+        Haiku-only (never escalates to Sonnet) — keeps cost ~$0.002/call.
+        Cache TTL is 10 minutes (short, momentum is time-sensitive).
+        """
+        if not self.is_available:
+            return None
+
+        direction = "UP" if momentum_pct > 0 else "DOWN"
+        cache_key = f"arb:{asset}:{direction}"
+        cached = self._check_cache_with_ttl(cache_key, ttl_seconds=600)  # 10-min TTL
+        if cached is not None:
+            return cached
+
+        haiku_cost = self._estimate_cost(self.config.quick_model)
+        if not self._check_budget(haiku_cost):
+            return None
+
+        prompt = (
+            f"Quick validation: Is this a genuine arbitrage signal or likely noise?\n\n"
+            f"Asset: {asset}\n"
+            f"Recent move: {momentum_pct:+.3f}% in 30 seconds\n"
+            f"Kalshi contract: \"{contract_title}\"\n"
+            f"Contract current price: {contract_price:.3f}\n"
+            f"Calculated edge: {edge:.3f} ({edge*100:.1f}%)\n\n"
+            f"Is this momentum move significant enough to represent a real pricing lag? "
+            f"Reply JSON only: {{\"action\": \"buy\"|\"skip\", "
+            f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
+        )
+
+        verdict = self._call_model(self.config.quick_model, prompt)
+        if verdict is not None:
+            self._set_cache_with_ttl(cache_key, verdict, ttl_seconds=600)
+        return verdict
+
+    def detect_market_regime(
+        self,
+        btc_price: float,
+        eth_price: float,
+        fear_greed_value: int | None,
+        btc_momentum_24h_pct: float | None = None,
+    ) -> AgentVerdict | None:
+        """Classify the current market regime for risk adjustment.
+
+        Returns action = "bullish" | "bearish" | "sideways" | "volatile".
+        Used by latency arb to tighten/loosen momentum thresholds.
+        Haiku-only. Cache TTL 1 hour.
+
+        Callers should treat action field as regime label (not a trade signal).
+        """
+        if not self.is_available:
+            return None
+
+        cache_key = "market_regime"
+        cached = self._check_cache_with_ttl(cache_key, ttl_seconds=3600)  # 1-hour TTL
+        if cached is not None:
+            return cached
+
+        haiku_cost = self._estimate_cost(self.config.quick_model)
+        if not self._check_budget(haiku_cost):
+            return None
+
+        fg_line = f"  Fear & Greed Index: {fear_greed_value}\n" if fear_greed_value is not None else ""
+        mom_line = f"  BTC 24h change: {btc_momentum_24h_pct:+.2f}%\n" if btc_momentum_24h_pct is not None else ""
+
+        prompt = (
+            f"Classify the current crypto market regime in one word.\n\n"
+            f"Market data:\n"
+            f"  BTC price: ${btc_price:,.0f}\n"
+            f"  ETH price: ${eth_price:,.0f}\n"
+            f"{fg_line}"
+            f"{mom_line}\n"
+            f"Choose exactly one regime: bullish, bearish, sideways, or volatile.\n"
+            f"Reply JSON only: {{\"action\": \"bullish\"|\"bearish\"|\"sideways\"|\"volatile\", "
+            f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
+        )
+
+        verdict = self._call_model(self.config.quick_model, prompt)
+        if verdict is not None:
+            self._set_cache_with_ttl(cache_key, verdict, ttl_seconds=3600)
+        return verdict
+
     def get_monthly_cost(self) -> float:
         """Get current month's total AI spend."""
         self._rotate_month()
@@ -241,7 +397,12 @@ class TradingAgentsService:
 
     # ── Two-tier analysis pipeline ─────────────────────────────────
 
-    def _two_tier_analysis(self, cache_key: str, prompt: str) -> AgentVerdict | None:
+    def _two_tier_analysis(
+        self,
+        cache_key: str,
+        prompt: str,
+        expect_probability: bool = False,
+    ) -> AgentVerdict | None:
         """Haiku pre-screen → Sonnet deep analysis pipeline."""
         # Tier 1: Haiku quick screen
         haiku_cost = self._estimate_cost(self.config.quick_model)
@@ -273,7 +434,7 @@ class TradingAgentsService:
                 model_used=self.config.quick_model,
             )
 
-        verdict = self._call_model(self.config.deep_model, prompt)
+        verdict = self._call_model(self.config.deep_model, prompt, expect_probability=expect_probability)
         if verdict is not None:
             self._set_cache(cache_key, verdict)
         return verdict
@@ -378,12 +539,23 @@ class TradingAgentsService:
     # ── Cache management ───────────────────────────────────────────
 
     def _check_cache(self, key: str) -> AgentVerdict | None:
+        """Check cache using the configured default TTL."""
+        return self._check_cache_with_ttl(key)
+
+    def _check_cache_with_ttl(self, key: str, ttl_seconds: float | None = None) -> AgentVerdict | None:
+        """Check cache, returning None if the entry exceeds ttl_seconds since storage."""
         entry = self._cache.get(key)
         if entry is None:
             return None
         if time.time() > entry.expires_at:
             del self._cache[key]
             return None
+        # If a specific TTL override is requested, check if entry is still fresh enough
+        if ttl_seconds is not None:
+            stored_at = entry.expires_at - (self.config.cache_ttl_hours * 3600)
+            age = time.time() - stored_at
+            if age > ttl_seconds:
+                return None
         self.logger.debug("Cache hit for %s", key)
         return AgentVerdict(
             action=entry.verdict.action,
@@ -396,7 +568,9 @@ class TradingAgentsService:
         )
 
     def _set_cache(self, key: str, verdict: AgentVerdict) -> None:
-        ttl_seconds = self.config.cache_ttl_hours * 3600
+        self._set_cache_with_ttl(key, verdict, ttl_seconds=self.config.cache_ttl_hours * 3600)
+
+    def _set_cache_with_ttl(self, key: str, verdict: AgentVerdict, ttl_seconds: float) -> None:
         self._cache[key] = _CacheEntry(
             verdict=verdict,
             expires_at=time.time() + ttl_seconds,

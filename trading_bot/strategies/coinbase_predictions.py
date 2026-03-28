@@ -29,6 +29,12 @@ from trading_bot.config import PredictionConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 
+try:
+    from trading_bot.integrations.trading_agents import TradingAgentsService, apply_ai_confirmation
+except ImportError:
+    TradingAgentsService = None  # type: ignore[assignment,misc]
+    apply_ai_confirmation = None  # type: ignore[assignment]
+
 
 # Series tickers to scan on Kalshi (crypto + economics focus)
 CRYPTO_SERIES = ["KXBTC", "KXETH", "KXSOL", "KXDOGE", "KXXRP"]
@@ -397,6 +403,27 @@ class CoinbasePredictionStrategy:
             notional = min(per_position, state.cash * 0.95)
             notional = max(notional, 0.0)
 
+            # AI probability estimation — adjusts position size via boost/require mode
+            ai_meta: dict[str, Any] = {}
+            if self.ai_service is not None and apply_ai_confirmation is not None:
+                try:
+                    verdict = self.ai_service.evaluate_kalshi_market(
+                        ticker=ticker,
+                        title=market.get("title", market.get("subtitle", "")),
+                        mid_price=mid,
+                        category=market.get("_category", "other"),
+                        fear_greed_value=fear_greed_value,
+                    )
+                    if verdict is not None:
+                        notional, ai_meta = apply_ai_confirmation(
+                            verdict=verdict,
+                            confirmation_mode="boost",
+                            base_notional=notional,
+                            logger=self.logger,
+                        )
+                except Exception as exc:
+                    self.logger.debug("AI prediction evaluation failed (non-blocking): %s", exc)
+
             if notional < self.config.min_trade_usd:
                 self.logger.info("Insufficient funds for %s (notional=$%.2f).", ticker, notional)
                 break
@@ -446,6 +473,7 @@ class CoinbasePredictionStrategy:
                     "fear_greed": fear_greed_value,
                     "title": market.get("title", ""),
                     "subtitle": market.get("subtitle", ""),
+                    **ai_meta,
                 },
             )
 
