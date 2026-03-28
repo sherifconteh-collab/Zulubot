@@ -23,13 +23,9 @@ from trading_bot.config import AltcoinRotationConfig
 from trading_bot.models import PortfolioState
 
 try:
-    from trading_bot.integrations.trading_agents import (
-        TradingAgentsService,
-        apply_ai_confirmation,
-    )
+    from trading_bot.integrations.trading_agents import TradingAgentsService
 except ImportError:
     TradingAgentsService = None  # type: ignore[assignment,misc]
-    apply_ai_confirmation = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +79,8 @@ class AltcoinRotationStrategy:
         self.coinbase_broker = coinbase_broker
         self.logger = logger.getChild("altcoin_rotation")
         self.ai_service = ai_service
-        self.confirmation_mode = confirmation_mode
+        # Normalize to lowercase so "Require"/"REQUIRE" work identically to "require"
+        self.confirmation_mode = confirmation_mode.strip().lower()
 
     # ------------------------------------------------------------------
     # Public entry point

@@ -69,8 +69,11 @@ class TradingAgentsService:
       1. Only called when quant signals fire (not every cycle)
       2. Haiku pre-screen (~$0.001) filters obvious no-ops
       3. Sonnet deep analysis (~$0.10-0.50) only if Haiku says "investigate"
-      4. 4-hour cache prevents re-analyzing the same asset
-      5. Hard caps: $0.50/run, $20/month
+      4. Cache (configurable via ``TradingAgentsConfig.cache_ttl_hours``)
+         prevents re-analyzing the same asset
+      5. Hard caps configured via ``TradingAgentsConfig.max_cost_per_run``
+         and ``TradingAgentsConfig.max_cost_per_month``
+         (see TRADING_AGENTS_MAX_COST_PER_RUN / TRADING_AGENTS_MAX_COST_PER_MONTH)
     """
 
     # Anthropic pricing per 1M tokens (verify at https://anthropic.com/pricing before updating)
@@ -348,6 +351,7 @@ class TradingAgentsService:
         btc_price: float,
         eth_price: float,
         fear_greed_value: int | None,
+        btc_momentum_pct: float | None = None,
         btc_momentum_24h_pct: float | None = None,
     ) -> AgentVerdict | None:
         """Classify the current market regime for risk adjustment.
@@ -356,10 +360,23 @@ class TradingAgentsService:
         Used by latency arb to tighten/loosen momentum thresholds.
         Haiku-only. Cache TTL 1 hour.
 
-        Callers should treat action field as regime label (not a trade signal).
+        Args:
+            btc_price: Current BTC spot price.
+            eth_price: Current ETH spot price.
+            fear_greed_value: Optional Fear & Greed index value (0–100).
+            btc_momentum_pct: BTC price change over any recent window as a
+                percentage.  Label the window via ``btc_momentum_24h_pct``
+                when a 24h figure is specifically available.
+            btc_momentum_24h_pct: Deprecated alias for ``btc_momentum_pct``.
+                When both are supplied, ``btc_momentum_pct`` takes precedence.
+
+        Callers should treat the action field as a regime label (not a trade signal).
         """
         if not self.is_available:
             return None
+
+        # Resolve momentum: prefer the explicit btc_momentum_pct arg
+        momentum = btc_momentum_pct if btc_momentum_pct is not None else btc_momentum_24h_pct
 
         cache_key = "market_regime"
         cached = self._check_cache_with_ttl(cache_key, ttl_seconds=3600)  # 1-hour TTL
@@ -371,7 +388,7 @@ class TradingAgentsService:
             return None
 
         fg_line = f"  Fear & Greed Index: {fear_greed_value}\n" if fear_greed_value is not None else ""
-        mom_line = f"  BTC 24h change: {btc_momentum_24h_pct:+.2f}%\n" if btc_momentum_24h_pct is not None else ""
+        mom_line = f"  BTC recent change: {momentum:+.2f}%\n" if momentum is not None else ""
 
         prompt = (
             f"Classify the current crypto market regime in one word.\n\n"
