@@ -2,3 +2,5 @@ python-dotenv>=1.0.1,<2.0.0
 requests>=2.32.0,<3.0.0
 python-telegram-bot>=21.0,<22.0.0
 yfinance>=1.2.0,<2.0.0
+PyJWT[crypto]>=2.8.0,<3.0.0
+cryptography>=42.0.0,<44.0.0

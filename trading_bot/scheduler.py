@@ -178,6 +178,7 @@ class SchedulerService:
         if self._last_predictions_run is None:
             return True
         elapsed = (now - self._last_predictions_run).total_seconds()
+        # Uses same interval as crypto (scheduler config) or prediction config, whichever is set
         return elapsed >= self.config.predictions.check_interval_minutes * 60
 
     def _should_run_polymarket(self, now: datetime) -> bool:
