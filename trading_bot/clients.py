@@ -380,18 +380,46 @@ class CoinbaseClient(BaseHttpClient):
         return prices
 
     def get_prediction_markets(self) -> list[dict[str, Any]]:
-        """Fetch all active Coinbase prediction markets (KX-prefixed products)."""
-        try:
-            payload = self._get_json("api/v3/brokerage/market/products")
-            products = payload.get("products", [])
-            return [
-                p for p in products
-                if p.get("product_id", "").startswith("KX")
-                and p.get("status") == "online"
-            ]
-        except Exception as exc:
-            self.logger.warning("Failed to fetch prediction markets: %s", exc)
-            return []
+        """Fetch all active Coinbase prediction/event markets.
+
+        Tries multiple product types and prefixes since Coinbase event
+        contracts may use 'EVENT' or 'FUTURE' product type, and IDs
+        may start with 'KX', 'KXBTC', or other patterns.
+        """
+        all_markets: list[dict[str, Any]] = []
+        # Try different product types that may contain prediction markets
+        for ptype in ("EVENT", "FUTURE", None):
+            try:
+                params: dict[str, Any] = {}
+                if ptype:
+                    params["product_type"] = ptype
+                payload = self._get_json("api/v3/brokerage/market/products", params)
+                products = payload.get("products", [])
+                for p in products:
+                    pid = p.get("product_id", "")
+                    status = p.get("status", "").lower()
+                    # Match KX-prefix OR any event/prediction-type product
+                    if pid.startswith("KX") or p.get("product_type", "") in ("EVENT", "PREDICTION"):
+                        if status in ("online", "active", ""):
+                            all_markets.append(p)
+            except Exception as exc:
+                self.logger.debug("Prediction market fetch (type=%s) failed: %s", ptype, exc)
+
+        # Deduplicate by product_id
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for m in all_markets:
+            pid = m.get("product_id", "")
+            if pid not in seen:
+                seen.add(pid)
+                unique.append(m)
+
+        self.logger.info(
+            "Prediction market discovery: found %d markets. IDs: %s",
+            len(unique),
+            [m.get("product_id") for m in unique[:10]],
+        )
+        return unique
 
     def get_candles(
         self, binance_symbol: str, granularity: str = "ONE_HOUR", limit: int = 24

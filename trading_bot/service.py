@@ -277,34 +277,34 @@ class TradingBotService:
                 self.logger.warning("Unable to refresh prediction prices: %s", exc)
 
     def _sync_coinbase_balance(self, state: PortfolioState) -> None:
-        """Sync portfolio cash from real Coinbase USD balance."""
+        """Sync portfolio cash and equity from real Coinbase balances."""
         try:
             total_usd, breakdown = self.coinbase_broker.get_total_balance()
             usd_cash = breakdown.get("USD", 0.0) + breakdown.get("USDC", 0.0)
 
-            # Set cash to real Coinbase USD balance
+            # Set cash to real Coinbase USD/USDC balance
             state.cash = usd_cash
 
-            # Calculate real equity from Coinbase
-            equity = usd_cash + sum(
-                pos.quantity * pos.current_price for pos in state.positions.values()
-            )
+            # Use Coinbase total (includes all crypto) as the real equity
+            # This is more accurate than summing positions which may lag
+            real_equity = total_usd if total_usd > 0 else usd_cash
+
             # Reset peak/baseline if they look stale (from old paper-mode state
             # or different initial_cash) to prevent false kill-switch triggers
-            if equity > 0 and (
+            if real_equity > 0 and (
                 state.peak_equity <= 0
                 or state.peak_equity == self.config.initial_cash
-                or state.peak_equity > equity * 5  # peak is impossibly high vs reality
+                or state.peak_equity > real_equity * 5  # peak is impossibly high vs reality
             ):
                 self.logger.info(
                     "Resetting peak equity from $%.2f to real equity $%.2f",
-                    state.peak_equity, equity,
+                    state.peak_equity, real_equity,
                 )
-                state.peak_equity = equity
-                state.daily_baseline_equity = equity
+                state.peak_equity = real_equity
+                state.daily_baseline_equity = real_equity
 
             self.logger.info(
-                "Coinbase balance synced: USD=$%.2f total=$%.2f assets=%s",
+                "Coinbase balance synced: cash=$%.2f total=$%.2f assets=%s",
                 usd_cash, total_usd, {k: f"${v:.2f}" for k, v in breakdown.items()},
             )
         except Exception as exc:

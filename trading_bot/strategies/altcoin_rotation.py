@@ -116,7 +116,7 @@ class AltcoinRotationStrategy:
         )
 
         # 2. Sync holdings from Coinbase (first-run bootstrap or drift check).
-        current_coin = self._sync_holdings(state, rd, tracked)
+        current_coin = self._sync_holdings(state, rd, tracked, broker=broker, now=now)
 
         if current_coin is None:
             # No crypto holdings — try to seed from available USD/USDC cash.
@@ -240,9 +240,12 @@ class AltcoinRotationStrategy:
         state: PortfolioState,
         rd: dict[str, Any],
         prices: dict[str, float],
+        broker: "PaperBroker | None" = None,
+        now: "datetime | None" = None,
     ) -> str | None:
         """Discover what we actually hold on Coinbase and reconcile.
 
+        Creates/updates Position entries so equity reflects real holdings.
         Returns the product_id of the current rotation coin, or ``None``
         if nothing meaningful is held.
         """
@@ -253,7 +256,8 @@ class AltcoinRotationStrategy:
             # Fall back to whatever rotation_data says.
             return rd.get("current_coin")
 
-        # Find the largest non-USD holding by USD value.
+        # Find the largest non-USD holding by USD value,
+        # and sync ALL holdings into state.positions for accurate equity.
         best_coin: str | None = None
         best_usd: float = 0.0
         for pid, qty in holdings.items():
@@ -264,6 +268,33 @@ class AltcoinRotationStrategy:
             if price is None:
                 continue
             usd_value = qty * price
+
+            # Create or update a Position for this holding so equity is accurate
+            if product_id in state.positions:
+                # Update existing position with current qty and price
+                pos = state.positions[product_id]
+                pos.quantity = qty
+                pos.current_price = price
+            elif usd_value >= _DUST_USD and broker is not None and now is not None:
+                # Create a new position for this Coinbase holding
+                broker.open_position(
+                    state,
+                    symbol=product_id,
+                    asset_type="crypto",
+                    strategy="altcoin_rotation",
+                    price=price,
+                    notional=usd_value,
+                    opened_at=now,
+                    meta={"synced_from_coinbase": True},
+                )
+                self.logger.info(
+                    "Synced Coinbase holding into portfolio: %s qty=%.8f ($%.2f)",
+                    product_id, qty, usd_value,
+                )
+                # Fix the quantity to match actual Coinbase balance
+                if product_id in state.positions:
+                    state.positions[product_id].quantity = qty
+
             if usd_value > best_usd:
                 best_usd = usd_value
                 best_coin = product_id
