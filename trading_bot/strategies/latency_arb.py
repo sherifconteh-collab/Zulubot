@@ -43,6 +43,11 @@ from trading_bot.config import LatencyArbConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 
+try:
+    from trading_bot.integrations.trading_agents import TradingAgentsService
+except ImportError:
+    TradingAgentsService = None  # type: ignore[assignment,misc]
+
 # Logistic scale: maps momentum % → probability
 _SIGMOID_SCALE = 150.0
 
@@ -68,12 +73,14 @@ class LatencyArbStrategy:
         kalshi_client: KalshiClient,
         paper_broker: PaperBroker,
         logger: logging.Logger,
+        ai_service: Any | None = None,
     ) -> None:
         self.config = config
         self.feed = price_feed
         self.kalshi = kalshi_client
         self.broker = paper_broker
         self.logger = logger.getChild("strategy.latency_arb")
+        self.ai_service = ai_service  # Haiku-only signal validation (log_only, never blocks)
 
         # Cache discovered Kalshi markets to avoid hammering the API
         # Maps series_ticker → list of markets
@@ -144,7 +151,34 @@ class LatencyArbStrategy:
 
             equity = broker.portfolio_equity(state)
 
-            # Step 5: For each tracked symbol, check momentum → scan markets
+            # Step 5: Detect market regime (Haiku-only, 1h cache) to adjust thresholds
+            effective_threshold = self.config.momentum_min_threshold_pct
+            if self.ai_service is not None:
+                try:
+                    btc_price = self.feed.get_latest_price("BTC-USD")
+                    eth_price = self.feed.get_latest_price("ETH-USD")
+                    if btc_price > 0 and eth_price > 0:
+                        regime = self.ai_service.detect_market_regime(
+                            btc_price=btc_price,
+                            eth_price=eth_price,
+                            fear_greed_value=None,
+                        )
+                        if regime is not None:
+                            result["market_regime"] = regime.action
+                            # In volatile regimes, raise threshold to reduce false signals
+                            if regime.action == "volatile" and regime.confidence >= 0.6:
+                                effective_threshold = self.config.momentum_min_threshold_pct * 1.5
+                                self.logger.info(
+                                    "Volatile regime detected (conf=%.2f). Raising arb threshold: "
+                                    "%.2f%% → %.2f%%",
+                                    regime.confidence,
+                                    self.config.momentum_min_threshold_pct,
+                                    effective_threshold,
+                                )
+                except Exception as exc:
+                    self.logger.debug("Market regime detection failed (non-blocking): %s", exc)
+
+            # Step 6: For each tracked symbol, check momentum → scan markets
             for symbol in self.config.symbols:
                 if not self.feed.is_ready(symbol, self.config.momentum_window_seconds):
                     self.logger.debug(
@@ -155,7 +189,7 @@ class LatencyArbStrategy:
                 momentum_pct = self.feed.get_momentum_pct(symbol, self.config.momentum_window_seconds)
                 result["momentum"][symbol] = round(momentum_pct, 4)
 
-                if abs(momentum_pct) < self.config.momentum_min_threshold_pct:
+                if abs(momentum_pct) < effective_threshold:
                     continue  # Signal too weak
 
                 result["signals_detected"] += 1
@@ -407,6 +441,34 @@ class LatencyArbStrategy:
 
         actual_notional = quantity * ask_price
 
+        # Optional Haiku-only AI signal validation (log_only — never blocks execution)
+        ai_meta: dict[str, Any] = {}
+        if self.ai_service is not None:
+            try:
+                verdict = self.ai_service.evaluate_arb_signal(
+                    asset=ticker.split("-")[0] if "-" in ticker else ticker[:6],
+                    momentum_pct=momentum_pct,
+                    contract_title=market.get("title", ""),
+                    contract_price=ask_price,
+                    edge=_kelly_edge(ask_price, self._estimate_true_prob(abs(momentum_pct))),
+                )
+                if verdict is not None:
+                    ai_meta = {
+                        "ai_action": verdict.action,
+                        "ai_confidence": round(verdict.confidence, 3),
+                        "ai_reasoning": verdict.reasoning,
+                        "ai_cost_usd": verdict.cost_usd,
+                        "ai_cached": verdict.cached,
+                    }
+                    self.logger.info(
+                        "AI arb check: action=%s confidence=%.2f (%s) | %s",
+                        verdict.action, verdict.confidence,
+                        "cached" if verdict.cached else "live",
+                        verdict.reasoning[:80],
+                    )
+            except Exception as exc:
+                self.logger.debug("AI arb validation failed (non-blocking): %s", exc)
+
         meta = {
             "ticker": ticker,
             "side": side,
@@ -414,6 +476,7 @@ class LatencyArbStrategy:
             "title": market.get("title", "")[:120],
             "momentum_pct": round(momentum_pct, 4),
             "strategy": "latency_arb",
+            **ai_meta,
         }
 
         # Paper tracking (always)
@@ -525,6 +588,11 @@ class LatencyArbStrategy:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _kelly_edge(ask_price: float, true_prob: float) -> float:
+    """Compute edge = true_prob - ask_price for a binary contract."""
+    return max(0.0, true_prob - ask_price)
+
 
 def _best_ask(price_levels: list[Any]) -> float:
     """Extract the best (lowest) ask price from a Kalshi price-level list.
