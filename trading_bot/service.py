@@ -280,7 +280,7 @@ class TradingBotService:
         """Sync portfolio cash from real Coinbase USD balance."""
         try:
             total_usd, breakdown = self.coinbase_broker.get_total_balance()
-            usd_cash = breakdown.get("USD", 0.0)
+            usd_cash = breakdown.get("USD", 0.0) + breakdown.get("USDC", 0.0)
 
             # Set cash to real Coinbase USD balance
             state.cash = usd_cash
