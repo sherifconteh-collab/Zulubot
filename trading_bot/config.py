@@ -113,15 +113,15 @@ class SchedulerConfig:
 class TradingAgentsConfig:
     enabled: bool = False
     llm_provider: str = "anthropic"
-    quick_model: str = "claude-haiku-4-5-20251001"
-    deep_model: str = "claude-sonnet-4-6"
+    quick_model: str = "claude-haiku-4-5-20251001"  # cheap pre-screen
+    deep_model: str = "claude-sonnet-4-6"           # deep analysis only when needed
     api_key: str = ""
-    confirmation_mode: str = "log_only"
-    cache_ttl_hours: int = 4
-    max_cost_per_run: float = 0.50
-    max_cost_per_month: float = 20.00
+    confirmation_mode: str = "boost"    # boost=1.5x agree / 0.5x disagree
+    cache_ttl_hours: int = 6            # 6h cache avoids re-calling same market
+    max_cost_per_run: float = 0.10      # hard cap per single AI call
+    max_cost_per_month: float = 10.00   # hard monthly spend cap
     max_debate_rounds: int = 1
-    timeout_seconds: int = 120
+    timeout_seconds: int = 30           # short timeout to avoid blocking trades
 
 
 @dataclass(frozen=True)
@@ -301,12 +301,12 @@ class AppConfig:
                 quick_model=os.getenv("TRADING_AGENTS_QUICK_MODEL", "claude-haiku-4-5-20251001").strip(),
                 deep_model=os.getenv("TRADING_AGENTS_DEEP_MODEL", "claude-sonnet-4-6").strip(),
                 api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-                confirmation_mode=os.getenv("TRADING_AGENTS_CONFIRMATION_MODE", "log_only").strip(),
-                cache_ttl_hours=_env_int("TRADING_AGENTS_CACHE_TTL_HOURS", 4),
-                max_cost_per_run=_env_float("TRADING_AGENTS_MAX_COST_PER_RUN", 0.50),
-                max_cost_per_month=_env_float("TRADING_AGENTS_MAX_COST_PER_MONTH", 20.00),
+                confirmation_mode=os.getenv("TRADING_AGENTS_CONFIRMATION_MODE", "boost").strip(),
+                cache_ttl_hours=_env_int("TRADING_AGENTS_CACHE_TTL_HOURS", 6),
+                max_cost_per_run=_env_float("TRADING_AGENTS_MAX_COST_PER_RUN", 0.10),
+                max_cost_per_month=_env_float("TRADING_AGENTS_MAX_COST_PER_MONTH", 10.00),
                 max_debate_rounds=_env_int("TRADING_AGENTS_MAX_DEBATE_ROUNDS", 1),
-                timeout_seconds=_env_int("TRADING_AGENTS_TIMEOUT_SECONDS", 120),
+                timeout_seconds=_env_int("TRADING_AGENTS_TIMEOUT_SECONDS", 30),
             ),
             altcoin_rotation=AltcoinRotationConfig(
                 enabled=_env_bool("ROTATION_ENABLED", True),

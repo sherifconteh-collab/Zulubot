@@ -142,6 +142,7 @@ class TradingBotService:
             config=config.predictions,
             kalshi_client=self.kalshi_client,
             logger=logger,
+            ai_service=self.ai_service,
         )
 
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
@@ -157,6 +158,7 @@ class TradingBotService:
             kalshi_client=self.kalshi_client,
             paper_broker=self.broker,
             logger=logger,
+            ai_service=self.ai_service,
         )
 
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
@@ -474,6 +476,7 @@ class TradingBotService:
             "modules": modules,
             "pre_risk_equity": round(pre_risk.equity, 2),
             "post_risk_equity": round(post_risk.equity, 2),
+            "ai_budget_remaining_usd": round(self.ai_service.get_budget_remaining(), 4) if self.ai_service else None,
         }
 
     def _run_module(self, name: str, callback: Any) -> dict[str, Any]:
