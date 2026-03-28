@@ -497,6 +497,7 @@ class TradingBotService:
             },
             "last_stock_screen_date": state.last_stock_screen_date,
             "last_polymarket_scan_date": state.last_polymarket_scan_date,
+            "last_predictions_scan_date": state.last_predictions_scan_date,
             "modules": modules,
             "pre_risk_equity": round(pre_risk.equity, 2),
             "post_risk_equity": round(post_risk.equity, 2),

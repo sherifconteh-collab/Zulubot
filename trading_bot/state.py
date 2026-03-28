@@ -28,6 +28,7 @@ class StateStore:
                 kill_switch_engaged=False,
                 last_stock_screen_date=None,
                 last_polymarket_scan_date=None,
+                last_predictions_scan_date=None,
                 realized_pnl=0.0,
             )
 
@@ -47,6 +48,7 @@ class StateStore:
             kill_switch_engaged=bool(payload.get("kill_switch_engaged", False)),
             last_stock_screen_date=payload.get("last_stock_screen_date"),
             last_polymarket_scan_date=payload.get("last_polymarket_scan_date"),
+            last_predictions_scan_date=payload.get("last_predictions_scan_date"),
             realized_pnl=float(payload.get("realized_pnl", 0.0)),
             rotation_data=payload.get("rotation_data", {}),
         )
