@@ -424,8 +424,8 @@ class CoinbaseBroker:
             hold = float(acct.get("hold", {}).get("value", "0"))
             balance = available + hold
             if balance > 0:
-                # For USD, value is direct. For crypto, we need USD equivalent.
-                if currency == "USD":
+                # For USD/USDC, value is direct (USDC is pegged to $1).
+                if currency in ("USD", "USDC"):
                     breakdown[currency] = balance
                     total += balance
                 else:
