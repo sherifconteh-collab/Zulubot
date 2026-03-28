@@ -129,6 +129,8 @@ class TradingBotService:
             coinbase_client=self.coinbase_client,
             coinbase_broker=self.coinbase_broker,
             logger=logger,
+            ai_service=self.ai_service,
+            confirmation_mode=config.trading_agents.confirmation_mode,
         )
 
         # Kalshi prediction markets strategy
@@ -386,16 +388,42 @@ class TradingBotService:
                         state.positions[symbol].quantity = float(count)
                         continue
 
-                    # New position not tracked by the bot — add it
-                    # Price unknown without an orderbook call; set to 0.50 placeholder
+                    # New position not tracked by the bot — try to get a real price
+                    entry_price = 0.50
+                    try:
+                        market = self.kalshi_client.get_market(ticker)
+                        # Kalshi market data includes yes_ask/yes_bid or last_price.
+                        # Prices may be in cents (1–99) or fractional [0,1]; normalise
+                        # to [0,1] before computing the NO-side complement.
+                        def _to_prob(raw: Any) -> float:
+                            v = float(raw)
+                            return v / 100.0 if v > 1 else v
+
+                        if side == "YES":
+                            raw = market.get("yes_ask") or market.get("last_price") or 0
+                            price = _to_prob(raw)
+                        else:
+                            # Prefer an explicit no_ask field; fall back to 1 - yes_bid
+                            no_raw = market.get("no_ask")
+                            if no_raw:
+                                price = _to_prob(no_raw)
+                            else:
+                                yes_bid_raw = market.get("yes_bid") or 0
+                                yes_bid = _to_prob(yes_bid_raw)
+                                price = 1.0 - yes_bid if yes_bid > 0 else 0.0
+                        if 0 < price < 1:
+                            entry_price = price
+                    except Exception:
+                        pass  # Fall back to 0.50 placeholder
+
                     synced_at = datetime.now(self.config.timezone).isoformat()
                     state.positions[symbol] = Position(
                         symbol=symbol,
                         asset_type="prediction",
                         strategy="kalshi_manual",
                         quantity=float(count),
-                        entry_price=0.50,
-                        current_price=0.50,
+                        entry_price=entry_price,
+                        current_price=entry_price,
                         opened_at=synced_at,
                         meta={
                             "ticker": ticker,

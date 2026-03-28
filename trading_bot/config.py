@@ -197,6 +197,7 @@ class LatencyArbConfig:
     take_profit_pct: float = 0.20            # exit when price rises 20%
     stop_loss_pct: float = 0.15
     min_trade_usd: float = 1.0               # minimum position size in USD
+    ai_confirmation_mode: str = "boost"      # boost | require | log_only
 
 
 @dataclass(frozen=True)
@@ -350,5 +351,6 @@ class AppConfig:
                 take_profit_pct=_env_float("LATENCY_ARB_TAKE_PROFIT", 0.20),
                 stop_loss_pct=_env_float("LATENCY_ARB_STOP_LOSS", 0.15),
                 min_trade_usd=_env_float("LATENCY_ARB_MIN_TRADE_USD", 1.0),
+                ai_confirmation_mode=os.getenv("LATENCY_ARB_AI_CONFIRMATION", "boost").strip().lower(),
             ),
         )

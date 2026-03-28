@@ -22,6 +22,11 @@ from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AltcoinRotationConfig
 from trading_bot.models import PortfolioState
 
+try:
+    from trading_bot.integrations.trading_agents import TradingAgentsService
+except ImportError:
+    TradingAgentsService = None  # type: ignore[assignment,misc]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,11 +71,16 @@ class AltcoinRotationStrategy:
         coinbase_client: CoinbaseClient,
         coinbase_broker: CoinbaseBroker,
         logger: logging.Logger,
+        ai_service: Any | None = None,
+        confirmation_mode: str = "boost",
     ) -> None:
         self.config = config
         self.coinbase_client = coinbase_client
         self.coinbase_broker = coinbase_broker
         self.logger = logger.getChild("altcoin_rotation")
+        self.ai_service = ai_service
+        # Normalize to lowercase so "Require"/"REQUIRE" work identically to "require"
+        self.confirmation_mode = confirmation_mode.strip().lower()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -149,9 +159,54 @@ class AltcoinRotationStrategy:
                 ratio_shift,
                 self.config.fee_pct * self.config.scout_multiplier,
             )
-            success = self._execute_swap(
-                state, rd, broker, current_coin, target_coin, tracked, now,
-            )
+
+            # AI validation: Haiku checks for macro/momentum red flags
+            ai_swap_meta: dict[str, Any] = {}
+            proceed_with_swap = True
+            if self.ai_service is not None:
+                try:
+                    current_price = tracked.get(
+                        _product_from_coin(current_coin), 0.0
+                    )
+                    target_price = tracked.get(
+                        _product_from_coin(target_coin), 0.0
+                    )
+                    swap_verdict = self.ai_service.evaluate_altcoin_swap(
+                        current_coin=_product_from_coin(current_coin),
+                        target_coin=_product_from_coin(target_coin),
+                        current_price=current_price,
+                        target_price=target_price,
+                        ratio_shift_pct=ratio_shift * 100.0,
+                        fee_threshold_pct=self.config.fee_pct * self.config.scout_multiplier * 100.0,
+                    )
+                    if swap_verdict is not None:
+                        ai_swap_meta = {
+                            "ai_action": swap_verdict.action,
+                            "ai_confidence": round(swap_verdict.confidence, 3),
+                            "ai_reasoning": swap_verdict.reasoning,
+                            "ai_cached": swap_verdict.cached,
+                        }
+                        self.logger.info(
+                            "AI swap check: action=%s confidence=%.2f | %s",
+                            swap_verdict.action, swap_verdict.confidence,
+                            swap_verdict.reasoning[:80],
+                        )
+                        if self.confirmation_mode == "require" and swap_verdict.action == "skip":
+                            self.logger.info(
+                                "AI blocked swap %s→%s in require mode.",
+                                current_coin, target_coin,
+                            )
+                            proceed_with_swap = False
+                except Exception as exc:
+                    self.logger.debug("AI swap validation failed (non-blocking): %s", exc)
+
+            if proceed_with_swap:
+                success = self._execute_swap(
+                    state, rd, broker, current_coin, target_coin, tracked, now,
+                )
+            else:
+                success = False
+
             if success:
                 action_taken = "swap"
                 swap_meta = {
@@ -160,8 +215,12 @@ class AltcoinRotationStrategy:
                     "ratio_shift": round(ratio_shift * 100, 2),  # as percentage
                     "buys": [target_coin],
                     "sells": [current_coin],
+                    **ai_swap_meta,
                 }
                 current_coin = target_coin
+            elif not proceed_with_swap:
+                action_taken = "swap_ai_blocked"
+                swap_meta = {"from": current_coin, "to": target_coin, **ai_swap_meta}
             else:
                 action_taken = "swap_failed"
                 swap_meta = {"from": current_coin, "to": target_coin}

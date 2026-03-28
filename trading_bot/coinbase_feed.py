@@ -53,7 +53,7 @@ class CoinbasePriceFeed:
         successfully fetched.
         """
         try:
-            prices = self.client.get_spot_prices(self.symbols)
+            prices = self.client.get_spot_prices_by_product_ids(self.symbols)
         except Exception as exc:
             self.logger.warning("Price fetch failed: %s", exc)
             return {}
