@@ -338,7 +338,7 @@ class AppConfig:
             ),
             latency_arb=LatencyArbConfig(
                 enabled=_env_bool("LATENCY_ARB_ENABLED", False),
-                symbols=_env_list_lower("LATENCY_ARB_SYMBOLS", ["BTC-USD", "ETH-USD"]),
+                symbols=_env_list("LATENCY_ARB_SYMBOLS", ["BTC-USD", "ETH-USD"]),
                 momentum_window_seconds=_env_float("LATENCY_ARB_MOMENTUM_WINDOW", 30.0),
                 momentum_min_threshold_pct=_env_float("LATENCY_ARB_MOMENTUM_THRESHOLD", 0.30),
                 min_edge_pct=_env_float("LATENCY_ARB_MIN_EDGE", 0.05),

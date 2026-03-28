@@ -64,11 +64,7 @@ class CoinbasePriceFeed:
         for symbol, price in prices.items():
             if price <= 0:
                 continue
-            history = self._history.get(symbol)
-            if history is None:
-                self._history[symbol] = deque()
-                history = self._history[symbol]
-
+            history = self._history.setdefault(symbol, deque())
             history.append((now, price))
 
             # Trim entries older than history_seconds

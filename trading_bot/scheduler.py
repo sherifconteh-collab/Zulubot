@@ -45,15 +45,10 @@ class SchedulerService:
 
         # When latency arb is active, tighten the poll loop to its scan interval
         if config.latency_arb.enabled:
-            effective_poll = min(
+            self._effective_poll_interval = min(
                 config.scheduler.poll_interval_seconds,
                 config.latency_arb.scan_interval_seconds,
             )
-            # Override the scheduler config attribute for this session
-            object.__setattr__(
-                self.scheduler_config, "poll_interval_seconds", int(effective_poll)
-            ) if not hasattr(self.scheduler_config, "__dataclass_fields__") else None
-            self._effective_poll_interval = effective_poll
         else:
             self._effective_poll_interval = config.scheduler.poll_interval_seconds
 
