@@ -289,7 +289,7 @@ class TradingBotService:
             equity = usd_cash + sum(
                 pos.quantity * pos.current_price for pos in state.positions.values()
             )
-            if state.peak_equity == self.config.initial_cash and equity != self.config.initial_cash:
+            if equity > 0 and (state.peak_equity == 0 or state.peak_equity == self.config.initial_cash):
                 state.peak_equity = equity
                 state.daily_baseline_equity = equity
 
@@ -299,6 +299,11 @@ class TradingBotService:
             )
         except Exception as exc:
             self.logger.warning("Failed to sync Coinbase balance: %s. Using cached state.", exc)
+            # In live mode, never show fake money — if sync fails and cash
+            # looks like the default initial_cash, zero it out.
+            if state.cash >= self.config.initial_cash and self.config.initial_cash > 0:
+                self.logger.warning("Zeroing cash to prevent phantom balance in live mode.")
+                state.cash = 0.0
 
     def _evaluate_risk(self, state: PortfolioState, now: datetime) -> RiskSnapshot:
         equity = self.broker.portfolio_equity(state)
