@@ -155,6 +155,7 @@ class AltcoinRotationConfig:
     min_trade_usd: float = 1.0           # minimum $1 trade
     excluded_coins: list[str] = field(default_factory=list)  # coins to never trade
     max_coins_to_track: int = 50         # limit to top 50 by volume
+    capital_allocation_pct: float = 0.60 # use 60% of total capital for rotation
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,7 @@ class PredictionConfig:
     check_interval_minutes: int = 60
     min_trade_usd: float = 1.0
     market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics"])
+    capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
 
 
 @dataclass(frozen=True)
@@ -292,6 +294,7 @@ class AppConfig:
                 min_trade_usd=_env_float("ROTATION_MIN_TRADE_USD", 1.0),
                 excluded_coins=_env_list("ROTATION_EXCLUDED_COINS", []),
                 max_coins_to_track=_env_int("ROTATION_MAX_COINS_TO_TRACK", 50),
+                capital_allocation_pct=_env_float("ROTATION_CAPITAL_PCT", 0.60),
             ),
             predictions=PredictionConfig(
                 enabled=_env_bool("PREDICTION_ENABLED", False),
@@ -303,6 +306,7 @@ class AppConfig:
                 check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 60),
                 min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
                 market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics"]),
+                capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),

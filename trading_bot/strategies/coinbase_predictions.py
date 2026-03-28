@@ -440,9 +440,17 @@ class CoinbasePredictionStrategy:
 
             side, price = signal
 
-            # Position sizing
-            notional = equity * risk_manager.config.max_position_fraction
-            notional = min(notional, state.cash * 0.95)  # 5% cash buffer
+            # Position sizing — use prediction allocation of total equity
+            prediction_budget = equity * self.config.capital_allocation_pct
+            # Subtract value of existing prediction positions
+            existing_prediction_value = sum(
+                pos.market_value for pos in state.positions.values()
+                if pos.strategy == "coinbase_predictions"
+            )
+            remaining_budget = max(0.0, prediction_budget - existing_prediction_value)
+            # Size each position as a fraction of remaining budget
+            per_position = remaining_budget / max(1, slots_available)
+            notional = min(per_position, state.cash * 0.95)
             notional = max(notional, 0.0)
 
             if notional < self.config.min_trade_usd:
