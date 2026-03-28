@@ -198,5 +198,153 @@ class ApplyAIConfirmationTests(unittest.TestCase):
         self.assertEqual(meta, {})
 
 
+class NewAIMethodsTests(unittest.TestCase):
+    """Tests for evaluate_exit_signal and evaluate_altcoin_swap."""
+
+    def setUp(self) -> None:
+        self.logger = logging.getLogger("test_new_ai_methods")
+        self.config = TradingAgentsConfig(
+            enabled=True,
+            api_key="test-key",
+            quick_model="claude-haiku-4-5-20251001",
+            deep_model="claude-sonnet-4-6",
+            cache_ttl_hours=4,
+            max_cost_per_run=0.50,
+            max_cost_per_month=20.00,
+        )
+
+    def _make_service(self, responses: list[str] | None = None) -> TradingAgentsService:
+        service = TradingAgentsService(TradingAgentsConfig(enabled=False), self.logger)
+        service.config = self.config
+        service._anthropic_client = FakeAnthropicClient(responses)
+        return service
+
+    # ── evaluate_exit_signal ─────────────────────────────────────────
+
+    def test_exit_signal_returns_exit_on_sell_action(self) -> None:
+        service = self._make_service([
+            '{"action": "sell", "confidence": 0.85, "reasoning": "Reversal confirmed"}',
+        ])
+        verdict = service.evaluate_exit_signal(
+            asset="KXBTCH-26MAY0117",
+            side="yes",
+            entry_price=0.40,
+            current_price=0.50,
+            gain_pct=25.0,
+            market_regime="bullish",
+            reason="take_profit",
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.action, "exit")
+
+    def test_exit_signal_normalises_buy_to_hold(self) -> None:
+        service = self._make_service([
+            '{"action": "buy", "confidence": 0.75, "reasoning": "Keep holding"}',
+        ])
+        verdict = service.evaluate_exit_signal(
+            asset="KXBTCH-26MAY0117",
+            side="yes",
+            entry_price=0.40,
+            current_price=0.34,
+            gain_pct=-15.0,
+            market_regime="volatile",
+            reason="stop_loss",
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.action, "hold")
+
+    def test_exit_signal_cached_on_second_call(self) -> None:
+        service = self._make_service([
+            '{"action": "exit", "confidence": 0.80, "reasoning": "Done"}',
+        ])
+        v1 = service.evaluate_exit_signal(
+            asset="X", side="yes", entry_price=0.40, current_price=0.50,
+            gain_pct=25.0, market_regime=None, reason="take_profit",
+        )
+        v2 = service.evaluate_exit_signal(
+            asset="X", side="yes", entry_price=0.40, current_price=0.50,
+            gain_pct=25.0, market_regime=None, reason="take_profit",
+        )
+        self.assertIsNotNone(v1)
+        self.assertIsNotNone(v2)
+        self.assertTrue(v2.cached)
+        self.assertEqual(v2.cost_usd, 0.0)
+
+    # ── evaluate_altcoin_swap ────────────────────────────────────────
+
+    def test_altcoin_swap_returns_verdict(self) -> None:
+        service = self._make_service([
+            '{"action": "buy", "confidence": 0.78, "reasoning": "SOL momentum is genuine"}',
+        ])
+        verdict = service.evaluate_altcoin_swap(
+            current_coin="BTC-USD",
+            target_coin="SOL-USD",
+            current_price=70_000.0,
+            target_price=145.0,
+            ratio_shift_pct=0.80,
+            fee_threshold_pct=0.30,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.action, "buy")
+        self.assertGreater(verdict.confidence, 0.5)
+
+    def test_altcoin_swap_skip_blocks_on_require_mode(self) -> None:
+        service = self._make_service([
+            '{"action": "skip", "confidence": 0.90, "reasoning": "Flash crash detected"}',
+        ])
+        verdict = service.evaluate_altcoin_swap(
+            current_coin="BTC-USD",
+            target_coin="MATIC-USD",
+            current_price=70_000.0,
+            target_price=0.50,
+            ratio_shift_pct=0.60,
+            fee_threshold_pct=0.30,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.action, "skip")
+
+    def test_altcoin_swap_cached_30min(self) -> None:
+        service = self._make_service([
+            '{"action": "buy", "confidence": 0.70, "reasoning": "OK"}',
+        ])
+        v1 = service.evaluate_altcoin_swap(
+            current_coin="BTC-USD", target_coin="SOL-USD",
+            current_price=70_000.0, target_price=145.0,
+            ratio_shift_pct=0.50, fee_threshold_pct=0.30,
+        )
+        v2 = service.evaluate_altcoin_swap(
+            current_coin="BTC-USD", target_coin="SOL-USD",
+            current_price=70_000.0, target_price=145.0,
+            ratio_shift_pct=0.50, fee_threshold_pct=0.30,
+        )
+        self.assertIsNotNone(v1)
+        self.assertIsNotNone(v2)
+        self.assertTrue(v2.cached)
+
+    # ── Accurate cost tracking ───────────────────────────────────────
+
+    def test_actual_cost_uses_token_counts(self) -> None:
+        service = self._make_service()
+        # Haiku: $0.80/M input, $4.00/M output
+        cost = service._actual_cost("claude-haiku-4-5-20251001", 1000, 200)
+        expected = (0.80 * 1000 + 4.00 * 200) / 1_000_000
+        self.assertAlmostEqual(cost, expected, places=8)
+
+    def test_actual_cost_uses_sonnet_pricing(self) -> None:
+        service = self._make_service()
+        # Sonnet: $3.00/M input, $15.00/M output
+        cost = service._actual_cost("claude-sonnet-4-6", 2000, 300)
+        expected = (3.00 * 2000 + 15.00 * 300) / 1_000_000
+        self.assertAlmostEqual(cost, expected, places=8)
+
+    def test_estimate_cost_is_conservative(self) -> None:
+        """Estimate must be positive and reasonable (< $1 per call)."""
+        service = self._make_service()
+        for model in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6"):
+            est = service._estimate_cost(model)
+            self.assertGreater(est, 0)
+            self.assertLess(est, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

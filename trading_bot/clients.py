@@ -358,6 +358,27 @@ class CoinbaseClient(BaseHttpClient):
                 self.logger.warning("Failed to get Coinbase price for %s: %s", sym, exc)
         return prices
 
+    def get_spot_price_by_product_id(self, product_id: str) -> float:
+        """Get spot price using a Coinbase product ID directly (e.g. 'BTC-USD')."""
+        payload = self._get_json(f"api/v3/brokerage/market/products/{product_id}")
+        price = _parse_float(payload.get("price"))
+        if price is None:
+            raise RuntimeError(f"Unable to parse Coinbase spot price for {product_id}")
+        return price
+
+    def get_spot_prices_by_product_ids(self, product_ids: list[str]) -> dict[str, float]:
+        """Fetch prices for a list of Coinbase product IDs (e.g. 'BTC-USD', 'ETH-USD').
+
+        Returns a dict keyed by product_id.  Missing or failed symbols are omitted.
+        """
+        prices: dict[str, float] = {}
+        for pid in product_ids:
+            try:
+                prices[pid] = self.get_spot_price_by_product_id(pid)
+            except Exception as exc:
+                self.logger.warning("Failed to get Coinbase price for %s: %s", pid, exc)
+        return prices
+
     def get_all_tradeable_products(self) -> list[dict[str, Any]]:
         """Fetch all active SPOT USD trading pairs from Coinbase."""
         payload = self._get_json("api/v3/brokerage/market/products", {"product_type": "SPOT"})
