@@ -252,8 +252,13 @@ class TradingTelegramBot:
         elif risk.get("daily_halt_active"):
             lines.append(f"\n\u26a0\ufe0f <b>DAILY HALT ACTIVE</b>")  # ⚠️
 
-        if not has_trades:
-            lines.append(f"\n\U0001f4a4 No trades this cycle")  # 💤
+        # Only send if there were actual trades or errors — suppress pure no-signal cycles
+        has_errors = any(
+            isinstance(v, dict) and v.get("error")
+            for v in module_results.values()
+        )
+        if not has_trades and not has_errors:
+            return
 
         await self.send_message("\n".join(lines))
 
@@ -316,10 +321,10 @@ class TradingTelegramBot:
         lines.append(f"{_risk_status_icon(risk.get('kill_switch_active', False))} Kill Switch")
 
         # Module scan dates
-        stock_date = status.get("last_stock_screen_date", "never")
-        pm_date = status.get("last_polymarket_scan_date", "never")
+        stock_date = status.get("last_stock_screen_date") or "never"
+        kalshi_date = status.get("last_predictions_scan_date") or "never"
         lines.append(f"\n\U0001f4c5 Stocks: {stock_date}")  # 📅
-        lines.append(f"\U0001f52e Polymarket: {pm_date}")  # 🔮
+        lines.append(f"\U0001f3b2 Kalshi: {kalshi_date}")  # 🎲
 
         if self._paused:
             lines.append(f"\n\u23f8\ufe0f <b>BOT PAUSED</b> — monitoring only")
@@ -458,7 +463,7 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f52e Running Polymarket scan...")  # type: ignore[union-attr]
+        await update.message.reply_text("\U0001f3b2 Running Kalshi scan...")  # type: ignore[union-attr]
         try:
             result = self._service.run("polymarket")
             await self.send_trade_alert(result)
