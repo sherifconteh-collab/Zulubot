@@ -86,7 +86,9 @@ class LatencyArbStrategy:
         # Cache discovered Kalshi markets to avoid hammering the API
         # Maps series_ticker → list of markets
         self._market_cache: dict[str, list[dict[str, Any]]] = {}
-        self._cache_ts: float = 0.0
+        # Per-series cache timestamps so a fresh fetch for one series doesn't
+        # keep stale data for another series beyond the TTL.
+        self._cache_ts: dict[str, float] = {}
         self._cache_ttl: float = 30.0  # refresh every 30 s
 
     # ------------------------------------------------------------------
@@ -250,10 +252,11 @@ class LatencyArbStrategy:
     # ------------------------------------------------------------------
 
     def _discover_kalshi_contracts(self, series_ticker: str) -> list[dict[str, Any]]:
-        """Fetch open Kalshi markets for a series, with 30s cache."""
+        """Fetch open Kalshi markets for a series, with 30s per-series cache."""
         now = time.time()
+        series_ts = self._cache_ts.get(series_ticker, 0.0)
 
-        if series_ticker in self._market_cache and (now - self._cache_ts) < self._cache_ttl:
+        if series_ticker in self._market_cache and (now - series_ts) < self._cache_ttl:
             return self._market_cache[series_ticker]
 
         try:
@@ -263,7 +266,7 @@ class LatencyArbStrategy:
                 limit=50,
             )
             self._market_cache[series_ticker] = markets
-            self._cache_ts = now
+            self._cache_ts[series_ticker] = now
             self.logger.debug("Fetched %d Kalshi markets for series %s", len(markets), series_ticker)
             return markets
         except Exception as exc:
@@ -368,12 +371,6 @@ class LatencyArbStrategy:
                 yes_ask = yes_ask / 100.0
             if no_ask > 1:
                 no_ask = no_ask / 100.0
-
-            # If one side missing, derive from the other
-            if yes_ask > 0 and no_ask <= 0:
-                no_ask = 1.0 - yes_ask
-            elif no_ask > 0 and yes_ask <= 0:
-                yes_ask = 1.0 - no_ask
 
             return yes_ask, no_ask
 
@@ -493,10 +490,14 @@ class LatencyArbStrategy:
         if position is None:
             return False
 
+        # Use the broker-tracked quantity (may be reduced if cash was insufficient)
+        filled_quantity = int(position.quantity)
+
         self.logger.info(
             "LATENCY ARB %s %s %s @ $%.2f × %d contracts = $%.2f | momentum=%.3f%%",
             "PAPER" if not self.kalshi.can_trade else "LIVE",
-            side.upper(), ticker, ask_price, quantity, actual_notional, momentum_pct,
+            side.upper(), ticker, ask_price, filled_quantity,
+            filled_quantity * ask_price, momentum_pct,
         )
 
         # Live execution
@@ -507,7 +508,7 @@ class LatencyArbStrategy:
                     ticker=ticker,
                     side=side,
                     action="buy",
-                    count=quantity,
+                    count=filled_quantity,
                     yes_price=yes_price_cents if side == "yes" else (100 - yes_price_cents),
                     client_order_id=str(uuid.uuid4()),
                 )

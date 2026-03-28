@@ -110,7 +110,7 @@ python -m trading_bot status
 
 Run as a continuous daemon (recommended):
 ```bash
-python -m trading_bot scheduler
+python -m trading_bot run-daemon
 ```
 
 The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and latency arb every 2 seconds when enabled.
@@ -135,11 +135,11 @@ The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and la
 
 ## Files
 
-- State: `%LOCALAPPDATA%\TradingBot\data\state.json` (or `BOT_STORAGE_DIR`)
-- Logs: `%LOCALAPPDATA%\TradingBot\logs\` (or `BOT_LOG_DIR`)
+- State: `%LOCALAPPDATA%\TradingBot\data\state.json` (Windows), `~/.local/share/TradingBot/data/state.json` (Linux/macOS), or set `BOT_STORAGE_DIR` to override
+- Logs: `%LOCALAPPDATA%\TradingBot\logs\` (Windows), `~/.local/share/TradingBot/logs/` (Linux/macOS), or set `BOT_LOG_DIR` to override
 
 ## Testing
 
 ```bash
-python -m pytest tests/ -v
+python -m unittest discover -s tests -p "test_*.py"
 ```

@@ -60,7 +60,7 @@ class SchedulerService:
 
         self.logger.info(
             "Scheduler started. crypto=%dm rotation=%dm predictions=%dm stock_hour=%d "
-            "heartbeat=%dm poll=%ds latency_arb=%s(%.1fs)",
+            "heartbeat=%dm poll=%.1fs latency_arb=%s(%.1fs)",
             self.scheduler_config.crypto_interval_minutes,
             self.config.altcoin_rotation.check_interval_minutes,
             self.config.predictions.check_interval_minutes,
