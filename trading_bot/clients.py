@@ -462,5 +462,150 @@ class CoinbaseClient(BaseHttpClient):
         return payload.get("candles", []) if isinstance(payload, dict) else payload
 
 
+class UnusualWhalesClient(BaseHttpClient):
+    """Unusual Whales market intelligence client.
+
+    Provides options flow alerts, dark pool transactions, insider trades,
+    and congressional trading data for a given ticker.
+
+    Requires a paid Unusual Whales API key (set UNUSUAL_WHALES_API_KEY).
+    All methods return empty lists on error so callers degrade gracefully.
+    """
+
+    def __init__(self, *, api_key: str, timeout_seconds: int, logger: logging.Logger) -> None:
+        super().__init__(
+            base_url="https://api.unusualwhales.com",
+            timeout_seconds=timeout_seconds,
+            logger=logger.getChild("unusual_whales"),
+        )
+        self.session.headers["Authorization"] = f"Bearer {api_key}"
+
+    def get_options_flow(
+        self, ticker: str, *, min_premium: float = 50_000, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Recent unusual options flow alerts for a ticker."""
+        try:
+            payload = self._get_json(
+                "api/option-trades/flow-alerts",
+                {"ticker_symbol": ticker, "min_premium": int(min_premium), "limit": limit},
+            )
+            data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            self.logger.warning("Options flow failed for %s: %s", ticker, exc)
+            return []
+
+    def get_darkpool(self, ticker: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Recent dark pool transactions for a ticker."""
+        try:
+            payload = self._get_json(f"api/darkpool/{ticker}", {"limit": limit})
+            data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            self.logger.warning("Dark pool failed for %s: %s", ticker, exc)
+            return []
+
+    def get_insider_trades(self, ticker: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Recent insider (executive/director) trades for a ticker."""
+        try:
+            payload = self._get_json(f"api/insider/{ticker}", {"limit": limit})
+            data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            self.logger.warning("Insider trades failed for %s: %s", ticker, exc)
+            return []
+
+    def get_congress_trades(self, ticker: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Recent congressional trading disclosures for a ticker."""
+        try:
+            payload = self._get_json(
+                "api/congress/recent-trades", {"ticker": ticker, "limit": limit}
+            )
+            data = payload.get("data", payload) if isinstance(payload, dict) else payload
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            self.logger.warning("Congress trades failed for %s: %s", ticker, exc)
+            return []
+
+    def get_stock_signals(self, ticker: str) -> dict[str, Any]:
+        """Fetch and summarize all Unusual Whales signals for a ticker.
+
+        Returns a structured dict safe to serialize and pass into an AI prompt.
+        All sub-calls degrade to empty lists on failure so this never raises.
+        """
+        flow = self.get_options_flow(ticker, min_premium=50_000, limit=20)
+        darkpool = self.get_darkpool(ticker, limit=20)
+        insider = self.get_insider_trades(ticker, limit=10)
+        congress = self.get_congress_trades(ticker, limit=10)
+
+        # Options flow summary
+        calls = sum(1 for f in flow if str(f.get("put_call", "")).upper() == "C")
+        puts = sum(1 for f in flow if str(f.get("put_call", "")).upper() == "P")
+        sweeps = sum(1 for f in flow if f.get("is_sweep"))
+        flow_premium = sum(float(f.get("premium", 0) or 0) for f in flow)
+
+        # Dark pool summary
+        dp_volume = sum(float(t.get("size", 0) or 0) for t in darkpool)
+        dp_premium = sum(float(t.get("premium", 0) or 0) for t in darkpool)
+
+        # Insider summary (P=purchase, S=sale)
+        insider_buys = sum(
+            1 for t in insider if str(t.get("transaction_code", "")).upper() == "P"
+        )
+        insider_sells = sum(
+            1 for t in insider if str(t.get("transaction_code", "")).upper() == "S"
+        )
+
+        # Congressional summary
+        congress_buys = sum(
+            1 for t in congress
+            if str(t.get("transaction_type", "")).lower() in ("buy", "purchase")
+        )
+        congress_sells = sum(
+            1 for t in congress
+            if str(t.get("transaction_type", "")).lower() in ("sell", "sale")
+        )
+
+        self.logger.debug(
+            "%s UW signals: flow=%d(C%d/P%d) dp=%d insider=%d/%d congress=%d/%d",
+            ticker, len(flow), calls, puts, len(darkpool),
+            insider_buys, insider_sells, congress_buys, congress_sells,
+        )
+
+        return {
+            "options_flow": {
+                "calls": calls,
+                "puts": puts,
+                "sweeps": sweeps,
+                "total_premium_usd": round(flow_premium, 2),
+                "flow_count": len(flow),
+                "bullish_lean": calls > puts,
+            },
+            "darkpool": {
+                "recent_trades": len(darkpool),
+                "total_volume_shares": round(dp_volume, 0),
+                "total_premium_usd": round(dp_premium, 2),
+            },
+            "insider": {
+                "recent_buys": insider_buys,
+                "recent_sells": insider_sells,
+                "net_sentiment": (
+                    "bullish" if insider_buys > insider_sells
+                    else "bearish" if insider_sells > insider_buys
+                    else "neutral"
+                ),
+            },
+            "congress": {
+                "recent_buys": congress_buys,
+                "recent_sells": congress_sells,
+                "net_sentiment": (
+                    "bullish" if congress_buys > congress_sells
+                    else "bearish" if congress_sells > congress_buys
+                    else "neutral"
+                ),
+            },
+        }
+
+
 def _chunked(items: list[str], size: int) -> list[list[str]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
