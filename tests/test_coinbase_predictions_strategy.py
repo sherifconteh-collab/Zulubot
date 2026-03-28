@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import logging
+import unittest
+from datetime import datetime
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from trading_bot.broker import PaperBroker
+from trading_bot.config import PredictionConfig, RiskConfig
+from trading_bot.models import PortfolioState
+from trading_bot.risk import RiskManager
+from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
+
+
+def _make_market(
+    ticker: str = "KXBTC-25DEC3100",
+    yes_ask: float = 0.25,
+    yes_bid: float = 0.20,
+    volume: float = 10_000.0,
+) -> dict[str, Any]:
+    """Build a minimal Kalshi market dict as returned by the strategy's _discover_markets."""
+    return {
+        "ticker": ticker,
+        "title": f"Test market {ticker}",
+        "yes_ask_dollars": str(yes_ask),
+        "yes_bid_dollars": str(yes_bid),
+        "no_ask_dollars": str(1.0 - yes_bid),
+        "no_bid_dollars": str(1.0 - yes_ask),
+        "last_price_dollars": str(yes_ask),
+        "volume_fp": str(volume),
+        "_series": "KXBTC",
+        "_category": "crypto",
+        "_yes_ask": yes_ask,
+        "_yes_bid": yes_bid,
+        "_no_ask": 1.0 - yes_bid,
+        "_no_bid": 1.0 - yes_ask,
+        "_last": yes_ask,
+        "_volume": volume,
+        "_mid": (yes_bid + yes_ask) / 2,
+    }
+
+
+class FakeKalshiClient:
+    """Minimal Kalshi client stub for unit tests."""
+
+    def __init__(self, markets: list[dict[str, Any]] | None = None) -> None:
+        self._markets = markets or []
+        self.can_trade = False
+
+    def get_markets(self, **kwargs: Any) -> tuple[list[dict[str, Any]], None]:
+        return self._markets, None
+
+
+class CoinbasePredictionStrategyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.logger = logging.getLogger("test_predictions")
+        self.now = datetime(2026, 3, 28, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        self.config = PredictionConfig(
+            enabled=True,
+            market_categories=["crypto"],
+        )
+        self.paper_broker = PaperBroker(True, self.logger)
+        self.risk_manager = RiskManager(RiskConfig())
+
+    def _make_state(self) -> PortfolioState:
+        return PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+
+    def _make_strategy(
+        self, markets: list[dict[str, Any]] | None = None
+    ) -> CoinbasePredictionStrategy:
+        kalshi = FakeKalshiClient(markets)
+        return CoinbasePredictionStrategy(
+            config=self.config,
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+
+    # ------------------------------------------------------------------
+    # last_predictions_scan_date tests
+    # ------------------------------------------------------------------
+
+    def test_scan_date_updated_when_markets_found(self) -> None:
+        """last_predictions_scan_date is recorded when markets are discovered."""
+        market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=5_000.0)
+        strategy = self._make_strategy(markets=[market])
+        state = self._make_state()
+
+        self.assertIsNone(state.last_predictions_scan_date)
+
+        strategy.run(
+            state,
+            broker=self.paper_broker,
+            risk_manager=self.risk_manager,
+            now=self.now,
+        )
+
+        self.assertEqual(state.last_predictions_scan_date, self.now.date().isoformat())
+
+    def test_scan_date_updated_when_no_markets_found(self) -> None:
+        """last_predictions_scan_date is recorded even when Kalshi returns no markets."""
+        strategy = self._make_strategy(markets=[])
+        state = self._make_state()
+
+        self.assertIsNone(state.last_predictions_scan_date)
+
+        result = strategy.run(
+            state,
+            broker=self.paper_broker,
+            risk_manager=self.risk_manager,
+            now=self.now,
+        )
+
+        self.assertEqual(result["markets_discovered"], 0)
+        self.assertEqual(state.last_predictions_scan_date, self.now.date().isoformat())
+
+    def test_disabled_strategy_does_not_set_scan_date(self) -> None:
+        """A disabled strategy should return immediately without touching state."""
+        config = PredictionConfig(enabled=False)
+        kalshi = FakeKalshiClient([])
+        strategy = CoinbasePredictionStrategy(
+            config=config,
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        state = self._make_state()
+
+        result = strategy.run(
+            state,
+            broker=self.paper_broker,
+            risk_manager=self.risk_manager,
+            now=self.now,
+        )
+
+        self.assertEqual(result["status"], "disabled")
+        self.assertIsNone(state.last_predictions_scan_date)
+
+
+if __name__ == "__main__":
+    unittest.main()

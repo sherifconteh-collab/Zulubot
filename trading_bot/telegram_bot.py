@@ -252,13 +252,20 @@ class TradingTelegramBot:
         elif risk.get("daily_halt_active"):
             lines.append(f"\n\u26a0\ufe0f <b>DAILY HALT ACTIVE</b>")  # ⚠️
 
-        # Only send if there were actual trades or errors — suppress pure no-signal cycles
+        # Only send if there were actual trades, errors, or active risk events.
+        # Suppress pure no-signal scheduled cycles; allow through for interactive commands
+        # (force_send=True) so users always receive a completion message.
         has_errors = any(
             isinstance(v, dict) and v.get("error")
             for v in module_results.values()
         )
-        if not has_trades and not has_errors:
-            return
+        has_risk_event = bool(risk.get("kill_switch_active") or risk.get("daily_halt_active"))
+        force_send = bool(result.get("force_send"))
+
+        if not has_trades and not has_errors and not has_risk_event:
+            if not force_send:
+                return
+            lines.append("\nCycle complete: no trades executed this run.")
 
         await self.send_message("\n".join(lines))
 
@@ -440,6 +447,7 @@ class TradingTelegramBot:
         await update.message.reply_text("\U0001f4b1 Running crypto cycle...")  # type: ignore[union-attr]
         try:
             result = self._service.run("crypto")
+            result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
             await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
@@ -453,6 +461,7 @@ class TradingTelegramBot:
         await update.message.reply_text("\U0001f4c8 Running stock screen (forced)...")  # type: ignore[union-attr]
         try:
             result = self._service.run("stocks", force=True)
+            result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
             await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
@@ -463,9 +472,10 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f3b2 Running Kalshi scan...")  # type: ignore[union-attr]
+        await update.message.reply_text("\U0001f3b2 Running Polymarket scan...")  # type: ignore[union-attr]
         try:
             result = self._service.run("polymarket")
+            result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
             await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
@@ -479,6 +489,7 @@ class TradingTelegramBot:
         await update.message.reply_text("\U0001f504 Running altcoin rotation cycle...")  # type: ignore[union-attr]
         try:
             result = self._service.run("rotation")
+            result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
             await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
@@ -492,6 +503,7 @@ class TradingTelegramBot:
         await update.message.reply_text("\U0001f3b0 Running prediction markets scan...")  # type: ignore[union-attr]
         try:
             result = self._service.run("predictions")
+            result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
             await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
