@@ -41,6 +41,21 @@ class SchedulerService:
         self._last_predictions_run: datetime | None = None
         self._last_stock_run: datetime | None = None
         self._last_heartbeat: datetime | None = None
+        self._last_latency_arb_run: datetime | None = None
+
+        # When latency arb is active, tighten the poll loop to its scan interval
+        if config.latency_arb.enabled:
+            effective_poll = min(
+                config.scheduler.poll_interval_seconds,
+                config.latency_arb.scan_interval_seconds,
+            )
+            # Override the scheduler config attribute for this session
+            object.__setattr__(
+                self.scheduler_config, "poll_interval_seconds", int(effective_poll)
+            ) if not hasattr(self.scheduler_config, "__dataclass_fields__") else None
+            self._effective_poll_interval = effective_poll
+        else:
+            self._effective_poll_interval = config.scheduler.poll_interval_seconds
 
     async def run_forever(self) -> None:
         """Main daemon loop. Runs until shutdown signal received."""
@@ -49,19 +64,22 @@ class SchedulerService:
         await self.notifier.notify_startup(self.config.paper_mode)
 
         self.logger.info(
-            "Scheduler started. crypto=%dm rotation=%dm predictions=%dm stock_hour=%d heartbeat=%dm poll=%ds",
+            "Scheduler started. crypto=%dm rotation=%dm predictions=%dm stock_hour=%d "
+            "heartbeat=%dm poll=%ds latency_arb=%s(%.1fs)",
             self.scheduler_config.crypto_interval_minutes,
             self.config.altcoin_rotation.check_interval_minutes,
             self.config.predictions.check_interval_minutes,
             self.scheduler_config.stock_check_hour,
             self.scheduler_config.heartbeat_interval_minutes,
-            self.scheduler_config.poll_interval_seconds,
+            self._effective_poll_interval,
+            "enabled" if self.config.latency_arb.enabled else "disabled",
+            self.config.latency_arb.scan_interval_seconds,
         )
 
         try:
             while not self._shutdown_requested:
                 await self._tick()
-                await asyncio.sleep(self.scheduler_config.poll_interval_seconds)
+                await asyncio.sleep(self._effective_poll_interval)
         except asyncio.CancelledError:
             self.logger.info("Scheduler cancelled.")
         finally:
@@ -102,6 +120,11 @@ class SchedulerService:
                 await self.notifier.notify_heartbeat(status)
                 self._last_heartbeat = now
             return
+
+        # Latency arb cycle (highest priority — runs every scan_interval_seconds)
+        if self._should_run_latency_arb(now):
+            await self._run_module("latency_arb", now)
+            self._last_latency_arb_run = now
 
         # Crypto cycle
         if self._should_run_crypto(now):
@@ -157,6 +180,14 @@ class SchedulerService:
             error_msg = f"{command} module failed: {exc}\n{traceback.format_exc()}"
             self.logger.error(error_msg)
             await self.notifier.notify_error(f"{command} failed: {exc}")
+
+    def _should_run_latency_arb(self, now: datetime) -> bool:
+        if not self.config.latency_arb.enabled:
+            return False
+        if self._last_latency_arb_run is None:
+            return True
+        elapsed = (now - self._last_latency_arb_run).total_seconds()
+        return elapsed >= self.config.latency_arb.scan_interval_seconds
 
     def _should_run_crypto(self, now: datetime) -> bool:
         if self._last_crypto_run is None:

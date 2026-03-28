@@ -19,9 +19,11 @@ from trading_bot.models import PortfolioState
 from trading_bot.polymarket_broker import PolymarketBroker
 from trading_bot.risk import RiskManager, RiskSnapshot
 from trading_bot.state import StateStore
+from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.strategies.altcoin_rotation import AltcoinRotationStrategy
 from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
+from trading_bot.strategies.latency_arb import LatencyArbStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.stocks import StockValueStrategy
 
@@ -142,13 +144,29 @@ class TradingBotService:
             logger=logger,
         )
 
+        # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
+        self.price_feed = CoinbasePriceFeed(
+            client=self.coinbase_client,
+            symbols=list(config.latency_arb.symbols),
+            history_seconds=config.latency_arb.price_history_seconds,
+            logger=logger,
+        )
+        self.latency_arb_strategy = LatencyArbStrategy(
+            config=config.latency_arb,
+            price_feed=self.price_feed,
+            kalshi_client=self.kalshi_client,
+            paper_broker=self.broker,
+            logger=logger,
+        )
+
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
 
-        # Sync real Coinbase balance when in live mode
+        # Sync real balances when in live mode
         if not self.config.paper_mode:
             self._sync_coinbase_balance(state)
+        self._sync_kalshi_positions(state)
 
         self.refresh_open_positions(state)
         pre_risk = self._evaluate_risk(state, now)
@@ -216,6 +234,16 @@ class TradingBotService:
                     fear_greed_value=fg_value,
                 ),
             )
+        if command in {"latency_arb", "all"}:
+            module_results["latency_arb"] = self._run_module(
+                "latency_arb",
+                lambda: self.latency_arb_strategy.run_once(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
 
         self.refresh_open_positions(state)
         post_risk = self._evaluate_risk(state, now)
@@ -230,6 +258,7 @@ class TradingBotService:
         state = self.state_store.load()
         if not self.config.paper_mode:
             self._sync_coinbase_balance(state)
+        self._sync_kalshi_positions(state)
         self.refresh_open_positions(state)
         risk = self._evaluate_risk(state, now)
         self.state_store.save(state)
@@ -321,6 +350,66 @@ class TradingBotService:
                 self.logger.warning("Zeroing cash to prevent phantom balance in live mode.")
                 state.cash = 0.0
 
+    def _sync_kalshi_positions(self, state: PortfolioState) -> None:  # noqa: C901
+        """Fetch live Kalshi positions and upsert them into PortfolioState.
+
+        This surfaces any positions placed outside the bot (e.g. via Kalshi.com)
+        so they appear in status reports and are tracked alongside bot-placed positions.
+        Only runs when Kalshi credentials are configured.
+        """
+        if not self.kalshi_client.can_trade:
+            return
+        try:
+            positions = self.kalshi_client.get_positions()
+            if not positions:
+                return
+
+            synced = 0
+            for pos in positions:
+                ticker = pos.get("ticker", "")
+                if not ticker:
+                    continue
+
+                # Determine YES/NO side and quantity
+                yes_count = int(pos.get("position", pos.get("yes_count", 0)) or 0)
+                no_count = int(pos.get("no_count", 0) or 0)
+
+                for side, count in (("YES", yes_count), ("NO", no_count)):
+                    if count <= 0:
+                        continue
+
+                    symbol = f"KL:{ticker}:{side}"
+                    if symbol in state.positions:
+                        # Update quantity for existing tracked position
+                        state.positions[symbol].quantity = float(count)
+                        continue
+
+                    # New position not tracked by the bot — add it
+                    # Price unknown without an orderbook call; set to 0.50 placeholder
+                    from trading_bot.models import Position
+                    synced_at = datetime.now(self.config.timezone).isoformat()
+                    state.positions[symbol] = Position(
+                        symbol=symbol,
+                        asset_type="prediction",
+                        strategy="kalshi_manual",
+                        quantity=float(count),
+                        entry_price=0.50,
+                        current_price=0.50,
+                        opened_at=synced_at,
+                        meta={
+                            "ticker": ticker,
+                            "side": side.lower(),
+                            "source": "kalshi_sync",
+                        },
+                    )
+                    synced += 1
+
+            if synced:
+                self.logger.info("Synced %d new Kalshi positions from account.", synced)
+
+        except Exception as exc:
+            self.logger.warning("Failed to sync Kalshi positions: %s", exc)
+
     def _evaluate_risk(self, state: PortfolioState, now: datetime) -> RiskSnapshot:
         equity = self.broker.portfolio_equity(state)
         snapshot = self.risk_manager.evaluate(state, equity, now)
@@ -361,6 +450,9 @@ class TradingBotService:
             }
             for position in state.positions.values()
         ]
+        # Separate out Kalshi prediction positions for clear visibility
+        kalshi_positions = [p for p in positions if p["symbol"].startswith("KL:")]
+
         return {
             "timestamp": datetime.now(self.config.timezone).isoformat(),
             "paper_mode": self.config.paper_mode,
@@ -368,6 +460,7 @@ class TradingBotService:
             "equity": round(equity, 2),
             "realized_pnl": round(state.realized_pnl, 2),
             "open_positions": positions,
+            "kalshi_positions": kalshi_positions,
             "risk": {
                 "daily_halt_active": post_risk.daily_halt_active,
                 "kill_switch_active": post_risk.kill_switch_active,

@@ -181,6 +181,25 @@ class FreqtradeConfig:
 
 
 @dataclass(frozen=True)
+class LatencyArbConfig:
+    """Configuration for the Kalshi latency arbitrage strategy."""
+
+    enabled: bool = False
+    symbols: list[str] = field(default_factory=lambda: ["BTC-USD", "ETH-USD"])
+    momentum_window_seconds: float = 30.0
+    momentum_min_threshold_pct: float = 0.30  # min 0.3% spot move to signal
+    min_edge_pct: float = 0.05                # min 5% edge over contract price
+    kelly_fraction: float = 0.25             # fractional Kelly multiplier
+    max_position_pct: float = 0.08           # max 8% of equity per contract
+    max_open_contracts: int = 4
+    scan_interval_seconds: float = 2.0
+    price_history_seconds: float = 120.0
+    take_profit_pct: float = 0.20            # exit when price rises 20%
+    stop_loss_pct: float = 0.15
+    min_trade_usd: float = 1.0               # minimum position size in USD
+
+
+@dataclass(frozen=True)
 class AppConfig:
     paper_mode: bool
     initial_cash: float
@@ -203,6 +222,7 @@ class AppConfig:
     altcoin_rotation: AltcoinRotationConfig
     predictions: PredictionConfig
     freqtrade: FreqtradeConfig
+    latency_arb: LatencyArbConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -315,5 +335,20 @@ class AppConfig:
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),
                 api_server_port=_env_int("FREQTRADE_API_SERVER_PORT", 8080),
+            ),
+            latency_arb=LatencyArbConfig(
+                enabled=_env_bool("LATENCY_ARB_ENABLED", False),
+                symbols=_env_list_lower("LATENCY_ARB_SYMBOLS", ["BTC-USD", "ETH-USD"]),
+                momentum_window_seconds=_env_float("LATENCY_ARB_MOMENTUM_WINDOW", 30.0),
+                momentum_min_threshold_pct=_env_float("LATENCY_ARB_MOMENTUM_THRESHOLD", 0.30),
+                min_edge_pct=_env_float("LATENCY_ARB_MIN_EDGE", 0.05),
+                kelly_fraction=_env_float("LATENCY_ARB_KELLY_FRACTION", 0.25),
+                max_position_pct=_env_float("LATENCY_ARB_MAX_POSITION_PCT", 0.08),
+                max_open_contracts=_env_int("LATENCY_ARB_MAX_OPEN_CONTRACTS", 4),
+                scan_interval_seconds=_env_float("LATENCY_ARB_SCAN_INTERVAL", 2.0),
+                price_history_seconds=_env_float("LATENCY_ARB_PRICE_HISTORY", 120.0),
+                take_profit_pct=_env_float("LATENCY_ARB_TAKE_PROFIT", 0.20),
+                stop_loss_pct=_env_float("LATENCY_ARB_STOP_LOSS", 0.15),
+                min_trade_usd=_env_float("LATENCY_ARB_MIN_TRADE_USD", 1.0),
             ),
         )
