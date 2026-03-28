@@ -1,0 +1,2 @@
+-r requirements.txt
+py-clob-client>=0.17.0

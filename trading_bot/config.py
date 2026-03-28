@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return float(raw_value)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return int(raw_value)
+
+
+def _env_list(name: str, default: list[str]) -> list[str]:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    return [part.strip().upper() for part in raw_value.split(",") if part.strip()]
+
+
+def _env_list_lower(name: str, default: list[str]) -> list[str]:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    return [part.strip().lower() for part in raw_value.split(",") if part.strip()]
+
+
+def _default_storage_root() -> Path:
+    explicit_root = os.getenv("BOT_STORAGE_DIR")
+    if explicit_root:
+        return Path(explicit_root).expanduser()
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "TradingBot"
+    return PROJECT_ROOT / ".runtime"
+
+
+@dataclass(frozen=True)
+class RiskConfig:
+    max_position_fraction: float = 0.02
+    daily_halt_drawdown: float = 0.05
+    kill_switch_drawdown: float = 0.15
+
+
+@dataclass(frozen=True)
+class StockStrategyConfig:
+    max_pe_ratio: float = 20.0
+    max_pb_ratio: float = 3.0
+    max_debt_to_equity: float = 0.5
+    min_positive_fcf_signal: float = 0.0
+    vix_buy_threshold: float = 25.0
+    run_interval_days: int = 7
+    max_positions: int = 3
+    vix_symbol: str = "^VIX"
+
+
+@dataclass(frozen=True)
+class CryptoStrategyConfig:
+    symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    buy_fear_threshold: int = 25
+    sell_fear_threshold: int = 75
+    use_coinbase_pricing: bool = True
+
+
+@dataclass(frozen=True)
+class CoinbaseConfig:
+    api_key: str = ""
+    api_secret: str = ""
+
+
+@dataclass(frozen=True)
+class TelegramConfig:
+    bot_token: str = ""
+    chat_id: str = ""
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+
+@dataclass(frozen=True)
+class SchedulerConfig:
+    crypto_interval_minutes: int = 15
+    stock_check_hour: int = 9
+    polymarket_interval_minutes: int = 30
+    heartbeat_interval_minutes: int = 60
+    poll_interval_seconds: int = 60
+
+
+@dataclass(frozen=True)
+class TradingAgentsConfig:
+    enabled: bool = False
+    llm_provider: str = "anthropic"
+    quick_model: str = "claude-haiku-4-5-20251001"
+    deep_model: str = "claude-sonnet-4-6"
+    api_key: str = ""
+    confirmation_mode: str = "log_only"
+    cache_ttl_hours: int = 4
+    max_cost_per_run: float = 0.50
+    max_cost_per_month: float = 20.00
+    max_debate_rounds: int = 1
+    timeout_seconds: int = 120
+
+
+@dataclass(frozen=True)
+class PolymarketStrategyConfig:
+    enabled: bool = False
+    market_tags: list[str] = field(default_factory=lambda: ["crypto", "finance"])
+    min_volume: float = 100_000.0
+    min_liquidity: float = 10_000.0
+    buy_yes_threshold: float = 0.30
+    buy_no_threshold: float = 0.70
+    take_profit_threshold: float = 0.50
+    stop_loss_threshold: float = 0.15
+    max_positions: int = 3
+    use_trading_agents: bool = False
+
+
+@dataclass(frozen=True)
+class PolymarketConfig:
+    api_key: str = ""
+    api_secret: str = ""
+    api_passphrase: str = ""
+    private_key: str = ""
+
+
+@dataclass(frozen=True)
+class AltcoinRotationConfig:
+    enabled: bool = True
+    scout_multiplier: float = 5.0        # ratio must exceed fees × this to justify swap
+    fee_pct: float = 0.006               # Coinbase taker fee ~0.6%
+    check_interval_minutes: int = 60     # check every hour
+    min_trade_usd: float = 1.0           # minimum $1 trade
+    excluded_coins: list[str] = field(default_factory=list)  # coins to never trade
+    max_coins_to_track: int = 50         # limit to top 50 by volume
+
+
+@dataclass(frozen=True)
+class PredictionConfig:
+    enabled: bool = False                # OFF by default
+    buy_yes_threshold: float = 0.30      # Buy YES below this price
+    buy_no_threshold: float = 0.70       # Buy NO above this price
+    take_profit_threshold: float = 0.50  # Take profit at 0.50
+    stop_loss_pct: float = 0.15          # Stop loss at 15% move against
+    max_positions: int = 3
+    check_interval_minutes: int = 60
+    min_trade_usd: float = 1.0
+    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics"])
+
+
+@dataclass(frozen=True)
+class FreqtradeConfig:
+    enabled: bool = False
+    api_server_port: int = 8080
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    paper_mode: bool
+    initial_cash: float
+    timezone: ZoneInfo
+    request_timeout_seconds: int
+    fmp_api_key: str
+    data_dir: Path
+    log_dir: Path
+    state_path: Path
+    log_level: str
+    risk: RiskConfig
+    stock: StockStrategyConfig
+    crypto: CryptoStrategyConfig
+    coinbase: CoinbaseConfig
+    telegram: TelegramConfig
+    scheduler: SchedulerConfig
+    polymarket: PolymarketConfig
+    polymarket_strategy: PolymarketStrategyConfig
+    trading_agents: TradingAgentsConfig
+    altcoin_rotation: AltcoinRotationConfig
+    predictions: PredictionConfig
+    freqtrade: FreqtradeConfig
+
+    @classmethod
+    def load(cls) -> "AppConfig":
+        storage_root = _default_storage_root()
+        data_dir_env = os.getenv("BOT_DATA_DIR", "").strip()
+        log_dir_env = os.getenv("BOT_LOG_DIR", "").strip()
+        data_dir = Path(data_dir_env).expanduser() if data_dir_env else storage_root / "data"
+        log_dir = Path(log_dir_env).expanduser() if log_dir_env else storage_root / "logs"
+        return cls(
+            paper_mode=_env_bool("PAPER_MODE", True),
+            initial_cash=_env_float("INITIAL_CASH", 100_000.0),
+            timezone=ZoneInfo(os.getenv("BOT_TIMEZONE", "America/New_York")),
+            request_timeout_seconds=_env_int("REQUEST_TIMEOUT_SECONDS", 20),
+            fmp_api_key=os.getenv("FMP_API_KEY", "").strip(),
+            data_dir=data_dir,
+            log_dir=log_dir,
+            state_path=data_dir / "state.json",
+            log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            risk=RiskConfig(
+                max_position_fraction=_env_float("MAX_POSITION_FRACTION", 0.02),
+                daily_halt_drawdown=_env_float("DAILY_HALT_DRAWDOWN", 0.05),
+                kill_switch_drawdown=_env_float("KILL_SWITCH_DRAWDOWN", 0.15),
+            ),
+            stock=StockStrategyConfig(
+                max_pe_ratio=_env_float("STOCK_MAX_PE", 20.0),
+                max_pb_ratio=_env_float("STOCK_MAX_PB", 3.0),
+                max_debt_to_equity=_env_float("STOCK_MAX_DEBT_TO_EQUITY", 0.5),
+                min_positive_fcf_signal=_env_float("STOCK_MIN_POSITIVE_FCF_SIGNAL", 0.0),
+                vix_buy_threshold=_env_float("STOCK_VIX_BUY_THRESHOLD", 25.0),
+                run_interval_days=_env_int("STOCK_RUN_INTERVAL_DAYS", 7),
+                max_positions=_env_int("STOCK_MAX_POSITIONS", 3),
+                vix_symbol=os.getenv("STOCK_VIX_SYMBOL", "^VIX").strip() or "^VIX",
+            ),
+            crypto=CryptoStrategyConfig(
+                symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
+                buy_fear_threshold=_env_int("CRYPTO_BUY_FEAR_THRESHOLD", 25),
+                sell_fear_threshold=_env_int("CRYPTO_SELL_FEAR_THRESHOLD", 75),
+                use_coinbase_pricing=_env_bool("CRYPTO_USE_COINBASE_PRICING", True),
+            ),
+            coinbase=CoinbaseConfig(
+                api_key=os.getenv("COINBASE_API_KEY", "").strip(),
+                api_secret=os.getenv("COINBASE_API_SECRET", "").strip(),
+            ),
+            telegram=TelegramConfig(
+                bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+                chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            ),
+            scheduler=SchedulerConfig(
+                crypto_interval_minutes=_env_int("SCHEDULER_CRYPTO_INTERVAL_MINUTES", 15),
+                stock_check_hour=_env_int("SCHEDULER_STOCK_CHECK_HOUR", 9),
+                polymarket_interval_minutes=_env_int("SCHEDULER_POLYMARKET_INTERVAL_MINUTES", 30),
+                heartbeat_interval_minutes=_env_int("SCHEDULER_HEARTBEAT_INTERVAL_MINUTES", 60),
+                poll_interval_seconds=_env_int("SCHEDULER_POLL_INTERVAL_SECONDS", 60),
+            ),
+            polymarket=PolymarketConfig(
+                api_key=os.getenv("POLYMARKET_API_KEY", "").strip(),
+                api_secret=os.getenv("POLYMARKET_API_SECRET", "").strip(),
+                api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE", "").strip(),
+                private_key=os.getenv("POLYMARKET_PRIVATE_KEY", "").strip(),
+            ),
+            polymarket_strategy=PolymarketStrategyConfig(
+                enabled=_env_bool("POLYMARKET_ENABLED", False),
+                market_tags=_env_list_lower("POLYMARKET_MARKET_TAGS", ["crypto", "finance"]),
+                min_volume=_env_float("POLYMARKET_MIN_VOLUME", 100_000.0),
+                min_liquidity=_env_float("POLYMARKET_MIN_LIQUIDITY", 10_000.0),
+                buy_yes_threshold=_env_float("POLYMARKET_BUY_YES_THRESHOLD", 0.30),
+                buy_no_threshold=_env_float("POLYMARKET_BUY_NO_THRESHOLD", 0.70),
+                take_profit_threshold=_env_float("POLYMARKET_TAKE_PROFIT", 0.50),
+                stop_loss_threshold=_env_float("POLYMARKET_STOP_LOSS", 0.15),
+                max_positions=_env_int("POLYMARKET_MAX_POSITIONS", 3),
+                use_trading_agents=_env_bool("POLYMARKET_USE_TRADING_AGENTS", False),
+            ),
+            trading_agents=TradingAgentsConfig(
+                enabled=_env_bool("TRADING_AGENTS_ENABLED", False),
+                llm_provider=os.getenv("TRADING_AGENTS_LLM_PROVIDER", "anthropic").strip(),
+                quick_model=os.getenv("TRADING_AGENTS_QUICK_MODEL", "claude-haiku-4-5-20251001").strip(),
+                deep_model=os.getenv("TRADING_AGENTS_DEEP_MODEL", "claude-sonnet-4-6").strip(),
+                api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
+                confirmation_mode=os.getenv("TRADING_AGENTS_CONFIRMATION_MODE", "log_only").strip(),
+                cache_ttl_hours=_env_int("TRADING_AGENTS_CACHE_TTL_HOURS", 4),
+                max_cost_per_run=_env_float("TRADING_AGENTS_MAX_COST_PER_RUN", 0.50),
+                max_cost_per_month=_env_float("TRADING_AGENTS_MAX_COST_PER_MONTH", 20.00),
+                max_debate_rounds=_env_int("TRADING_AGENTS_MAX_DEBATE_ROUNDS", 1),
+                timeout_seconds=_env_int("TRADING_AGENTS_TIMEOUT_SECONDS", 120),
+            ),
+            altcoin_rotation=AltcoinRotationConfig(
+                enabled=_env_bool("ROTATION_ENABLED", True),
+                scout_multiplier=_env_float("ROTATION_SCOUT_MULTIPLIER", 5.0),
+                fee_pct=_env_float("ROTATION_FEE_PCT", 0.006),
+                check_interval_minutes=_env_int("ROTATION_CHECK_INTERVAL_MINUTES", 60),
+                min_trade_usd=_env_float("ROTATION_MIN_TRADE_USD", 1.0),
+                excluded_coins=_env_list("ROTATION_EXCLUDED_COINS", []),
+                max_coins_to_track=_env_int("ROTATION_MAX_COINS_TO_TRACK", 50),
+            ),
+            predictions=PredictionConfig(
+                enabled=_env_bool("PREDICTION_ENABLED", False),
+                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.30),
+                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.70),
+                take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
+                stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
+                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 3),
+                check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 60),
+                min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
+                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics"]),
+            ),
+            freqtrade=FreqtradeConfig(
+                enabled=_env_bool("FREQTRADE_ENABLED", False),
+                api_server_port=_env_int("FREQTRADE_API_SERVER_PORT", 8080),
+            ),
+        )

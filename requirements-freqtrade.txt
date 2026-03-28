@@ -1,0 +1,2 @@
+-r requirements.txt
+freqtrade>=2024.1
