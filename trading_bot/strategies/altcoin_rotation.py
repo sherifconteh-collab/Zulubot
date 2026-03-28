@@ -324,16 +324,25 @@ class AltcoinRotationStrategy:
             self.logger.warning("Cannot check cash balance for seeding: %s", exc)
             return None
 
-        if cash_available < self.config.min_trade_usd:
+        # Only use our allocation share (e.g. 60%), leave the rest for predictions
+        rotation_budget = cash_available * self.config.capital_allocation_pct
+        self.logger.info(
+            "Cash available: $%.2f, rotation allocation: %.0f%% = $%.2f",
+            cash_available, self.config.capital_allocation_pct * 100, rotation_budget,
+        )
+
+        if rotation_budget < self.config.min_trade_usd:
             self.logger.info(
-                "Not enough cash to seed rotation: $%.2f < min $%.2f",
-                cash_available, self.config.min_trade_usd,
+                "Not enough cash for rotation seed: $%.2f < min $%.2f",
+                rotation_budget, self.config.min_trade_usd,
             )
             return None
 
+        cash_available = rotation_budget  # Use only our share
+
         self.logger.info(
-            "Seeding rotation with $%.2f cash. Picking best coin from %d candidates.",
-            cash_available, len(prices),
+            "Seeding rotation with $%.2f (%.0f%% of balance). Picking best coin from %d candidates.",
+            cash_available, self.config.capital_allocation_pct * 100, len(prices),
         )
 
         # Pick the coin with the highest price (proxy for market cap / liquidity).
