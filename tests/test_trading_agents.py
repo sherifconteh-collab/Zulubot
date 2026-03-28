@@ -75,6 +75,72 @@ class TradingAgentsServiceTests(unittest.TestCase):
         self.assertGreater(verdict.confidence, 0.5)
         self.assertIn("Strong value", verdict.reasoning)
 
+    def test_evaluate_stock_with_uw_signals_includes_market_intelligence(self) -> None:
+        """uw_signals should inject the Market Intelligence section into the prompt."""
+        captured_prompts: list[str] = []
+
+        class CapturingClient:
+            def __init__(self) -> None:
+                self._responses = [
+                    "yes",
+                    '{"action": "buy", "confidence": 0.85, "reasoning": "UW confirms bullish"}',
+                ]
+                self._call_idx = 0
+                self.messages = self
+
+            def create(self, **kwargs) -> FakeAnthropicMessage:
+                msgs = kwargs.get("messages", [])
+                if msgs:
+                    captured_prompts.append(msgs[0]["content"])
+                text = self._responses[min(self._call_idx, len(self._responses) - 1)]
+                self._call_idx += 1
+                return FakeAnthropicMessage(text)
+
+        service = TradingAgentsService(TradingAgentsConfig(enabled=False), self.logger)
+        service.config = self.config
+        service._anthropic_client = CapturingClient()
+
+        uw_signals = {
+            "options_flow": {
+                "calls": 8, "puts": 3, "sweeps": 2,
+                "total_premium_usd": 500_000, "flow_count": 11,
+                "net_sentiment": "bullish",
+            },
+            "darkpool": {"recent_trades": 5, "total_volume_shares": 100_000, "total_premium_usd": 2_000_000},
+            "insider": {"recent_buys": 2, "recent_sells": 0, "net_sentiment": "bullish"},
+            "congress": {"recent_buys": 1, "recent_sells": 0, "net_sentiment": "bullish"},
+        }
+
+        verdict = service.evaluate_stock(
+            symbol="AAPL",
+            fundamentals={"pe_ratio": 15, "pb_ratio": 2.0, "debt_to_equity": 0.3},
+            vix_value=28.0,
+            uw_signals=uw_signals,
+        )
+
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.action, "buy")
+        combined = "\n".join(captured_prompts)
+        self.assertIn("Market Intelligence (Unusual Whales)", combined)
+        self.assertIn("lean=bullish", combined)
+
+    def test_evaluate_stock_with_partial_uw_signals_does_not_error(self) -> None:
+        """evaluate_stock must not raise when uw_signals is missing nested fields."""
+        service = self._make_service([
+            "yes",
+            '{"action": "hold", "confidence": 0.5, "reasoning": "Partial data"}',
+        ])
+
+        # Intentionally sparse uw_signals — must not KeyError
+        verdict = service.evaluate_stock(
+            symbol="MSFT",
+            fundamentals={"pe_ratio": 20},
+            vix_value=20.0,
+            uw_signals={"options_flow": {}, "darkpool": {}},
+        )
+
+        self.assertIsNotNone(verdict)
+
     def test_haiku_screen_rejects_skips_sonnet(self) -> None:
         service = self._make_service([
             "no",  # Haiku screen says don't investigate

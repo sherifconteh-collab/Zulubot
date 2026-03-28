@@ -472,13 +472,21 @@ class UnusualWhalesClient(BaseHttpClient):
     All methods return empty lists on error so callers degrade gracefully.
     """
 
-    def __init__(self, *, api_key: str, timeout_seconds: int, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_seconds: int,
+        logger: logging.Logger,
+        min_flow_premium: float = 50_000,
+    ) -> None:
         super().__init__(
             base_url="https://api.unusualwhales.com",
             timeout_seconds=timeout_seconds,
             logger=logger.getChild("unusual_whales"),
         )
         self.session.headers["Authorization"] = f"Bearer {api_key}"
+        self.min_flow_premium = min_flow_premium
 
     def get_options_flow(
         self, ticker: str, *, min_premium: float = 50_000, limit: int = 20
@@ -533,7 +541,7 @@ class UnusualWhalesClient(BaseHttpClient):
         Returns a structured dict safe to serialize and pass into an AI prompt.
         All sub-calls degrade to empty lists on failure so this never raises.
         """
-        flow = self.get_options_flow(ticker, min_premium=50_000, limit=20)
+        flow = self.get_options_flow(ticker, min_premium=self.min_flow_premium, limit=20)
         darkpool = self.get_darkpool(ticker, limit=20)
         insider = self.get_insider_trades(ticker, limit=10)
         congress = self.get_congress_trades(ticker, limit=10)
@@ -542,11 +550,11 @@ class UnusualWhalesClient(BaseHttpClient):
         calls = sum(1 for f in flow if str(f.get("put_call", "")).upper() == "C")
         puts = sum(1 for f in flow if str(f.get("put_call", "")).upper() == "P")
         sweeps = sum(1 for f in flow if f.get("is_sweep"))
-        flow_premium = sum(float(f.get("premium", 0) or 0) for f in flow)
+        flow_premium = sum((_parse_float(f.get("premium", 0) or 0) or 0.0) for f in flow)
 
         # Dark pool summary
-        dp_volume = sum(float(t.get("size", 0) or 0) for t in darkpool)
-        dp_premium = sum(float(t.get("premium", 0) or 0) for t in darkpool)
+        dp_volume = sum((_parse_float(t.get("size", 0) or 0) or 0.0) for t in darkpool)
+        dp_premium = sum((_parse_float(t.get("premium", 0) or 0) or 0.0) for t in darkpool)
 
         # Insider summary (P=purchase, S=sale)
         insider_buys = sum(
@@ -579,7 +587,11 @@ class UnusualWhalesClient(BaseHttpClient):
                 "sweeps": sweeps,
                 "total_premium_usd": round(flow_premium, 2),
                 "flow_count": len(flow),
-                "bullish_lean": calls > puts,
+                "net_sentiment": (
+                    "bullish" if calls > puts
+                    else "bearish" if puts > calls
+                    else "neutral"
+                ),
             },
             "darkpool": {
                 "recent_trades": len(darkpool),

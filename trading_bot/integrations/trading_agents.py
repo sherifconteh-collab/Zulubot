@@ -158,6 +158,16 @@ class TradingAgentsService:
             return None
 
         cache_key = f"stock:{symbol}"
+        if uw_signals:
+            # Include a lightweight fingerprint of UW signals so cached verdicts
+            # are not served when intelligence data has changed.
+            flow = uw_signals.get("options_flow") or {}
+            cache_key = (
+                f"stock:{symbol}:"
+                f"fc{flow.get('flow_count', 0)}"
+                f"c{flow.get('calls', 0)}"
+                f"p{flow.get('puts', 0)}"
+            )
         cached = self._check_cache(cache_key)
         if cached is not None:
             return cached
@@ -168,13 +178,14 @@ class TradingAgentsService:
             dp = uw_signals.get("darkpool", {})
             ins = uw_signals.get("insider", {})
             cong = uw_signals.get("congress", {})
+            options_lean = flow.get("net_sentiment", "neutral")
             uw_section = (
                 f"\nMarket Intelligence (Unusual Whales):\n"
                 f"  Options Flow: {flow.get('flow_count', 0)} alerts — "
                 f"{flow.get('calls', 0)} calls / {flow.get('puts', 0)} puts, "
                 f"{flow.get('sweeps', 0)} sweeps, "
                 f"${flow.get('total_premium_usd', 0):,.0f} total premium, "
-                f"lean={'bullish' if flow.get('bullish_lean') else 'bearish'}\n"
+                f"lean={options_lean}\n"
                 f"  Dark Pool: {dp.get('recent_trades', 0)} recent block trades, "
                 f"{dp.get('total_volume_shares', 0):,.0f} shares, "
                 f"${dp.get('total_premium_usd', 0):,.0f} premium\n"

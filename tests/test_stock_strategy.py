@@ -109,6 +109,135 @@ class StockStrategyTests(unittest.TestCase):
         self.assertNotIn("AAA", state.positions)
 
 
+class UnusualWhalesIntegrationTests(unittest.TestCase):
+    """Tests for StockValueStrategy Unusual Whales client integration."""
+
+    _SAMPLE_SIGNALS = {
+        "options_flow": {
+            "calls": 7, "puts": 2, "sweeps": 1,
+            "total_premium_usd": 300_000, "flow_count": 9,
+            "net_sentiment": "bullish",
+        },
+        "darkpool": {"recent_trades": 3, "total_volume_shares": 50_000, "total_premium_usd": 750_000},
+        "insider": {"recent_buys": 1, "recent_sells": 0, "net_sentiment": "bullish"},
+        "congress": {"recent_buys": 0, "recent_sells": 0, "net_sentiment": "neutral"},
+    }
+
+    def setUp(self) -> None:
+        self.logger = logging.getLogger("test_uw_integration")
+        self.now = datetime(2026, 3, 28, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        self.client = _make_fmp_client()
+        self.broker = PaperBroker(True, self.logger)
+        self.risk_manager = RiskManager(RiskConfig())
+
+    def _make_strategy(
+        self,
+        uw_client=None,
+        ai_service=None,
+    ) -> StockValueStrategy:
+        return StockValueStrategy(
+            config=StockStrategyConfig(),
+            client=self.client,
+            logger=self.logger,
+            uw_client=uw_client,
+            ai_service=ai_service,
+        )
+
+    def test_uw_signals_persisted_in_position_meta(self) -> None:
+        """UW signals returned by the client must be stored in opened position meta."""
+        uw_client = _FakeUwClient(self._SAMPLE_SIGNALS)
+        strategy = self._make_strategy(uw_client=uw_client)
+
+        state = PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+
+        strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now, force=True)
+
+        for symbol, position in state.positions.items():
+            self.assertIn("uw_signals", position.meta, f"Missing uw_signals in meta for {symbol}")
+            self.assertEqual(position.meta["uw_signals"], self._SAMPLE_SIGNALS)
+
+    def test_uw_signals_passed_to_ai_evaluate_stock(self) -> None:
+        """UW signals must be forwarded to ai_service.evaluate_stock."""
+        uw_client = _FakeUwClient(self._SAMPLE_SIGNALS)
+        ai_service = _RecordingAiService()
+        strategy = self._make_strategy(uw_client=uw_client, ai_service=ai_service)
+
+        state = PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+
+        strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now, force=True)
+
+        self.assertTrue(ai_service.calls, "ai_service.evaluate_stock was never called")
+        for call_kwargs in ai_service.calls:
+            self.assertEqual(call_kwargs.get("uw_signals"), self._SAMPLE_SIGNALS)
+
+    def test_uw_client_exception_does_not_abort_strategy(self) -> None:
+        """A raising uw_client must not crash the strategy loop; buys continue with uw_signals=None."""
+        uw_client = _ErrorUwClient()
+        strategy = self._make_strategy(uw_client=uw_client)
+
+        state = PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+
+        result = strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager, now=self.now, force=True
+        )
+
+        # Strategy should still open positions (graceful degradation)
+        self.assertTrue(result.get("buys"), "Expected buys even when UW client raises")
+        for symbol, position in state.positions.items():
+            self.assertNotIn("uw_signals", position.meta, f"uw_signals must be absent when fetch failed")
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _make_fmp_client() -> FakeFmpClient:
+    """Return a fresh FakeFmpClient with qualifying stocks."""
+    return FakeFmpClient()
+
+
+class _FakeUwClient:
+    """Returns a fixed signals dict for every ticker."""
+    def __init__(self, signals: dict) -> None:
+        self._signals = signals
+
+    def get_stock_signals(self, ticker: str) -> dict:
+        return self._signals
+
+
+class _ErrorUwClient:
+    """Always raises on get_stock_signals."""
+    def get_stock_signals(self, ticker: str) -> dict:
+        raise RuntimeError("Simulated UW API failure")
+
+
+class _RecordingAiService:
+    """Records all calls to evaluate_stock and returns a buy verdict."""
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    @property
+    def is_available(self) -> bool:
+        return True
+
+    def evaluate_stock(self, **kwargs) -> object:
+        from trading_bot.integrations.trading_agents import AgentVerdict
+        self.calls.append(kwargs)
+        return AgentVerdict(action="buy", confidence=0.8, reasoning="fake verdict")
+
+
 if __name__ == "__main__":
     unittest.main()
-
