@@ -48,6 +48,7 @@ class StockValueStrategy:
         ai_service: Any | None = None,
         confirmation_mode: str = "log_only",
         coinbase_broker: Any | None = None,
+        uw_client: Any | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -55,6 +56,7 @@ class StockValueStrategy:
         self.ai_service = ai_service
         self.confirmation_mode = confirmation_mode
         self.coinbase_broker = coinbase_broker
+        self.uw_client = uw_client
 
     def run(
         self,
@@ -138,6 +140,20 @@ class StockValueStrategy:
                     self.logger.warning("Skipping stock buy for %s because position size is zero.", fundamentals.symbol)
                     continue
 
+                # Unusual Whales market intelligence (optional)
+                uw_signals: dict[str, Any] | None = None
+                if self.uw_client is not None:
+                    uw_signals = self.uw_client.get_stock_signals(fundamentals.symbol)
+                    self.logger.info(
+                        "UW signals for %s: flow=%d options, dp=%d blocks, "
+                        "insider=%s, congress=%s",
+                        fundamentals.symbol,
+                        uw_signals["options_flow"]["flow_count"],
+                        uw_signals["darkpool"]["recent_trades"],
+                        uw_signals["insider"]["net_sentiment"],
+                        uw_signals["congress"]["net_sentiment"],
+                    )
+
                 # AI confirmation (optional)
                 ai_meta: dict[str, Any] = {}
                 if self.ai_service is not None and apply_ai_confirmation is not None:
@@ -145,6 +161,7 @@ class StockValueStrategy:
                         symbol=fundamentals.symbol,
                         fundamentals=fundamentals.to_dict(),
                         vix_value=vix_value,
+                        uw_signals=uw_signals,
                     )
                     notional, ai_meta = apply_ai_confirmation(
                         verdict, self.confirmation_mode, notional, self.logger,
@@ -167,7 +184,12 @@ class StockValueStrategy:
                     price=price,
                     notional=notional,
                     opened_at=now,
-                    meta={"fundamentals": fundamentals.to_dict(), "vix_value": vix_value, **ai_meta},
+                    meta={
+                        "fundamentals": fundamentals.to_dict(),
+                        "vix_value": vix_value,
+                        **({"uw_signals": uw_signals} if uw_signals else {}),
+                        **ai_meta,
+                    },
                 )
                 if position is not None:
                     stock_positions_after_sells.add(fundamentals.symbol)

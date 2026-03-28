@@ -175,6 +175,14 @@ class PredictionConfig:
 
 
 @dataclass(frozen=True)
+class UnusualWhalesConfig:
+    enabled: bool = False
+    api_key: str = ""
+    timeout_seconds: int = 15
+    min_flow_premium: float = 50_000.0   # minimum premium for options flow alerts
+
+
+@dataclass(frozen=True)
 class FreqtradeConfig:
     enabled: bool = False
     api_server_port: int = 8080
@@ -224,6 +232,7 @@ class AppConfig:
     predictions: PredictionConfig
     freqtrade: FreqtradeConfig
     latency_arb: LatencyArbConfig
+    unusual_whales: UnusualWhalesConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -352,5 +361,11 @@ class AppConfig:
                 stop_loss_pct=_env_float("LATENCY_ARB_STOP_LOSS", 0.15),
                 min_trade_usd=_env_float("LATENCY_ARB_MIN_TRADE_USD", 1.0),
                 ai_confirmation_mode=os.getenv("LATENCY_ARB_AI_CONFIRMATION", "boost").strip().lower(),
+            ),
+            unusual_whales=UnusualWhalesConfig(
+                enabled=_env_bool("UNUSUAL_WHALES_ENABLED", False),
+                api_key=os.getenv("UNUSUAL_WHALES_API_KEY", "").strip(),
+                timeout_seconds=_env_int("UNUSUAL_WHALES_TIMEOUT_SECONDS", 15),
+                min_flow_premium=_env_float("UNUSUAL_WHALES_MIN_FLOW_PREMIUM", 50_000.0),
             ),
         )

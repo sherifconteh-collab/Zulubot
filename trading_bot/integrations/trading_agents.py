@@ -146,10 +146,13 @@ class TradingAgentsService:
         symbol: str,
         fundamentals: dict[str, Any],
         vix_value: float,
+        uw_signals: dict[str, Any] | None = None,
     ) -> AgentVerdict | None:
         """Evaluate a stock buy/sell signal with AI.
 
         Called only when quant signals (value screen + VIX threshold) fire.
+        Optionally enriched with Unusual Whales market intelligence (options
+        flow, dark pool, insider trades, congressional trades) when available.
         """
         if not self.is_available:
             return None
@@ -159,6 +162,30 @@ class TradingAgentsService:
         if cached is not None:
             return cached
 
+        uw_section = ""
+        if uw_signals:
+            flow = uw_signals.get("options_flow", {})
+            dp = uw_signals.get("darkpool", {})
+            ins = uw_signals.get("insider", {})
+            cong = uw_signals.get("congress", {})
+            uw_section = (
+                f"\nMarket Intelligence (Unusual Whales):\n"
+                f"  Options Flow: {flow.get('flow_count', 0)} alerts — "
+                f"{flow.get('calls', 0)} calls / {flow.get('puts', 0)} puts, "
+                f"{flow.get('sweeps', 0)} sweeps, "
+                f"${flow.get('total_premium_usd', 0):,.0f} total premium, "
+                f"lean={'bullish' if flow.get('bullish_lean') else 'bearish'}\n"
+                f"  Dark Pool: {dp.get('recent_trades', 0)} recent block trades, "
+                f"{dp.get('total_volume_shares', 0):,.0f} shares, "
+                f"${dp.get('total_premium_usd', 0):,.0f} premium\n"
+                f"  Insider Activity: {ins.get('recent_buys', 0)} buys / "
+                f"{ins.get('recent_sells', 0)} sells "
+                f"({ins.get('net_sentiment', 'neutral')})\n"
+                f"  Congressional Trading: {cong.get('recent_buys', 0)} buys / "
+                f"{cong.get('recent_sells', 0)} sells "
+                f"({cong.get('net_sentiment', 'neutral')})\n"
+            )
+
         prompt = (
             f"You are a value investing analyst. Evaluate {symbol} for a potential trade.\n\n"
             f"Fundamentals:\n"
@@ -167,7 +194,8 @@ class TradingAgentsService:
             f"  D/E Ratio: {fundamentals.get('debt_to_equity', 'N/A')}\n"
             f"  FCF Signal: {fundamentals.get('fcf_positive_signal', 'N/A')}\n"
             f"  P/FCF Ratio: {fundamentals.get('pfcf_ratio', 'N/A')}\n"
-            f"  VIX: {vix_value}\n\n"
+            f"  VIX: {vix_value}"
+            f"{uw_section}\n"
             f"Respond with JSON: {{\"action\": \"buy\"|\"sell\"|\"hold\"|\"skip\", "
             f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
         )
