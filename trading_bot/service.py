@@ -68,6 +68,7 @@ class TradingBotService:
             self.uw_client = UnusualWhalesClient(
                 api_key=config.unusual_whales.api_key,
                 timeout_seconds=config.unusual_whales.timeout_seconds,
+                min_flow_premium=config.unusual_whales.min_flow_premium,
                 logger=logger,
             )
             self.logger.info("Unusual Whales client enabled.")

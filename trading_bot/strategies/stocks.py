@@ -143,16 +143,29 @@ class StockValueStrategy:
                 # Unusual Whales market intelligence (optional)
                 uw_signals: dict[str, Any] | None = None
                 if self.uw_client is not None:
-                    uw_signals = self.uw_client.get_stock_signals(fundamentals.symbol)
-                    self.logger.info(
-                        "UW signals for %s: flow=%d options, dp=%d blocks, "
-                        "insider=%s, congress=%s",
-                        fundamentals.symbol,
-                        uw_signals["options_flow"]["flow_count"],
-                        uw_signals["darkpool"]["recent_trades"],
-                        uw_signals["insider"]["net_sentiment"],
-                        uw_signals["congress"]["net_sentiment"],
-                    )
+                    try:
+                        uw_signals = self.uw_client.get_stock_signals(fundamentals.symbol)
+                    except Exception:
+                        self.logger.warning(
+                            "Failed to fetch Unusual Whales signals for %s; continuing without them.",
+                            fundamentals.symbol,
+                            exc_info=True,
+                        )
+                    else:
+                        uw_root = uw_signals or {}
+                        options_flow = uw_root.get("options_flow") or {}
+                        darkpool = uw_root.get("darkpool") or {}
+                        insider = uw_root.get("insider") or {}
+                        congress = uw_root.get("congress") or {}
+                        self.logger.info(
+                            "UW signals for %s: flow=%d options, dp=%d blocks, "
+                            "insider=%s, congress=%s",
+                            fundamentals.symbol,
+                            options_flow.get("flow_count", 0),
+                            darkpool.get("recent_trades", 0),
+                            insider.get("net_sentiment", "n/a"),
+                            congress.get("net_sentiment", "n/a"),
+                        )
 
                 # AI confirmation (optional)
                 ai_meta: dict[str, Any] = {}
