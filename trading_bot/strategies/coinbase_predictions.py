@@ -106,6 +106,7 @@ class CoinbasePredictionStrategy:
 
             if not markets:
                 self.logger.info("No prediction markets found on Kalshi.")
+                state.last_predictions_scan_date = now.date().isoformat()
                 return result
 
             result["markets_scanned"] = len(markets)
