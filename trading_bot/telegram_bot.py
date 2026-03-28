@@ -412,7 +412,7 @@ class TradingTelegramBot:
             f"  /rotation — Force altcoin rotation\n"
             f"  /predict — Force prediction scan\n"
             f"  /stocks — Force stock screen\n"
-            f"  /polymarket — Force Polymarket scan\n"
+            f"  /polymarket — Force Kalshi scan\n"
             f"  /backtest [range] ��� Run backtest\n"
             f"\n"
             f"\U0001f6e0 <b>Control</b>\n"  # 🛠
@@ -472,9 +472,9 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f3b2 Running Polymarket scan...")  # type: ignore[union-attr]
+        await update.message.reply_text("\U0001f3b2 Running Kalshi scan...")  # type: ignore[union-attr]
         try:
-            result = self._service.run("polymarket")
+            result = self._service.run("predictions")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
