@@ -56,6 +56,7 @@ class AgentVerdict:
 class _CacheEntry:
     verdict: AgentVerdict
     expires_at: float  # Unix timestamp
+    stored_at: float = field(default_factory=time.time)  # when the entry was created
 
 
 class TradingAgentsService:
@@ -72,10 +73,14 @@ class TradingAgentsService:
       5. Hard caps: $0.50/run, $20/month
     """
 
-    # Approximate costs per 1K tokens (input + output averaged)
-    _MODEL_COSTS: dict[str, float] = {
-        "claude-haiku-4-5-20251001": 0.001,
-        "claude-sonnet-4-6": 0.015,
+    # Anthropic pricing per 1M tokens (verify at https://anthropic.com/pricing before updating)
+    _INPUT_COST_PER_M: dict[str, float] = {
+        "claude-haiku-4-5-20251001": 0.80,   # $0.80/M input tokens
+        "claude-sonnet-4-6": 3.00,            # $3.00/M input tokens
+    }
+    _OUTPUT_COST_PER_M: dict[str, float] = {
+        "claude-haiku-4-5-20251001": 4.00,   # $4.00/M output tokens
+        "claude-sonnet-4-6": 15.00,           # $15.00/M output tokens
     }
 
     def __init__(self, config: TradingAgentsConfig, logger: logging.Logger) -> None:
@@ -385,6 +390,143 @@ class TradingAgentsService:
             self._set_cache_with_ttl(cache_key, verdict, ttl_seconds=3600)
         return verdict
 
+    def evaluate_exit_signal(
+        self,
+        asset: str,
+        side: str,
+        entry_price: float,
+        current_price: float,
+        gain_pct: float,
+        market_regime: str | None,
+        reason: str,
+    ) -> AgentVerdict | None:
+        """Haiku-only validation of a latency arb exit (take-profit or stop-loss).
+
+        Helps avoid premature exits on temporary price dips and confirms genuine
+        take-profit conditions.  Haiku-only; cache TTL 5 minutes.
+
+        Args:
+            asset: Contract asset (e.g. ``"KXBTCH-26MAY0117"``).
+            side: ``"yes"`` or ``"no"``.
+            entry_price: Position entry price in [0, 1].
+            current_price: Current market price in [0, 1].
+            gain_pct: Percentage gain (positive = profit, negative = loss).
+            market_regime: Current regime label (``"bullish"``, ``"volatile"``, etc.)
+                or ``None`` if unknown.
+            reason: Proposed exit reason: ``"take_profit"`` or ``"stop_loss"``.
+
+        Returns:
+            Verdict with ``action`` = ``"exit"`` or ``"hold"``.
+        """
+        if not self.is_available:
+            return None
+
+        direction = "up" if gain_pct >= 0 else "down"
+        cache_key = f"exit:{asset}:{side}:{reason}:{direction}"
+        cached = self._check_cache_with_ttl(cache_key, ttl_seconds=300)  # 5-min TTL
+        if cached is not None:
+            return cached
+
+        haiku_cost = self._estimate_cost(self.config.quick_model)
+        if not self._check_budget(haiku_cost):
+            return None
+
+        regime_line = f"  Current market regime: {market_regime}\n" if market_regime else ""
+
+        prompt = (
+            f"Quick validation: Should this prediction-market position be exited now?\n\n"
+            f"Position:\n"
+            f"  Contract: {asset} ({side.upper()} side)\n"
+            f"  Entry price: {entry_price:.3f}\n"
+            f"  Current price: {current_price:.3f}\n"
+            f"  P&L: {gain_pct:+.2f}%\n"
+            f"  Proposed exit reason: {reason}\n"
+            f"{regime_line}\n"
+            f"Consider: Is this a genuine reversal (exit) or temporary noise (hold)?\n"
+            f"Reply JSON only: {{\"action\": \"exit\"|\"hold\", "
+            f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
+        )
+
+        verdict = self._call_model(self.config.quick_model, prompt)
+        if verdict is not None:
+            # Normalise action to exit/hold (model may say "sell")
+            if verdict.action in ("sell", "skip"):
+                verdict = AgentVerdict(
+                    action="exit",
+                    confidence=verdict.confidence,
+                    reasoning=verdict.reasoning,
+                    cost_usd=verdict.cost_usd,
+                    model_used=verdict.model_used,
+                )
+            elif verdict.action in ("buy",):
+                verdict = AgentVerdict(
+                    action="hold",
+                    confidence=verdict.confidence,
+                    reasoning=verdict.reasoning,
+                    cost_usd=verdict.cost_usd,
+                    model_used=verdict.model_used,
+                )
+            self._set_cache_with_ttl(cache_key, verdict, ttl_seconds=300)
+        return verdict
+
+    def evaluate_altcoin_swap(
+        self,
+        current_coin: str,
+        target_coin: str,
+        current_price: float,
+        target_price: float,
+        ratio_shift_pct: float,
+        fee_threshold_pct: float,
+    ) -> AgentVerdict | None:
+        """Haiku-only validation of an altcoin rotation swap signal.
+
+        Confirms that the observed ratio shift is worth paying fees, and that
+        the target coin does not show obvious warning signs (e.g. crash / pump
+        exhaustion).  Haiku-only; cache TTL 30 minutes.
+
+        Args:
+            current_coin: Coinbase product ID being sold (e.g. ``"BTC-USD"``).
+            target_coin: Coinbase product ID being bought (e.g. ``"SOL-USD"``).
+            current_price: Current spot price of the held coin.
+            target_price: Current spot price of the target coin.
+            ratio_shift_pct: Observed ratio shift as a percentage.
+            fee_threshold_pct: Minimum ratio shift required to justify fees.
+
+        Returns:
+            Verdict with ``action`` = ``"buy"`` (proceed) or ``"skip"`` (abort swap).
+        """
+        if not self.is_available:
+            return None
+
+        cache_key = f"swap:{current_coin}:{target_coin}"
+        cached = self._check_cache_with_ttl(cache_key, ttl_seconds=1800)  # 30-min TTL
+        if cached is not None:
+            return cached
+
+        haiku_cost = self._estimate_cost(self.config.quick_model)
+        if not self._check_budget(haiku_cost):
+            return None
+
+        prompt = (
+            f"Quick validation: Should this altcoin rotation swap proceed?\n\n"
+            f"Trade:\n"
+            f"  Sell: {current_coin} @ ${current_price:,.4f}\n"
+            f"  Buy:  {target_coin} @ ${target_price:,.4f}\n"
+            f"  Observed ratio shift: {ratio_shift_pct:+.3f}%\n"
+            f"  Fee break-even threshold: {fee_threshold_pct:.3f}%\n\n"
+            f"The quantitative model has already confirmed the ratio shift exceeds fees. "
+            f"Check only for obvious macro/momentum red flags (e.g. flash crash, "
+            f"pump-and-dump exhaustion) that would make this a bad time to buy "
+            f"{target_coin}.\n\n"
+            f"Reply JSON only: {{\"action\": \"buy\"|\"skip\", "
+            f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
+        )
+
+        verdict = self._call_model(self.config.quick_model, prompt)
+        if verdict is not None:
+            self._set_cache_with_ttl(cache_key, verdict, ttl_seconds=1800)
+        return verdict
+
     def get_monthly_cost(self) -> float:
         """Get current month's total AI spend."""
         self._rotate_month()
@@ -455,7 +597,11 @@ class TradingAgentsService:
                 max_tokens=10,
                 messages=[{"role": "user", "content": screen_prompt}],
             )
-            cost = self._estimate_cost(self.config.quick_model)
+            try:
+                usage = response.usage
+                cost = self._actual_cost(self.config.quick_model, usage.input_tokens, usage.output_tokens)
+            except (AttributeError, TypeError):
+                cost = self._estimate_cost(self.config.quick_model)
             self._record_cost(cost)
 
             text = response.content[0].text.strip().lower()
@@ -481,7 +627,12 @@ class TradingAgentsService:
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
-            cost = self._estimate_cost(model)
+            # Use actual token counts for precise cost tracking; fall back to estimate
+            try:
+                usage = response.usage
+                cost = self._actual_cost(model, usage.input_tokens, usage.output_tokens)
+            except (AttributeError, TypeError):
+                cost = self._estimate_cost(model)
             self._record_cost(cost)
 
             text = response.content[0].text.strip()
@@ -543,7 +694,12 @@ class TradingAgentsService:
         return self._check_cache_with_ttl(key)
 
     def _check_cache_with_ttl(self, key: str, ttl_seconds: float | None = None) -> AgentVerdict | None:
-        """Check cache, returning None if the entry exceeds ttl_seconds since storage."""
+        """Check cache, returning None if the entry has expired.
+
+        If ``ttl_seconds`` is given it is compared against the entry's
+        ``stored_at`` timestamp (persisted on write) for accurate freshness
+        checks independent of how the entry was originally stored.
+        """
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -552,8 +708,7 @@ class TradingAgentsService:
             return None
         # If a specific TTL override is requested, check if entry is still fresh enough
         if ttl_seconds is not None:
-            stored_at = entry.expires_at - (self.config.cache_ttl_hours * 3600)
-            age = time.time() - stored_at
+            age = time.time() - entry.stored_at
             if age > ttl_seconds:
                 return None
         self.logger.debug("Cache hit for %s", key)
@@ -571,18 +726,27 @@ class TradingAgentsService:
         self._set_cache_with_ttl(key, verdict, ttl_seconds=self.config.cache_ttl_hours * 3600)
 
     def _set_cache_with_ttl(self, key: str, verdict: AgentVerdict, ttl_seconds: float) -> None:
+        now = time.time()
         self._cache[key] = _CacheEntry(
             verdict=verdict,
-            expires_at=time.time() + ttl_seconds,
+            expires_at=now + ttl_seconds,
+            stored_at=now,
         )
 
     # ── Budget management ──────────────────────────────────────────
 
     def _estimate_cost(self, model: str) -> float:
-        """Rough cost estimate per call based on model."""
-        base = self._MODEL_COSTS.get(model, 0.01)
-        # Approximate 2K tokens per call
-        return base * 2
+        """Rough cost estimate per call based on model (before actual tokens are known)."""
+        # Assume ~1.5K input + 300 output tokens as a conservative upper bound
+        in_cost = self._INPUT_COST_PER_M.get(model, 3.00) * 1500 / 1_000_000
+        out_cost = self._OUTPUT_COST_PER_M.get(model, 15.00) * 300 / 1_000_000
+        return in_cost + out_cost
+
+    def _actual_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        """Compute the real cost from actual Anthropic usage counts."""
+        in_cost = self._INPUT_COST_PER_M.get(model, 3.00) * input_tokens / 1_000_000
+        out_cost = self._OUTPUT_COST_PER_M.get(model, 15.00) * output_tokens / 1_000_000
+        return in_cost + out_cost
 
     def _check_budget(self, estimated_cost: float) -> bool:
         """Check if we can afford this call within per-run and monthly caps."""

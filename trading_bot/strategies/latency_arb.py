@@ -45,12 +45,23 @@ from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 
 try:
-    from trading_bot.integrations.trading_agents import TradingAgentsService
+    from trading_bot.integrations.trading_agents import (
+        TradingAgentsService,
+        apply_ai_confirmation,
+    )
 except ImportError:
     TradingAgentsService = None  # type: ignore[assignment,misc]
+    apply_ai_confirmation = None  # type: ignore[assignment]
 
 # Logistic scale: maps momentum % → probability
 _SIGMOID_SCALE = 150.0
+
+# Regime-based threshold adjustment multipliers
+_VOLATILE_THRESHOLD_MULTIPLIER = 1.5   # raise bar in volatile markets
+_BULLISH_THRESHOLD_MULTIPLIER = 0.85   # lower bar in calm bull markets
+
+# Minimum AI confidence required to veto an exit decision
+_AI_EXIT_VETO_MIN_CONFIDENCE = 0.65
 
 # Keyword sets for inferring contract direction from title/subtitle
 _HIGHER_KEYWORDS = frozenset({"higher", "above", "over", "up", "rise", "rises", "gain"})
@@ -156,23 +167,38 @@ class LatencyArbStrategy:
 
             # Step 5: Detect market regime (Haiku-only, 1h cache) to adjust thresholds
             effective_threshold = self.config.momentum_min_threshold_pct
+            current_regime: str | None = None
             if self.ai_service is not None:
                 try:
                     btc_price = self.feed.get_latest_price("BTC-USD")
                     eth_price = self.feed.get_latest_price("ETH-USD")
                     if btc_price > 0 and eth_price > 0:
+                        # Pass a longer-window BTC momentum to improve regime accuracy
+                        btc_momentum_60s = self.feed.get_momentum_pct("BTC-USD", 60.0)
                         regime = self.ai_service.detect_market_regime(
                             btc_price=btc_price,
                             eth_price=eth_price,
                             fear_greed_value=None,
+                            btc_momentum_24h_pct=btc_momentum_60s if btc_momentum_60s != 0.0 else None,
                         )
                         if regime is not None:
+                            current_regime = regime.action
                             result["market_regime"] = regime.action
-                            # In volatile regimes, raise threshold to reduce false signals
                             if regime.action == "volatile" and regime.confidence >= 0.6:
-                                effective_threshold = self.config.momentum_min_threshold_pct * 1.5
+                                # Volatile: raise threshold to reduce false signals
+                                effective_threshold = self.config.momentum_min_threshold_pct * _VOLATILE_THRESHOLD_MULTIPLIER
                                 self.logger.info(
-                                    "Volatile regime detected (conf=%.2f). Raising arb threshold: "
+                                    "Volatile regime (conf=%.2f). Raising threshold: "
+                                    "%.2f%% → %.2f%%",
+                                    regime.confidence,
+                                    self.config.momentum_min_threshold_pct,
+                                    effective_threshold,
+                                )
+                            elif regime.action == "bullish" and regime.confidence >= 0.7:
+                                # Calm bull: slightly lower threshold for more opportunities
+                                effective_threshold = self.config.momentum_min_threshold_pct * _BULLISH_THRESHOLD_MULTIPLIER
+                                self.logger.info(
+                                    "Bullish regime (conf=%.2f). Lowering threshold: "
                                     "%.2f%% → %.2f%%",
                                     regime.confidence,
                                     self.config.momentum_min_threshold_pct,
@@ -235,6 +261,7 @@ class LatencyArbStrategy:
                             notional=notional,
                             momentum_pct=momentum_pct,
                             now=now,
+                            market_regime=current_regime,
                         )
                         if entered:
                             result["buys"].append(f"KL:{market.get('ticker', '')}:{side}")
@@ -421,6 +448,7 @@ class LatencyArbStrategy:
         notional: float,
         momentum_pct: float,
         now: datetime,
+        market_regime: str | None = None,
     ) -> bool:
         """Execute a latency-arb trade (paper or live)."""
         ticker = market.get("ticker", "")
@@ -430,41 +458,62 @@ class LatencyArbStrategy:
             self.logger.debug("Already holding %s. Skipping.", symbol)
             return False
 
-        # Contracts are $1 each on Kalshi; quantity = notional
-        # yes_price in dollars (0.01 – 0.99), so contracts = notional / ask_price
-        quantity = math.floor(notional / ask_price)
-        if quantity < 1:
-            return False
-
-        actual_notional = quantity * ask_price
-
-        # Optional Haiku-only AI signal validation (log_only — never blocks execution)
+        # Optional Haiku-only AI signal validation.
+        # The verdict is used to adjust Kelly notional via apply_ai_confirmation
+        # (boost=1.5x on confident buy, 0.5x on skip, blocked in require mode).
         ai_meta: dict[str, Any] = {}
+        ai_verdict = None
         if self.ai_service is not None:
             try:
-                verdict = self.ai_service.evaluate_arb_signal(
+                ai_verdict = self.ai_service.evaluate_arb_signal(
                     asset=ticker.split("-")[0] if "-" in ticker else ticker[:6],
                     momentum_pct=momentum_pct,
                     contract_title=market.get("title", ""),
                     contract_price=ask_price,
                     edge=_kelly_edge(ask_price, self._estimate_true_prob(abs(momentum_pct))),
                 )
-                if verdict is not None:
+                if ai_verdict is not None:
                     ai_meta = {
-                        "ai_action": verdict.action,
-                        "ai_confidence": round(verdict.confidence, 3),
-                        "ai_reasoning": verdict.reasoning,
-                        "ai_cost_usd": verdict.cost_usd,
-                        "ai_cached": verdict.cached,
+                        "ai_action": ai_verdict.action,
+                        "ai_confidence": round(ai_verdict.confidence, 3),
+                        "ai_reasoning": ai_verdict.reasoning,
+                        "ai_cost_usd": ai_verdict.cost_usd,
+                        "ai_cached": ai_verdict.cached,
                     }
                     self.logger.info(
                         "AI arb check: action=%s confidence=%.2f (%s) | %s",
-                        verdict.action, verdict.confidence,
-                        "cached" if verdict.cached else "live",
-                        verdict.reasoning[:80],
+                        ai_verdict.action, ai_verdict.confidence,
+                        "cached" if ai_verdict.cached else "live",
+                        ai_verdict.reasoning[:80],
                     )
             except Exception as exc:
                 self.logger.debug("AI arb validation failed (non-blocking): %s", exc)
+
+        # Apply AI confirmation to Kelly notional (boost/require/log_only modes)
+        if apply_ai_confirmation is not None:
+            confirmation_mode = getattr(
+                getattr(self, "config", None),
+                "ai_confirmation_mode",
+                "boost",
+            )
+            notional, conf_meta = apply_ai_confirmation(
+                ai_verdict, confirmation_mode, notional, self.logger
+            )
+            ai_meta.update({k: v for k, v in conf_meta.items() if k not in ai_meta})
+
+        if notional < self.config.min_trade_usd:
+            self.logger.debug(
+                "Notional after AI adjustment ($%.2f) below min $%.2f. Skipping.",
+                notional, self.config.min_trade_usd,
+            )
+            return False
+
+        # Contracts are $1 each on Kalshi; quantity = notional / ask_price
+        quantity = math.floor(notional / ask_price)
+        if quantity < 1:
+            return False
+
+        actual_notional = quantity * ask_price
 
         meta = {
             "ticker": ticker,
@@ -473,6 +522,7 @@ class LatencyArbStrategy:
             "title": market.get("title", "")[:120],
             "momentum_pct": round(momentum_pct, 4),
             "strategy": "latency_arb",
+            "market_regime": market_regime,
             **ai_meta,
         }
 
@@ -532,12 +582,20 @@ class LatencyArbStrategy:
         result: dict[str, Any],
         now: datetime,
     ) -> None:
-        """Apply take-profit and stop-loss to open latency arb positions."""
+        """Apply take-profit and stop-loss to open latency arb positions.
+
+        When the AI service is available, exit decisions for take-profit and
+        stop-loss are validated by ``evaluate_exit_signal`` (Haiku-only).
+        The AI can veto a premature exit (returns ``"hold"``); the quantitative
+        rules are always authoritative if AI is unavailable.
+        """
         arb_positions = {
             sym: pos
             for sym, pos in state.positions.items()
             if pos.strategy == "latency_arb" and pos.asset_type == "prediction"
         }
+        # Use the cached regime label from the last run_once() if available
+        current_regime: str | None = result.get("market_regime")
 
         for symbol, position in list(arb_positions.items()):
             ticker = position.meta.get("ticker", "")
@@ -565,6 +623,28 @@ class LatencyArbStrategy:
                     reason = "stop_loss"
 
                 if reason:
+                    # AI exit validation: Haiku may veto a borderline exit
+                    if self.ai_service is not None:
+                        try:
+                            exit_verdict = self.ai_service.evaluate_exit_signal(
+                                asset=ticker,
+                                side=side,
+                                entry_price=entry,
+                                current_price=current_price,
+                                gain_pct=gain_pct * 100.0 if reason == "take_profit" else -loss_pct * 100.0,
+                                market_regime=current_regime,
+                                reason=reason,
+                            )
+                            if exit_verdict is not None and exit_verdict.action == "hold" and exit_verdict.confidence >= _AI_EXIT_VETO_MIN_CONFIDENCE:
+                                self.logger.info(
+                                    "AI vetoed %s exit for %s (conf=%.2f): %s",
+                                    reason, symbol, exit_verdict.confidence,
+                                    exit_verdict.reasoning[:80],
+                                )
+                                continue  # Skip exit this cycle
+                        except Exception as exc:
+                            self.logger.debug("AI exit validation failed (non-blocking): %s", exc)
+
                     closed = broker.close_position(
                         state, symbol=symbol, price=current_price, reason=reason
                     )
