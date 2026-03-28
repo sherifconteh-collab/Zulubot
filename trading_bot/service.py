@@ -386,16 +386,31 @@ class TradingBotService:
                         state.positions[symbol].quantity = float(count)
                         continue
 
-                    # New position not tracked by the bot — add it
-                    # Price unknown without an orderbook call; set to 0.50 placeholder
+                    # New position not tracked by the bot — try to get a real price
+                    entry_price = 0.50
+                    try:
+                        market = self.kalshi_client.get_market(ticker)
+                        # Kalshi market data includes yes_ask/yes_bid or last_price
+                        if side == "YES":
+                            raw = market.get("yes_ask") or market.get("last_price") or 0
+                        else:
+                            raw = market.get("no_ask") or (1.0 - (market.get("yes_bid") or 0)) or 0
+                        price = float(raw)
+                        if price > 1:
+                            price = price / 100.0  # Kalshi returns cents sometimes
+                        if 0 < price < 1:
+                            entry_price = price
+                    except Exception:
+                        pass  # Fall back to 0.50 placeholder
+
                     synced_at = datetime.now(self.config.timezone).isoformat()
                     state.positions[symbol] = Position(
                         symbol=symbol,
                         asset_type="prediction",
                         strategy="kalshi_manual",
                         quantity=float(count),
-                        entry_price=0.50,
-                        current_price=0.50,
+                        entry_price=entry_price,
+                        current_price=entry_price,
                         opened_at=synced_at,
                         meta={
                             "ticker": ticker,
