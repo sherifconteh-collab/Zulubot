@@ -106,6 +106,7 @@ class CoinbasePredictionStrategy:
 
             if not markets:
                 self.logger.info("No prediction markets found on Kalshi.")
+                state.last_predictions_scan_date = now.date().isoformat()
                 return result
 
             result["markets_scanned"] = len(markets)
@@ -115,6 +116,8 @@ class CoinbasePredictionStrategy:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
                 )
+
+            state.last_predictions_scan_date = now.date().isoformat()
 
         except Exception as exc:
             self.logger.error("Prediction strategy failed: %s", exc, exc_info=True)
