@@ -173,13 +173,14 @@ class LatencyArbStrategy:
                     btc_price = self.feed.get_latest_price("BTC-USD")
                     eth_price = self.feed.get_latest_price("ETH-USD")
                     if btc_price > 0 and eth_price > 0:
-                        # Pass a longer-window BTC momentum to improve regime accuracy
-                        btc_momentum_60s = self.feed.get_momentum_pct("BTC-USD", 60.0)
+                        # Use the 30s momentum window (same window used for arb entry)
+                        # to give the regime detector a short-term directional signal.
+                        btc_momentum_short = self.feed.get_momentum_pct("BTC-USD", self.config.momentum_window_seconds)
                         regime = self.ai_service.detect_market_regime(
                             btc_price=btc_price,
                             eth_price=eth_price,
                             fear_greed_value=None,
-                            btc_momentum_24h_pct=btc_momentum_60s if btc_momentum_60s != 0.0 else None,
+                            btc_momentum_pct=btc_momentum_short if btc_momentum_short != 0.0 else None,
                         )
                         if regime is not None:
                             current_regime = regime.action
@@ -540,8 +541,17 @@ class LatencyArbStrategy:
         if position is None:
             return False
 
-        # Use the broker-tracked quantity (may be reduced if cash was insufficient)
-        filled_quantity = int(position.quantity)
+        # Use the broker-tracked quantity (may be reduced if cash was insufficient).
+        # Round to nearest integer — prediction-market contracts are whole units and
+        # the broker stores them with limited decimal precision (e.g. 0.9999 vs 1.0).
+        filled_quantity = int(round(position.quantity))
+        if filled_quantity < 1:
+            self.logger.warning(
+                "Broker returned sub-unit quantity %.6f for %s; skipping live order.",
+                position.quantity,
+                symbol,
+            )
+            return False
 
         self.logger.info(
             "LATENCY ARB %s %s %s @ $%.2f × %d contracts = $%.2f | momentum=%.3f%%",
