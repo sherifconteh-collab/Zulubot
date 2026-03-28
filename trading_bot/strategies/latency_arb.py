@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -250,8 +251,7 @@ class LatencyArbStrategy:
 
     def _discover_kalshi_contracts(self, series_ticker: str) -> list[dict[str, Any]]:
         """Fetch open Kalshi markets for a series, with 30s cache."""
-        import time as _time
-        now = _time.time()
+        now = time.time()
 
         if series_ticker in self._market_cache and (now - self._cache_ts) < self._cache_ttl:
             return self._market_cache[series_ticker]

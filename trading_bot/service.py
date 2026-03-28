@@ -15,7 +15,7 @@ from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGammaClient
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AppConfig
-from trading_bot.models import PortfolioState
+from trading_bot.models import PortfolioState, Position
 from trading_bot.polymarket_broker import PolymarketBroker
 from trading_bot.risk import RiskManager, RiskSnapshot
 from trading_bot.state import StateStore
@@ -388,7 +388,6 @@ class TradingBotService:
 
                     # New position not tracked by the bot — add it
                     # Price unknown without an orderbook call; set to 0.50 placeholder
-                    from trading_bot.models import Position
                     synced_at = datetime.now(self.config.timezone).isoformat()
                     state.positions[symbol] = Position(
                         symbol=symbol,
@@ -452,8 +451,6 @@ class TradingBotService:
             }
             for position in state.positions.values()
         ]
-        # Separate out Kalshi prediction positions for clear visibility
-        kalshi_positions = [p for p in positions if p["symbol"].startswith("KL:")]
 
         return {
             "timestamp": datetime.now(self.config.timezone).isoformat(),
@@ -462,7 +459,6 @@ class TradingBotService:
             "equity": round(equity, 2),
             "realized_pnl": round(state.realized_pnl, 2),
             "open_positions": positions,
-            "kalshi_positions": kalshi_positions,
             "risk": {
                 "daily_halt_active": post_risk.daily_halt_active,
                 "kill_switch_active": post_risk.kill_switch_active,
