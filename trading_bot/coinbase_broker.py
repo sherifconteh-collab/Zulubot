@@ -405,9 +405,33 @@ class CoinbaseBroker:
             return False
 
     def get_accounts(self) -> list[dict[str, Any]]:
-        """List Coinbase accounts (balances)."""
-        result = self._get("/api/v3/brokerage/accounts")
-        return result.get("accounts", [])
+        """List Coinbase accounts (balances), handling pagination."""
+        all_accounts: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(20):  # safety limit
+            path = "/api/v3/brokerage/accounts"
+            if cursor:
+                path = f"{path}?cursor={cursor}"
+            result = self._get(path)
+            accounts = result.get("accounts", [])
+            all_accounts.extend(accounts)
+            self.logger.debug(
+                "get_accounts page: got %d accounts (total %d so far), has_next=%s",
+                len(accounts), len(all_accounts), bool(result.get("cursor")),
+            )
+            cursor = result.get("cursor")
+            if not cursor or not accounts:
+                break
+        self.logger.info(
+            "get_accounts: %d total accounts found. Non-zero: %s",
+            len(all_accounts),
+            {
+                a.get("currency", "?"): a.get("available_balance", {}).get("value", "0")
+                for a in all_accounts
+                if float(a.get("available_balance", {}).get("value", "0")) > 0
+            },
+        )
+        return all_accounts
 
     def get_total_balance(self) -> tuple[float, dict[str, float]]:
         """Get total portfolio value in USD and per-asset breakdown.

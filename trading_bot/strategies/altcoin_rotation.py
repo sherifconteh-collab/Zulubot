@@ -119,12 +119,17 @@ class AltcoinRotationStrategy:
         current_coin = self._sync_holdings(state, rd, tracked)
 
         if current_coin is None:
-            self.logger.warning(
-                "No current rotation coin found. Waiting for a manual seed "
-                "position or recurring buy to appear on Coinbase."
-            )
-            self._save_rotation_data(state, rd)
-            return {"status": "waiting_for_seed", "tracked_coins": len(tracked)}
+            # No crypto holdings — try to seed from available USD/USDC cash.
+            seed_result = self._seed_from_cash(state, rd, broker, tracked, now)
+            if seed_result is not None:
+                current_coin = seed_result
+            else:
+                self.logger.warning(
+                    "No current rotation coin and no cash to seed. Waiting for "
+                    "a deposit or recurring buy to appear on Coinbase."
+                )
+                self._save_rotation_data(state, rd)
+                return {"status": "waiting_for_seed", "tracked_coins": len(tracked)}
 
         # 3. Ensure baseline ratios exist for the current coin.
         self._ensure_ratios(rd, current_coin, tracked)
@@ -288,6 +293,107 @@ class AltcoinRotationStrategy:
             rd["coin_quantities"][best_coin] = qty_held
 
         return best_coin
+
+    # ------------------------------------------------------------------
+    # Seed from available cash (first-run bootstrap)
+    # ------------------------------------------------------------------
+
+    def _seed_from_cash(
+        self,
+        state: PortfolioState,
+        rd: dict[str, Any],
+        broker: PaperBroker,
+        prices: dict[str, float],
+        now: datetime,
+    ) -> str | None:
+        """Use available USD/USDC on Coinbase to buy the first rotation coin.
+
+        Picks the coin with the highest 24h volume from the tracked list.
+        Returns the product_id of the purchased coin, or None if no cash.
+        """
+        # Check how much cash is available on Coinbase.
+        try:
+            accounts = self.coinbase_broker.get_accounts()
+            cash_available = 0.0
+            for acct in accounts:
+                currency = acct.get("currency", "")
+                if currency in ("USD", "USDC"):
+                    available = float(acct.get("available_balance", {}).get("value", "0"))
+                    cash_available += available
+        except Exception as exc:
+            self.logger.warning("Cannot check cash balance for seeding: %s", exc)
+            return None
+
+        if cash_available < self.config.min_trade_usd:
+            self.logger.info(
+                "Not enough cash to seed rotation: $%.2f < min $%.2f",
+                cash_available, self.config.min_trade_usd,
+            )
+            return None
+
+        self.logger.info(
+            "Seeding rotation with $%.2f cash. Picking best coin from %d candidates.",
+            cash_available, len(prices),
+        )
+
+        # Pick the coin with the highest price (proxy for market cap / liquidity).
+        # Top coins by price tend to be BTC, ETH, SOL, etc.
+        # A better heuristic: pick from a known-good list first.
+        preferred = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "LINK-USD", "AVAX-USD"]
+        target_coin = None
+        for coin in preferred:
+            if coin in prices and prices[coin] > 0:
+                target_coin = coin
+                break
+
+        if target_coin is None:
+            # Fall back to highest-priced coin in tracked list.
+            target_coin = max(prices, key=lambda k: prices[k])
+
+        self.logger.info(
+            "Seed target: %s at $%.4f. Buying with $%.2f.",
+            target_coin, prices.get(target_coin, 0), cash_available,
+        )
+
+        # Leave a tiny buffer for fees.
+        notional = cash_available * 0.98
+        if notional < self.config.min_trade_usd:
+            return None
+
+        buy_ok = self._place_buy(
+            state, target_coin, notional, now=now,
+            meta={"strategy": "altcoin_rotation", "seed": True},
+        )
+        if not buy_ok:
+            self.logger.error("Seed buy failed for %s.", target_coin)
+            return None
+
+        # Estimate qty purchased.
+        target_price = prices.get(target_coin, 1.0)
+        estimated_qty = (notional / target_price) * (1.0 - self.config.fee_pct)
+
+        # Open paper position for tracking.
+        broker.open_position(
+            state,
+            symbol=target_coin,
+            asset_type="crypto",
+            strategy="altcoin_rotation",
+            price=target_price,
+            notional=notional,
+            opened_at=now,
+            meta={"seed": True},
+        )
+
+        # Update rotation data.
+        rd["current_coin"] = target_coin
+        rd["coin_quantities"][target_coin] = estimated_qty
+        self._save_rotation_data(state, rd)
+
+        self.logger.info(
+            "Seed complete: bought %s qty≈%.8f with $%.2f.",
+            target_coin, estimated_qty, notional,
+        )
+        return target_coin
 
     # ------------------------------------------------------------------
     # Ratio management
