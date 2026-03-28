@@ -129,6 +129,8 @@ class TradingBotService:
             coinbase_client=self.coinbase_client,
             coinbase_broker=self.coinbase_broker,
             logger=logger,
+            ai_service=self.ai_service,
+            confirmation_mode=config.trading_agents.confirmation_mode,
         )
 
         # Kalshi prediction markets strategy

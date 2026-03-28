@@ -130,6 +130,35 @@ The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and la
 | `LATENCY_ARB_SCAN_INTERVAL` | `2.0` | Seconds between scans |
 | `LATENCY_ARB_TAKE_PROFIT` | `0.20` | Exit at +20% price gain |
 | `LATENCY_ARB_STOP_LOSS` | `0.15` | Exit at -15% price loss |
+| `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode: `boost`, `require`, or `log_only` |
+
+---
+
+## AI Integration
+
+All strategies optionally use Claude (Haiku + Sonnet) for signal validation. Enable by setting `TRADING_AGENTS_ENABLED=true` and `ANTHROPIC_API_KEY`.
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `TRADING_AGENTS_ENABLED` | `false` | Enable AI analysis across all strategies |
+| `ANTHROPIC_API_KEY` | | Anthropic API key (`sk-ant-...`) |
+| `TRADING_AGENTS_CONFIRMATION_MODE` | `boost` | `boost` (1.5×/0.5× sizing), `require` (AI must agree), `log_only` (advisory) |
+| `TRADING_AGENTS_MAX_COST_PER_MONTH` | `10.00` | Hard monthly spend cap in USD |
+
+### AI coverage per strategy
+
+| Strategy | Model | Cache TTL | Purpose |
+|----------|-------|-----------|---------|
+| Stocks | Haiku → Sonnet | 6 h | Validate fundamentals screen |
+| Crypto | Haiku → Sonnet | 6 h | Validate F&G + funding signal |
+| Polymarket | Sonnet | 6 h | Estimate fair probability |
+| Kalshi predictions | Haiku → Sonnet | 6 h | Estimate fair probability |
+| Latency arb — entry | Haiku only | 10 min | Filter noise from momentum signals |
+| Latency arb — exit | Haiku only | 5 min | Veto premature stop-loss / take-profit exits |
+| Latency arb — regime | Haiku only | 1 h | Adjust momentum threshold (volatile ↑ / bullish ↓) |
+| Altcoin rotation | Haiku only | 30 min | Check target coin for macro red flags before swap |
+
+Cost tracking uses **actual token counts** from the Anthropic response for precise monthly budget management.
 
 ---
 
