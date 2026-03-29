@@ -146,8 +146,8 @@ class TradingTelegramBot:
         mode_tag = "\U0001f4dd PAPER" if paper else "\U0001f4b0 LIVE"  # 📝 or 💰
 
         lines = [
-            f"\U0001f4ca <b>TRADE CYCLE</b>  {mode_tag}",  # 📊
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            f"\U0001f916 <b>ZULUBOT TRADE CYCLE</b>  {mode_tag}",  # 🤖
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         ]
 
         has_trades = False
@@ -162,8 +162,8 @@ class TradingTelegramBot:
             # Module header with icon
             icons = {
                 "crypto": "\U0001f4b1", "stocks": "\U0001f4c8", "polymarket": "\U0001f52e",
-                "rotation": "\U0001f504", "predictions": "\U0001f3b0",
-            }  # 💱📈🔮🔄🎰
+                "rotation": "\U0001f504", "predictions": "\U0001f3b2",
+            }  # 💱📈🔮🔄🎲
             icon = icons.get(module_name, "\u2699\ufe0f")
 
             if error:
@@ -216,11 +216,11 @@ class TradingTelegramBot:
                 if holdings_synced > 0:
                     lines.append(f"   \U0001f4e5 Synced {holdings_synced} holdings from Coinbase")  # 📥
                 if swapped:
-                    lines.append(f"   \U0001f504 Swapped → <code>{swapped}</code> (shift: {ratio_shift:.2f}%)")
+                    lines.append(f"   \U0001f504 Swapped \u2192 <code>{swapped}</code> (shift: {ratio_shift:.2f}%)")
 
             elif module_name == "predictions":
                 markets_found = module_data.get("markets_found", 0)
-                lines.append(f"   \U0001f3b0 Markets: {markets_found} available")  # 🎰
+                lines.append(f"   \U0001f3b2 Markets: {markets_found} available")  # 🎲
 
             elif module_name == "polymarket":
                 discovered = module_data.get("markets_discovered", 0)
@@ -233,17 +233,34 @@ class TradingTelegramBot:
                 if resolved:
                     lines.append(f"   \U0001f3c1 Resolved: {', '.join(resolved)}")  # 🏁
 
-        # Portfolio summary
+        # ── Portfolio Summary ──
         equity = result.get("equity", 0)
         cash = result.get("cash", 0)
         pnl = result.get("realized_pnl", 0)
         positions = result.get("open_positions", [])
+        kalshi_bal = result.get("kalshi_balance")
 
-        lines.append(f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-        lines.append(f"\U0001f4b0 Equity: <b>{_format_currency(equity)}</b>")  # 💰
-        lines.append(f"\U0001f4b5 Cash: {_format_currency(cash)}")  # 💵
-        lines.append(f"{_pnl_emoji(pnl)} P&L: {_format_currency(pnl)}")
-        lines.append(f"\U0001f4e6 Positions: {len(positions)}")  # 📦
+        lines.append(f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+        lines.append(f"\U0001f4b0 <b>PORTFOLIO</b>")  # 💰
+        lines.append(f"  Equity:    <b>{_format_currency(equity)}</b>")
+        lines.append(f"  Cash:      {_format_currency(cash)}")
+        if kalshi_bal is not None:
+            lines.append(f"  \U0001f3b2 Kalshi:  {_format_currency(kalshi_bal)}")  # 🎲
+        lines.append(f"  {_pnl_emoji(pnl)} P&L:     {'+' if pnl >= 0 else ''}{_format_currency(pnl)}")
+        lines.append(f"  Positions: {len(positions)}")
+
+        # ── AI Analyst Summary ──
+        ai_info = result.get("ai_info")
+        if ai_info:
+            mode = ai_info.get("confirmation_mode", "?")
+            multi = ai_info.get("multi_analyst_enabled", False)
+            analysts = ai_info.get("selected_analysts", [])
+            remaining = ai_info.get("budget_remaining_usd", 0)
+            if multi and analysts:
+                analyst_str = ", ".join(analysts)
+                lines.append(f"\n\U0001f9e0 <b>AI ANALYSTS</b>: {analyst_str}")  # 🧠
+            else:
+                lines.append(f"\n\U0001f9e0 <b>AI</b>: {mode} mode | ${remaining:.2f} left")
 
         # Risk status
         risk = result.get("risk", {})
@@ -253,8 +270,6 @@ class TradingTelegramBot:
             lines.append(f"\n\u26a0\ufe0f <b>DAILY HALT ACTIVE</b>")  # ⚠️
 
         # Only send if there were actual trades, errors, or active risk events.
-        # Suppress pure no-signal scheduled cycles; allow through for interactive commands
-        # (force_send=True) so users always receive a completion message.
         has_errors = any(
             isinstance(v, dict) and v.get("error")
             for v in module_results.values()
@@ -275,54 +290,94 @@ class TradingTelegramBot:
         pnl = status.get("realized_pnl", 0)
         positions = status.get("open_positions", [])
         risk = status.get("risk", {})
+        kalshi_bal = status.get("kalshi_balance")
+        ai_info = status.get("ai_info")
 
         dd_daily = risk.get("daily_drawdown_pct", 0)
         dd_total = risk.get("total_drawdown_pct", 0)
         peak = risk.get("peak_equity", 0)
 
         lines = [
-            f"\U0001f493 <b>HEARTBEAT</b>",  # 💓
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            f"\U0001f916 <b>ZULUBOT HEARTBEAT</b>",  # 🤖
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
             "",
-            f"\U0001f4b0 <b>Equity:  {_format_currency(equity)}</b>",  # 💰
-            f"\U0001f4b5 Cash:    {_format_currency(cash)}",  # 💵
-            f"{_pnl_emoji(pnl)} P&L:     {'+' if pnl >= 0 else ''}{_format_currency(pnl)}",
-            f"\U0001f3c6 Peak:    {_format_currency(peak)}",  # 🏆
+            f"\U0001f4b0 <b>PORTFOLIO</b>",  # 💰
+            f"  Equity:  <b>{_format_currency(equity)}</b>",
+            f"  Cash:    {_format_currency(cash)}",
         ]
+
+        # Kalshi balance
+        if kalshi_bal is not None:
+            lines.append(f"  \U0001f3b2 Kalshi: {_format_currency(kalshi_bal)}")  # 🎲
+
+        lines.extend([
+            f"  {_pnl_emoji(pnl)} P&L:   {'+' if pnl >= 0 else ''}{_format_currency(pnl)}",
+            f"  \U0001f3c6 Peak:  {_format_currency(peak)}",  # 🏆
+        ])
 
         # Drawdown visual bar
         if dd_daily != 0 or dd_total != 0:
             lines.append("")
+            lines.append(f"\U0001f6e1 <b>RISK</b>")  # 🛡
             dd_bar = _progress_bar(abs(dd_daily) / 5.0)  # 5% = full bar
-            lines.append(f"\U0001f4c9 Daily DD:  {dd_bar} {dd_daily:.1f}%")  # 📉
+            lines.append(f"  Daily DD:  {dd_bar} {dd_daily:.1f}%")
             total_bar = _progress_bar(abs(dd_total) / 15.0)  # 15% = full bar
-            lines.append(f"\U0001f4c9 Total DD:  {total_bar} {dd_total:.1f}%")
+            lines.append(f"  Total DD:  {total_bar} {dd_total:.1f}%")
 
-        # Positions
+        # Positions grouped by type
         if positions:
-            lines.append(f"\n\U0001f4e6 <b>Positions ({len(positions)})</b>")  # 📦
+            # Group positions by asset type
+            by_type: dict[str, list[dict[str, Any]]] = {}
             for pos in positions:
-                sym = pos.get("symbol", "?")
-                pnl_pos = pos.get("unrealized_pnl", 0)
-                mv = pos.get("market_value", 0)
-                entry = pos.get("entry_price", 0)
-                current = pos.get("current_price", 0)
-                pct_change = ((current - entry) / entry * 100) if entry > 0 else 0
+                atype = pos.get("asset_type", "other")
+                by_type.setdefault(atype, []).append(pos)
 
-                type_icon = {
-                    "stock": "\U0001f4c8", "crypto": "\U0001f4b1", "prediction": "\U0001f52e"
-                }.get(pos.get("asset_type", ""), "\u2699\ufe0f")  # 📈💱🔮
+            type_labels = {
+                "stock": ("\U0001f4c8", "STOCKS"),
+                "crypto": ("\U0001f4b1", "CRYPTO"),
+                "prediction": ("\U0001f3b2", "PREDICTIONS"),
+            }
 
-                lines.append(
-                    f"  {type_icon} <b>{sym}</b>\n"
-                    f"      {_pnl_arrow(pnl_pos)} {_format_currency(mv)} "
-                    f"({'+' if pct_change >= 0 else ''}{pct_change:.1f}%) "
-                    f"P&L: {'+' if pnl_pos >= 0 else ''}{_format_currency(pnl_pos)}"
-                )
+            for atype, type_positions in by_type.items():
+                icon, label = type_labels.get(atype, ("\u2699\ufe0f", atype.upper()))
+                type_pnl = sum(p.get("unrealized_pnl", 0) for p in type_positions)
+                lines.append(f"\n{icon} <b>{label}</b> ({len(type_positions)}) "
+                             f"{_pnl_emoji(type_pnl)} {'+' if type_pnl >= 0 else ''}{_format_currency(type_pnl)}")
+
+                for pos in type_positions:
+                    sym = pos.get("symbol", "?")
+                    pnl_pos = pos.get("unrealized_pnl", 0)
+                    mv = pos.get("market_value", 0)
+                    entry = pos.get("entry_price", 0)
+                    current = pos.get("current_price", 0)
+                    pct_change = ((current - entry) / entry * 100) if entry > 0 else 0
+
+                    lines.append(
+                        f"  {_pnl_arrow(pnl_pos)} <b>{sym}</b>  "
+                        f"{_format_currency(mv)} "
+                        f"({'+' if pct_change >= 0 else ''}{pct_change:.1f}%) "
+                        f"P&L: {'+' if pnl_pos >= 0 else ''}{_format_currency(pnl_pos)}"
+                    )
         else:
             lines.append(f"\n\U0001f4e6 No open positions")
 
-        # Risk status
+        # AI Analysts section
+        if ai_info:
+            multi = ai_info.get("multi_analyst_enabled", False)
+            analysts = ai_info.get("selected_analysts", [])
+            remaining = ai_info.get("budget_remaining_usd", 0)
+            mode = ai_info.get("confirmation_mode", "?")
+            monthly = ai_info.get("monthly_cost_usd", 0)
+            lines.append("")
+            if multi and analysts:
+                lines.append(f"\U0001f9e0 <b>AI ANALYSTS</b> ({mode})")  # 🧠
+                for a in analysts:
+                    lines.append(f"  \u2022 {a}")
+                lines.append(f"  \U0001f4b3 ${monthly:.4f} spent | ${remaining:.2f} left")
+            else:
+                lines.append(f"\U0001f9e0 <b>AI</b>: {mode} | ${remaining:.2f} left")
+
+        # Risk switches
         lines.append("")
         lines.append(f"{_risk_status_icon(risk.get('daily_halt_active', False))} Daily Halt")
         lines.append(f"{_risk_status_icon(risk.get('kill_switch_active', False))} Kill Switch")
@@ -330,11 +385,14 @@ class TradingTelegramBot:
         # Module scan dates
         stock_date = status.get("last_stock_screen_date") or "never"
         kalshi_date = status.get("last_predictions_scan_date") or "never"
-        lines.append(f"\n\U0001f4c5 Stocks: {stock_date}")  # 📅
-        lines.append(f"\U0001f3b2 Kalshi: {kalshi_date}")  # 🎲
+        poly_date = status.get("last_polymarket_scan_date") or "never"
+        lines.append(f"\n\U0001f4c5 Last Scans")  # 📅
+        lines.append(f"  Stocks: {stock_date}")
+        lines.append(f"  \U0001f3b2 Kalshi: {kalshi_date}")  # 🎲
+        lines.append(f"  \U0001f52e Polymarket: {poly_date}")  # 🔮
 
         if self._paused:
-            lines.append(f"\n\u23f8\ufe0f <b>BOT PAUSED</b> — monitoring only")
+            lines.append(f"\n\u23f8\ufe0f <b>BOT PAUSED</b> \u2014 monitoring only")
 
         await self.send_message("\n".join(lines))
 
@@ -561,8 +619,8 @@ class TradingTelegramBot:
         cfg = self._service.config
         if not cfg.trading_agents.enabled:
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"\U0001f9e0 <b>AI Status</b>\n"  # 🧠
-                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                f"\U0001f9e0 <b>AI ANALYSTS</b>\n"  # 🧠
+                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
                 f"\u23f8\ufe0f Status: DISABLED\n"
                 f"\nEnable: TRADING_AGENTS_ENABLED=true",
                 parse_mode="HTML",
@@ -577,11 +635,38 @@ class TradingTelegramBot:
             usage_pct = monthly / cap if cap > 0 else 0
             usage_bar = _progress_bar(usage_pct)
 
+            multi = cfg.trading_agents.multi_analyst_enabled
+            analysts = list(cfg.trading_agents.selected_analysts)
+
             lines = [
-                f"\U0001f9e0 <b>AI Status</b>",  # 🧠
-                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+                f"\U0001f9e0 <b>AI ANALYSTS</b>",  # 🧠
+                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
                 f"\u2705 Status: ACTIVE",
                 f"\U0001f3af Mode: {cfg.trading_agents.confirmation_mode}",
+                f"",
+            ]
+
+            # Multi-analyst team display
+            if multi:
+                lines.append(f"\U0001f465 <b>Analyst Team</b> (multi-perspective)")  # 👥
+                try:
+                    from trading_bot.integrations.analyst_personas import get_analyst
+                    for key in analysts:
+                        persona = get_analyst(key)
+                        if persona:
+                            lines.append(f"  \u2022 <b>{persona.display_name}</b>")
+                            lines.append(f"    <i>{persona.description}</i>")
+                        else:
+                            lines.append(f"  \u2022 {key}")
+                except ImportError:
+                    for key in analysts:
+                        lines.append(f"  \u2022 {key}")
+                lines.append(f"")
+                lines.append(f"\U0001f504 Signals aggregated via weighted voting")
+            else:
+                lines.append(f"\U0001f464 <b>Single Agent</b> (Haiku \u2192 Sonnet)")  # 👤
+
+            lines.extend([
                 f"",
                 f"\U0001f4b3 <b>Budget</b>",
                 f"  Spent:     ${monthly:.4f}",
@@ -592,11 +677,11 @@ class TradingTelegramBot:
                 f"  Quick: {cfg.trading_agents.quick_model}",
                 f"  Deep:  {cfg.trading_agents.deep_model}",
                 f"  Cache: {cfg.trading_agents.cache_ttl_hours}h TTL",
-            ]
+            ])
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
         else:
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"\U0001f9e0 <b>AI Status</b>\n"
+                f"\U0001f9e0 <b>AI ANALYSTS</b>\n"
                 f"\u26a0\ufe0f Enabled but unavailable\n"
                 f"Check ANTHROPIC_API_KEY and anthropic package",
                 parse_mode="HTML",
@@ -610,39 +695,68 @@ class TradingTelegramBot:
             return
         status = self._service.status()
         positions = status.get("open_positions", [])
+        kalshi_bal = status.get("kalshi_balance")
+
         if not positions:
+            no_pos_lines = [f"\U0001f4e6 <b>Positions</b>\n\nNo open positions."]
+            if kalshi_bal is not None:
+                no_pos_lines.append(f"\n\U0001f3b2 Kalshi Balance: {_format_currency(kalshi_bal)}")
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"\U0001f4e6 <b>Positions</b>\n\nNo open positions.",
+                "\n".join(no_pos_lines),
                 parse_mode="HTML",
             )
             return
 
         lines = [
-            f"\U0001f4e6 <b>Open Positions ({len(positions)})</b>",  # 📦
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            f"\U0001f4e6 <b>OPEN POSITIONS ({len(positions)})</b>",  # 📦
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         ]
+
+        # Group positions by asset type
+        by_type: dict[str, list[dict[str, Any]]] = {}
         for pos in positions:
-            sym = pos["symbol"]
-            qty = pos["quantity"]
-            entry = pos["entry_price"]
-            current = pos["current_price"]
-            pnl_val = pos["unrealized_pnl"]
-            mv = pos["market_value"]
-            pct = ((current - entry) / entry * 100) if entry > 0 else 0
+            atype = pos.get("asset_type", "other")
+            by_type.setdefault(atype, []).append(pos)
 
-            type_icon = {
-                "stock": "\U0001f4c8", "crypto": "\U0001f4b1", "prediction": "\U0001f52e"
-            }.get(pos.get("asset_type", ""), "\u2699\ufe0f")
+        type_labels = {
+            "stock": ("\U0001f4c8", "STOCKS"),
+            "crypto": ("\U0001f4b1", "CRYPTO"),
+            "prediction": ("\U0001f3b2", "PREDICTIONS"),
+        }
 
+        for atype, type_positions in by_type.items():
+            icon, label = type_labels.get(atype, ("\u2699\ufe0f", atype.upper()))
+            type_pnl = sum(p.get("unrealized_pnl", 0) for p in type_positions)
+            type_value = sum(p.get("market_value", 0) for p in type_positions)
             lines.append(
-                f"\n{type_icon} <b>{sym}</b>\n"
-                f"   Entry:   ${entry:,.4f}\n"
-                f"   Current: ${current:,.4f}\n"
-                f"   Qty:     {qty:.6f}\n"
-                f"   Value:   {_format_currency(mv)}\n"
-                f"   {_pnl_emoji(pnl_val)} P&L: {'+' if pnl_val >= 0 else ''}{_format_currency(pnl_val)} "
-                f"({'+' if pct >= 0 else ''}{pct:.1f}%)"
+                f"\n{icon} <b>{label}</b> ({len(type_positions)}) \u2014 "
+                f"{_format_currency(type_value)} "
+                f"{_pnl_emoji(type_pnl)} {'+' if type_pnl >= 0 else ''}{_format_currency(type_pnl)}"
             )
+
+            for pos in type_positions:
+                sym = pos["symbol"]
+                qty = pos["quantity"]
+                entry = pos["entry_price"]
+                current = pos["current_price"]
+                pnl_val = pos["unrealized_pnl"]
+                mv = pos["market_value"]
+                pct = ((current - entry) / entry * 100) if entry > 0 else 0
+
+                lines.append(
+                    f"\n  {_pnl_arrow(pnl_val)} <b>{sym}</b>\n"
+                    f"     Entry:   ${entry:,.4f}\n"
+                    f"     Current: ${current:,.4f}\n"
+                    f"     Qty:     {qty:.6f}\n"
+                    f"     Value:   {_format_currency(mv)}\n"
+                    f"     {_pnl_emoji(pnl_val)} P&L: {'+' if pnl_val >= 0 else ''}{_format_currency(pnl_val)} "
+                    f"({'+' if pct >= 0 else ''}{pct:.1f}%)"
+                )
+
+        # Kalshi balance at the bottom
+        if kalshi_bal is not None:
+            lines.append(f"\n\U0001f3b2 <b>Kalshi Balance:</b> {_format_currency(kalshi_bal)}")
+
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
     async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -730,9 +844,19 @@ class TradingTelegramBot:
         cfg = self._service.config
         paper_icon = "\U0001f4dd" if cfg.paper_mode else "\U0001f4b0"
 
+        # AI section with multi-analyst support
+        ai_lines = [f"\U0001f9e0 <b>AI Analysts</b>: {'ON' if cfg.trading_agents.enabled else 'OFF'}"]
+        if cfg.trading_agents.enabled:
+            ai_lines.append(f"  Mode: {cfg.trading_agents.confirmation_mode}")
+            if cfg.trading_agents.multi_analyst_enabled:
+                analysts = ", ".join(cfg.trading_agents.selected_analysts)
+                ai_lines.append(f"  \U0001f465 Multi-analyst: {analysts}")
+            else:
+                ai_lines.append(f"  \U0001f464 Single agent (Haiku \u2192 Sonnet)")
+
         lines = [
-            f"\u2699\ufe0f <b>Configuration</b>",  # ⚙️
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            f"\u2699\ufe0f <b>ZULUBOT CONFIG</b>",  # ⚙️
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
             f"",
             f"{paper_icon} Mode: {'PAPER' if cfg.paper_mode else 'LIVE'}",
             f"\U0001f4b5 Cash: {_format_currency(cfg.initial_cash)}",
@@ -754,11 +878,11 @@ class TradingTelegramBot:
             f"",
             f"\U0001f504 <b>Altcoin Rotation</b>",
             f"  {'ON' if cfg.altcoin_rotation.enabled else 'OFF'} | "
-            f"Fee: {cfg.altcoin_rotation.fee_pct*100:.1f}% × {cfg.altcoin_rotation.scout_multiplier}x",
+            f"Fee: {cfg.altcoin_rotation.fee_pct*100:.1f}% \u00d7 {cfg.altcoin_rotation.scout_multiplier}x",
             f"  Check: {cfg.altcoin_rotation.check_interval_minutes}m | "
             f"Min: ${cfg.altcoin_rotation.min_trade_usd}",
             f"",
-            f"\U0001f3b0 <b>Predictions</b>",
+            f"\U0001f3b2 <b>Kalshi Predictions</b>",
             f"  {'ON' if cfg.predictions.enabled else 'OFF'} | "
             f"YES < {cfg.predictions.buy_yes_threshold} | NO > {cfg.predictions.buy_no_threshold}",
             f"",
@@ -772,9 +896,8 @@ class TradingTelegramBot:
             f"  Stocks: {cfg.scheduler.stock_check_hour}:00 | "
             f"Heartbeat: {cfg.scheduler.heartbeat_interval_minutes}m",
             f"",
-            f"\U0001f9e0 <b>AI</b>: {'ON' if cfg.trading_agents.enabled else 'OFF'}"
-            f"{' (' + cfg.trading_agents.confirmation_mode + ')' if cfg.trading_agents.enabled else ''}",
         ]
+        lines.extend(ai_lines)
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
