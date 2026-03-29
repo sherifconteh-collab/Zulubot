@@ -487,6 +487,25 @@ class TradingBotService:
             for position in state.positions.values()
         ]
 
+        # Fetch Kalshi account balance when credentials are configured
+        kalshi_balance: float | None = None
+        if self.kalshi_client.can_trade:
+            try:
+                kalshi_balance = round(self.kalshi_client.get_balance(), 2)
+            except Exception as exc:
+                self.logger.debug("Could not fetch Kalshi balance: %s", exc)
+
+        # AI/multi-analyst metadata
+        ai_info: dict[str, Any] | None = None
+        if self.ai_service:
+            ai_info = {
+                "budget_remaining_usd": round(self.ai_service.get_budget_remaining(), 4),
+                "monthly_cost_usd": round(self.ai_service.get_monthly_cost(), 4),
+                "multi_analyst_enabled": self.config.trading_agents.multi_analyst_enabled,
+                "selected_analysts": list(self.config.trading_agents.selected_analysts),
+                "confirmation_mode": self.config.trading_agents.confirmation_mode,
+            }
+
         return {
             "timestamp": datetime.now(self.config.timezone).isoformat(),
             "paper_mode": self.config.paper_mode,
@@ -508,6 +527,9 @@ class TradingBotService:
             "modules": modules,
             "pre_risk_equity": round(pre_risk.equity, 2),
             "post_risk_equity": round(post_risk.equity, 2),
+            "kalshi_balance": kalshi_balance,
+            "ai_info": ai_info,
+            # Keep for backwards compatibility
             "ai_budget_remaining_usd": round(self.ai_service.get_budget_remaining(), 4) if self.ai_service else None,
         }
 
