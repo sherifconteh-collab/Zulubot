@@ -65,6 +65,19 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class VolatilityConfig:
+    enabled: bool = False            # opt-in; default preserves existing behaviour
+    target_annual_vol: float = 0.10  # 10% annual vol target
+    vol_window_days: int = 20        # rolling-std window (min history required)
+    use_ewma: bool = True            # True=EWMA(decay), False=rolling std
+    ewma_decay: float = 0.94         # RiskMetrics / professional-fund standard
+    max_leverage: float = 2.0        # hard leverage cap (never exceed 2× capital)
+    min_allocation: float = 0.20     # floor: always allocate ≥ 20% of base notional
+    no_trade_band: float = 0.10      # skip rebalance if allocation drift < 10%
+    max_history_days: int = 60       # keep at most 60 daily prices per symbol
+
+
+@dataclass(frozen=True)
 class StockStrategyConfig:
     max_pe_ratio: float = 20.0
     max_pb_ratio: float = 3.0
@@ -231,6 +244,7 @@ class AppConfig:
     predictions: PredictionConfig
     freqtrade: FreqtradeConfig
     latency_arb: LatencyArbConfig
+    volatility: VolatilityConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -368,5 +382,16 @@ class AppConfig:
                 stop_loss_pct=_env_float("LATENCY_ARB_STOP_LOSS", 0.15),
                 min_trade_usd=_env_float("LATENCY_ARB_MIN_TRADE_USD", 1.0),
                 ai_confirmation_mode=os.getenv("LATENCY_ARB_AI_CONFIRMATION", "boost").strip().lower(),
+            ),
+            volatility=VolatilityConfig(
+                enabled=_env_bool("VOL_TARGETING_ENABLED", False),
+                target_annual_vol=_env_float("VOL_TARGET_ANNUAL", 0.10),
+                vol_window_days=_env_int("VOL_WINDOW_DAYS", 20),
+                use_ewma=_env_bool("VOL_USE_EWMA", True),
+                ewma_decay=_env_float("VOL_EWMA_DECAY", 0.94),
+                max_leverage=_env_float("VOL_MAX_LEVERAGE", 2.0),
+                min_allocation=_env_float("VOL_MIN_ALLOCATION", 0.20),
+                no_trade_band=_env_float("VOL_NO_TRADE_BAND", 0.10),
+                max_history_days=_env_int("VOL_MAX_HISTORY_DAYS", 60),
             ),
         )

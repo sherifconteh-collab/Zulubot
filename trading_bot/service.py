@@ -40,8 +40,8 @@ class TradingBotService:
         self.config = config
         self.logger = logger.getChild("service")
         self.state_store = StateStore(config.state_path, config.initial_cash, config.timezone)
-        self.broker = PaperBroker(config.paper_mode, logger)
-        self.risk_manager = RiskManager(config.risk)
+        self.broker = PaperBroker(config.paper_mode, logger, max_price_history_days=config.volatility.max_history_days)
+        self.risk_manager = RiskManager(config.risk, vol_config=config.volatility)
 
         self.fmp_client = FinancialModelingPrepClient(
             api_key=config.fmp_api_key,

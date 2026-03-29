@@ -42,6 +42,11 @@ class PortfolioState:
     last_predictions_scan_date: str | None = None
     realized_pnl: float = 0.0
     rotation_data: dict[str, Any] = field(default_factory=dict)
+    price_history: dict[str, list[float]] = field(default_factory=dict)
+    # price_history: symbol → ordered list of daily close prices (oldest first).
+    # Populated once per calendar day by PaperBroker.mark_positions().
+    # Used by VolatilityEngine to compute realized / EWMA vol for position sizing.
+    last_price_record_date: str = ""
     # rotation_data stores: {
     #   "current_coin": "SOL-USD",
     #   "ratios": {"BTC-USD": {"SOL-USD": 0.00234, ...}, ...},
@@ -64,6 +69,8 @@ class PortfolioState:
             "last_predictions_scan_date": self.last_predictions_scan_date,
             "realized_pnl": self.realized_pnl,
             "rotation_data": self.rotation_data,
+            "price_history": self.price_history,
+            "last_price_record_date": self.last_price_record_date,
         }
 
 
