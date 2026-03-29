@@ -485,10 +485,12 @@ class FreeMarketIntelligenceClient:
         Keys: options_flow, insider, short_interest.
         All values default to neutral/zero on error.
         """
+        # Create one Ticker instance so all helpers share the same cached session.
+        t = self._yf.Ticker(ticker)
         signals = {
-            "options_flow": self._get_options_summary(ticker),
-            "insider": self._get_insider_summary(ticker),
-            "short_interest": self._get_short_interest(ticker),
+            "options_flow": self._get_options_summary(t),
+            "insider": self._get_insider_summary(t),
+            "short_interest": self._get_short_interest(t),
         }
         self.logger.debug(
             "%s market signals: options=%s insider=%s short=%s",
@@ -501,10 +503,9 @@ class FreeMarketIntelligenceClient:
 
     # ── Private helpers ───────────────────────────────────────────────
 
-    def _get_options_summary(self, ticker: str) -> dict[str, Any]:
+    def _get_options_summary(self, t: yf.Ticker) -> dict[str, Any]:
         """Put/call volume and open interest from the nearest options expiry."""
         try:
-            t = self._yf.Ticker(ticker)
             expirations = t.options
             if not expirations:
                 return self._empty_options()
@@ -527,13 +528,12 @@ class FreeMarketIntelligenceClient:
                 ),
             }
         except Exception as exc:
-            self.logger.warning("Options summary failed for %s: %s", ticker, exc)
+            self.logger.warning("Options summary failed for %s: %s", t.ticker, exc)
             return self._empty_options()
 
-    def _get_insider_summary(self, ticker: str) -> dict[str, Any]:
+    def _get_insider_summary(self, t: yf.Ticker) -> dict[str, Any]:
         """Recent insider buy/sell counts from SEC Form 4 disclosures via yfinance."""
         try:
-            t = self._yf.Ticker(ticker)
             txns = t.insider_transactions
             if txns is None or (hasattr(txns, "empty") and txns.empty):
                 return self._empty_insider()
@@ -556,26 +556,31 @@ class FreeMarketIntelligenceClient:
                 ),
             }
         except Exception as exc:
-            self.logger.warning("Insider summary failed for %s: %s", ticker, exc)
+            self.logger.warning("Insider summary failed for %s: %s", t.ticker, exc)
             return self._empty_insider()
 
-    def _get_short_interest(self, ticker: str) -> dict[str, Any]:
+    def _get_short_interest(self, t: yf.Ticker) -> dict[str, Any]:
         """Short percentage of float and days-to-cover from yfinance ticker.info."""
         try:
-            info = self._yf.Ticker(ticker).info
+            info = t.info
             short_pct_raw = _parse_float(info.get("shortPercentOfFloat"))
             short_ratio_raw = _parse_float(info.get("shortRatio"))
             short_pct = round(short_pct_raw * 100, 2) if short_pct_raw is not None else None
             days_to_cover = round(short_ratio_raw, 1) if short_ratio_raw is not None else None
-            # >10% short float is typically considered a meaningful bearish signal
-            bearish = short_pct is not None and short_pct > 10.0
+            # Only classify when data is available; unknown → neutral
+            if short_pct is None:
+                net_sentiment = "neutral"
+            elif short_pct > 10.0:
+                net_sentiment = "bearish"
+            else:
+                net_sentiment = "bullish"
             return {
                 "short_percent_of_float": short_pct,
                 "days_to_cover": days_to_cover,
-                "net_sentiment": "bearish" if bearish else "bullish",
+                "net_sentiment": net_sentiment,
             }
         except Exception as exc:
-            self.logger.warning("Short interest failed for %s: %s", ticker, exc)
+            self.logger.warning("Short interest failed for %s: %s", t.ticker, exc)
             return {"short_percent_of_float": None, "days_to_cover": None, "net_sentiment": "neutral"}
 
     @staticmethod
