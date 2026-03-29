@@ -122,6 +122,11 @@ class TradingAgentsConfig:
     max_cost_per_month: float = 10.00   # hard monthly spend cap
     max_debate_rounds: int = 1
     timeout_seconds: int = 30           # short timeout to avoid blocking trades
+    # Multi-analyst personas (inspired by virattt/ai-hedge-fund)
+    multi_analyst_enabled: bool = False  # opt-in to multi-analyst evaluation
+    selected_analysts: tuple[str, ...] = (
+        "value_investor", "contrarian", "sentiment_analyst",
+    )
 
 
 @dataclass(frozen=True)
@@ -308,6 +313,13 @@ class AppConfig:
                 max_cost_per_month=_env_float("TRADING_AGENTS_MAX_COST_PER_MONTH", 10.00),
                 max_debate_rounds=_env_int("TRADING_AGENTS_MAX_DEBATE_ROUNDS", 1),
                 timeout_seconds=_env_int("TRADING_AGENTS_TIMEOUT_SECONDS", 30),
+                multi_analyst_enabled=_env_bool("TRADING_AGENTS_MULTI_ANALYST", False),
+                selected_analysts=tuple(
+                    _env_list_lower(
+                        "TRADING_AGENTS_ANALYSTS",
+                        ["value_investor", "contrarian", "sentiment_analyst"],
+                    )
+                ),
             ),
             altcoin_rotation=AltcoinRotationConfig(
                 enabled=_env_bool("ROTATION_ENABLED", True),
