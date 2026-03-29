@@ -185,7 +185,7 @@ class TradingBotService:
             self._sync_coinbase_balance(state)
         self._sync_kalshi_positions(state)
 
-        self.refresh_open_positions(state)
+        self.refresh_open_positions(state, now=now)
         pre_risk = self._evaluate_risk(state, now)
         module_results: dict[str, Any] = {}
 
@@ -262,7 +262,7 @@ class TradingBotService:
                 ),
             )
 
-        self.refresh_open_positions(state)
+        self.refresh_open_positions(state, now=now)
         post_risk = self._evaluate_risk(state, now)
         self.state_store.save(state)
 
@@ -276,19 +276,19 @@ class TradingBotService:
         if not self.config.paper_mode:
             self._sync_coinbase_balance(state)
         self._sync_kalshi_positions(state)
-        self.refresh_open_positions(state)
+        self.refresh_open_positions(state, now=now)
         risk = self._evaluate_risk(state, now)
         self.state_store.save(state)
         return self._build_summary(state, pre_risk=risk, post_risk=risk, modules={})
 
-    def refresh_open_positions(self, state: PortfolioState) -> None:
+    def refresh_open_positions(self, state: PortfolioState, *, now: datetime | None = None) -> None:
         stock_symbols = sorted(
             symbol for symbol, position in state.positions.items() if position.asset_type == "stock"
         )
         if stock_symbols:
             try:
                 quotes = self.fmp_client.get_batch_quotes(stock_symbols)
-                self.broker.mark_positions(state, quotes)
+                self.broker.mark_positions(state, quotes, now=now)
             except Exception as exc:
                 self.logger.warning("Unable to refresh stock prices: %s", exc)
 
@@ -305,7 +305,7 @@ class TradingBotService:
                 for symbol in crypto_symbols:
                     if symbol not in prices:
                         prices[symbol] = self.binance_client.get_mark_price_and_funding(symbol).mark_price
-                self.broker.mark_positions(state, prices)
+                self.broker.mark_positions(state, prices, now=now)
             except Exception as exc:
                 self.logger.warning("Unable to refresh crypto prices: %s", exc)
 
@@ -324,7 +324,7 @@ class TradingBotService:
                         if mid > 0:
                             prices[symbol] = mid
                 if prices:
-                    self.broker.mark_positions(state, prices)
+                    self.broker.mark_positions(state, prices, now=now)
             except Exception as exc:
                 self.logger.warning("Unable to refresh prediction prices: %s", exc)
 

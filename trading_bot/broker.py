@@ -21,8 +21,14 @@ class PaperBroker:
         self.logger = logger.getChild("broker")
         self._max_price_history_days = max_price_history_days
 
-    def mark_positions(self, state: PortfolioState, prices: dict[str, float]) -> None:
-        today = date.today().isoformat()
+    def mark_positions(
+        self,
+        state: PortfolioState,
+        prices: dict[str, float],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        today = now.date().isoformat() if now is not None else date.today().isoformat()
         record_today = state.last_price_record_date != today
 
         for symbol, price in prices.items():

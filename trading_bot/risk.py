@@ -73,13 +73,14 @@ class RiskManager:
         state: PortfolioState,
         equity: float,
         symbol: str = "",
-        asset_type: str = "",
     ) -> float:
         """Return the USD notional to allocate to a new position.
 
         When volatility targeting is enabled (``VOL_TARGETING_ENABLED=true``):
-        - All positions (crypto, stock, prediction) are sized via
-          ``target_vol / realized_vol × equity`` with a leverage cap and floor.
+        - Positions are sized via ``target_vol / realized_vol × base_notional``
+          where ``base_notional = equity × max_position_fraction``.
+        - The leverage multiplier scales the per-trade budget up or down while
+          keeping the base risk budget as the reference point.
         - Falls back to flat ``max_position_fraction`` sizing when there is
           insufficient price history for the symbol.
         """
@@ -106,7 +107,7 @@ class RiskManager:
         vol_notional = VolatilityEngine.vol_adjusted_notional(
             target_vol=self._vol_config.target_annual_vol,
             realized_vol=vol,
-            capital=equity,
+            capital=base_notional,
             max_leverage=self._vol_config.max_leverage,
             min_allocation=self._vol_config.min_allocation,
         )

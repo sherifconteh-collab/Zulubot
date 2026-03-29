@@ -4,6 +4,8 @@ An automated trading system combining value investing, crypto sentiment, altcoin
 
 ## Architecture
 
+The diagram below shows how `__main__.py` wires together the scheduler, strategies, brokers, market-data clients, AI analyst team, and shared infrastructure.
+
 ```mermaid
 flowchart TB
     MAIN["__main__.py"] --> SVC["TradingBotService"]
@@ -84,6 +86,8 @@ flowchart TB
 ## Multi-Analyst AI System
 
 Inspired by [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), ZuluBot uses a **team-of-analysts** approach where multiple AI personas independently evaluate signals and aggregate their views via confidence-weighted voting.
+
+The diagram below shows how market data flows through each analyst persona and is aggregated into a final trading verdict.
 
 ```mermaid
 graph LR
@@ -201,14 +205,17 @@ Position size adjusts automatically so that every trade carries the **same dolla
 
 ```
 leverage = target_annual_vol / realized_vol
-position_size = clamp(leverage, min_allocation, max_leverage) × equity
+position_size = clamp(leverage, min_allocation, max_leverage) × base_notional
 ```
+
+where `base_notional = equity × max_position_fraction` (the configured per-trade budget).
 
 - **High vol** (e.g. crypto during a spike) → leverage < 1 → smaller position
 - **Low vol** (e.g. a quiet sideways market) → leverage > 1 → larger position
-- Applies to crypto, stocks, and prediction market positions
+- Applies to crypto and stock positions sized via the shared `RiskManager`
+- Kalshi prediction strategies keep their own budget-based sizing and do not use vol targeting
 - Enabled via `VOL_TARGETING_ENABLED=true`; off by default (flat 2% sizing preserved)
-- Falls back to flat sizing for any symbol without 2+ days of recorded price history
+- In EWMA mode (`VOL_USE_EWMA=true`, default), falls back to flat sizing for any symbol without 2+ days of recorded price history; in rolling-window mode (`VOL_USE_EWMA=false`), requires at least `VOL_WINDOW_DAYS+1` daily prices (21 by default) before vol-adjusted sizing activates
 
 Vol is estimated with an **EWMA** (decay = 0.94, the RiskMetrics standard), which reacts faster to regime changes than a plain rolling standard deviation:
 
@@ -217,7 +224,7 @@ ewma_variance[t] = (1 − 0.94) × return[t]² + 0.94 × ewma_variance[t−1]
 annual_vol = sqrt(ewma_variance × 252)
 ```
 
-A **no-trade band** (default 10%) prevents micro-rebalancing — size is only adjusted when the target allocation has drifted more than 10% from the current allocation.
+The following diagram shows how daily price snapshots flow through the volatility engine into a final position size:
 
 ```mermaid
 graph TD
@@ -232,14 +239,12 @@ graph TD
     TARGET --> FORMULA
 
     FORMULA --> CLAMP["clamp(leverage, 0.20, 2.0)"]
-    CLAMP --> NOTIONAL["position_size = leverage × equity"]
-
-    NOTIONAL --> BAND{"drift > no-trade band\n(10%)?"}
-    BAND -->|"Yes"| TRADE["Resize position"]
-    BAND -->|"No"| HOLD["Keep current size"]
+    CLAMP --> NOTIONAL["position_size = leverage × base_notional"]
 ```
 
 ### Risk Controls
+
+The following diagram shows the risk-management pipeline that runs before and after every trade cycle:
 
 ```mermaid
 graph TD
@@ -251,7 +256,7 @@ graph TD
     DD_DAILY -->|"Breached"| HALT["Daily Halt · No new trades until tomorrow"]
     DD_TOTAL -->|"Breached"| KILL["Kill Switch · Close all positions"]
 
-    EQUITY --> VOL_TARGET["Volatility Targeting\ntarget_vol / realized_vol × equity"]
+    EQUITY --> VOL_TARGET["Volatility Targeting\ntarget_vol / realized_vol × base_notional"]
     VOL_TARGET --> POS_SIZE["Vol-adjusted position size\n(falls back to 2% flat if disabled)"]
 
     HALT --> LOG["Telegram Alert + Log"]
@@ -348,6 +353,8 @@ The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and la
 ## Telegram Bot
 
 When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes interactive commands and sends automatic notifications.
+
+The diagram below shows the outbound notification types and inbound command categories the bot handles:
 
 ```mermaid
 graph LR

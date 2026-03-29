@@ -111,11 +111,12 @@ class VolatilityEngine:
         """Return True when the drift between current and target exceeds ``band``.
 
         Prevents excessive rebalancing and keeps transaction costs low.
-        A band of 0.10 means: only rebalance when allocation has drifted > 10%.
+        A band of 0.10 means: only rebalance when allocation has drifted > 10%
+        relative to the target allocation.
         """
-        if current_alloc <= 0:
-            return True
-        drift = abs(current_alloc - target_alloc) / current_alloc
+        if target_alloc <= 0:
+            return current_alloc != 0
+        drift = abs(current_alloc - target_alloc) / target_alloc
         return drift > band
 
     # ------------------------------------------------------------------ #
