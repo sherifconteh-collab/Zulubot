@@ -48,6 +48,7 @@ class StockValueStrategy:
         ai_service: Any | None = None,
         confirmation_mode: str = "log_only",
         coinbase_broker: Any | None = None,
+        market_intel_client: Any | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -55,6 +56,7 @@ class StockValueStrategy:
         self.ai_service = ai_service
         self.confirmation_mode = confirmation_mode
         self.coinbase_broker = coinbase_broker
+        self.market_intel_client = market_intel_client
 
     def run(
         self,
@@ -138,6 +140,30 @@ class StockValueStrategy:
                     self.logger.warning("Skipping stock buy for %s because position size is zero.", fundamentals.symbol)
                     continue
 
+                # Free market intelligence (options, insider, short interest)
+                market_signals: dict[str, Any] | None = None
+                if self.market_intel_client is not None:
+                    try:
+                        market_signals = self.market_intel_client.get_stock_signals(fundamentals.symbol)
+                    except Exception:
+                        self.logger.warning(
+                            "Failed to fetch market intelligence for %s; continuing without it.",
+                            fundamentals.symbol,
+                            exc_info=True,
+                        )
+                    else:
+                        sig = market_signals or {}
+                        options = sig.get("options_flow") or {}
+                        insider = sig.get("insider") or {}
+                        short = sig.get("short_interest") or {}
+                        self.logger.info(
+                            "Market signals for %s: options=%s insider=%s short=%s",
+                            fundamentals.symbol,
+                            options.get("net_sentiment", "n/a"),
+                            insider.get("net_sentiment", "n/a"),
+                            short.get("net_sentiment", "n/a"),
+                        )
+
                 # AI confirmation (optional)
                 ai_meta: dict[str, Any] = {}
                 if self.ai_service is not None and apply_ai_confirmation is not None:
@@ -145,6 +171,7 @@ class StockValueStrategy:
                         symbol=fundamentals.symbol,
                         fundamentals=fundamentals.to_dict(),
                         vix_value=vix_value,
+                        market_signals=market_signals,
                     )
                     notional, ai_meta = apply_ai_confirmation(
                         verdict, self.confirmation_mode, notional, self.logger,
@@ -167,7 +194,12 @@ class StockValueStrategy:
                     price=price,
                     notional=notional,
                     opened_at=now,
-                    meta={"fundamentals": fundamentals.to_dict(), "vix_value": vix_value, **ai_meta},
+                    meta={
+                        "fundamentals": fundamentals.to_dict(),
+                        "vix_value": vix_value,
+                        **({"market_signals": market_signals} if market_signals else {}),
+                        **ai_meta,
+                    },
                 )
                 if position is not None:
                     stock_positions_after_sells.add(fundamentals.symbol)

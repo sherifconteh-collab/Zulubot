@@ -4,6 +4,7 @@ import logging
 from typing import Any, Iterable
 
 import requests
+import yfinance as yf
 
 from trading_bot.models import FearGreedReading, FundingSnapshot
 
@@ -73,7 +74,6 @@ class FinancialModelingPrepClient:
     def __init__(self, *, api_key: str = "", timeout_seconds: int = 20, logger: logging.Logger) -> None:
         self.logger = logger.getChild("yfinance")
         self.api_key = api_key  # Kept for interface compat, not used
-        import yfinance as yf
         self._yf = yf
 
     def get_sp500_constituents(self) -> list[str]:
@@ -460,6 +460,140 @@ class CoinbaseClient(BaseHttpClient):
             {"start": str(start), "end": str(end), "granularity": granularity},
         )
         return payload.get("candles", []) if isinstance(payload, dict) else payload
+
+
+class FreeMarketIntelligenceClient:
+    """Free market intelligence client powered by yfinance (no API key required).
+
+    Provides options sentiment, insider transaction activity, and short
+    interest data to enrich AI stock evaluation prompts.  All data comes
+    from Yahoo Finance via the yfinance library which is already a project
+    dependency.  Every sub-call degrades gracefully so get_stock_signals()
+    never raises.
+    """
+
+    def __init__(self, *, logger: logging.Logger) -> None:
+        self.logger = logger.getChild("market_intel")
+        self._yf = yf
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def get_stock_signals(self, ticker: str) -> dict[str, Any]:
+        """Fetch and summarize free market intelligence signals for a ticker.
+
+        Returns a structured dict safe to serialize and pass into an AI prompt.
+        Keys: options_flow, insider, short_interest.
+        All values default to neutral/zero on error.
+        """
+        # Create one Ticker instance so all helpers share the same cached session.
+        t = self._yf.Ticker(ticker)
+        signals = {
+            "options_flow": self._get_options_summary(t),
+            "insider": self._get_insider_summary(t),
+            "short_interest": self._get_short_interest(t),
+        }
+        self.logger.debug(
+            "%s market signals: options=%s insider=%s short=%s",
+            ticker,
+            signals["options_flow"]["net_sentiment"],
+            signals["insider"]["net_sentiment"],
+            signals["short_interest"]["net_sentiment"],
+        )
+        return signals
+
+    # ── Private helpers ───────────────────────────────────────────────
+
+    def _get_options_summary(self, t: yf.Ticker) -> dict[str, Any]:
+        """Put/call volume and open interest from the nearest options expiry."""
+        try:
+            expirations = t.options
+            if not expirations:
+                return self._empty_options()
+            chain = t.option_chain(expirations[0])
+            calls_vol = int(chain.calls["volume"].fillna(0).sum())
+            puts_vol = int(chain.puts["volume"].fillna(0).sum())
+            calls_oi = int(chain.calls["openInterest"].fillna(0).sum())
+            puts_oi = int(chain.puts["openInterest"].fillna(0).sum())
+            ratio = round(puts_vol / calls_vol, 2) if calls_vol > 0 else None
+            return {
+                "calls_volume": calls_vol,
+                "puts_volume": puts_vol,
+                "calls_open_interest": calls_oi,
+                "puts_open_interest": puts_oi,
+                "put_call_volume_ratio": ratio,
+                "net_sentiment": (
+                    "bullish" if calls_vol > puts_vol
+                    else "bearish" if puts_vol > calls_vol
+                    else "neutral"
+                ),
+            }
+        except Exception as exc:
+            self.logger.warning("Options summary failed for %s: %s", t.ticker, exc)
+            return self._empty_options()
+
+    def _get_insider_summary(self, t: yf.Ticker) -> dict[str, Any]:
+        """Recent insider buy/sell counts from SEC Form 4 disclosures via yfinance."""
+        try:
+            txns = t.insider_transactions
+            if txns is None or (hasattr(txns, "empty") and txns.empty):
+                return self._empty_insider()
+            # Identify the transaction-type column (varies slightly by yfinance version)
+            txn_col = next(
+                (c for c in txns.columns if "transaction" in c.lower()), None
+            )
+            if txn_col is None:
+                return self._empty_insider()
+            txn_text = txns[txn_col].fillna("").str.lower()
+            buys = int((txn_text.str.contains("buy|purchase")).sum())
+            sells = int((txn_text.str.contains("sell|sale")).sum())
+            return {
+                "recent_buys": buys,
+                "recent_sells": sells,
+                "net_sentiment": (
+                    "bullish" if buys > sells
+                    else "bearish" if sells > buys
+                    else "neutral"
+                ),
+            }
+        except Exception as exc:
+            self.logger.warning("Insider summary failed for %s: %s", t.ticker, exc)
+            return self._empty_insider()
+
+    def _get_short_interest(self, t: yf.Ticker) -> dict[str, Any]:
+        """Short percentage of float and days-to-cover from yfinance ticker.info."""
+        try:
+            info = t.info
+            short_pct_raw = _parse_float(info.get("shortPercentOfFloat"))
+            short_ratio_raw = _parse_float(info.get("shortRatio"))
+            short_pct = round(short_pct_raw * 100, 2) if short_pct_raw is not None else None
+            days_to_cover = round(short_ratio_raw, 1) if short_ratio_raw is not None else None
+            # Only classify when data is available; unknown → neutral
+            if short_pct is None:
+                net_sentiment = "neutral"
+            elif short_pct > 10.0:
+                net_sentiment = "bearish"
+            else:
+                net_sentiment = "bullish"
+            return {
+                "short_percent_of_float": short_pct,
+                "days_to_cover": days_to_cover,
+                "net_sentiment": net_sentiment,
+            }
+        except Exception as exc:
+            self.logger.warning("Short interest failed for %s: %s", t.ticker, exc)
+            return {"short_percent_of_float": None, "days_to_cover": None, "net_sentiment": "neutral"}
+
+    @staticmethod
+    def _empty_options() -> dict[str, Any]:
+        return {
+            "calls_volume": 0, "puts_volume": 0,
+            "calls_open_interest": 0, "puts_open_interest": 0,
+            "put_call_volume_ratio": None, "net_sentiment": "neutral",
+        }
+
+    @staticmethod
+    def _empty_insider() -> dict[str, Any]:
+        return {"recent_buys": 0, "recent_sells": 0, "net_sentiment": "neutral"}
 
 
 def _chunked(items: list[str], size: int) -> list[list[str]]:
