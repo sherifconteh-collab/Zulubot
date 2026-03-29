@@ -697,10 +697,6 @@ class TradingAgentsService:
         Returns:
             Combined AgentVerdict or None if budget is exhausted.
         """
-        cached = self._check_cache(cache_key)
-        if cached is not None:
-            return cached
-
         keys = persona_keys or self.config.selected_analysts
         if not keys:
             keys = get_default_analysts()
@@ -718,13 +714,15 @@ class TradingAgentsService:
             self.logger.warning("No valid analyst personas selected.")
             return None
 
-        # Check budget for all persona calls upfront
+        # Check budget for analyst calls upfront.
+        # `_check_budget` enforces `max_cost_per_run` as a per-call cap, so we
+        # must compare it against the per-call cost, not the combined estimate.
         per_call_cost = self._estimate_cost(self.config.quick_model)
         total_estimated = per_call_cost * len(personas)
-        if not self._check_budget(total_estimated):
+        if not self._check_budget(per_call_cost):
             self.logger.warning(
-                "Budget insufficient for %d analyst calls ($%.4f). Skipping.",
-                len(personas), total_estimated,
+                "Budget insufficient for %d analyst calls (per-call $%.4f, total est $%.4f). Skipping.",
+                len(personas), per_call_cost, total_estimated,
             )
             return None
 

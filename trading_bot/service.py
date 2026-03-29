@@ -4,6 +4,8 @@ import logging
 from datetime import datetime
 from typing import Any
 
+import time
+
 from trading_bot.broker import PaperBroker
 from trading_bot.clients import (
     AlternativeMeClient,
@@ -169,6 +171,11 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
         )
+
+        # Kalshi balance cache (avoids network call on every summary)
+        self._kalshi_balance_cache: float | None = None
+        self._kalshi_balance_cache_ts: float = 0.0
+        self._kalshi_balance_cache_ttl: float = 120.0  # 2-minute TTL
 
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
@@ -487,13 +494,21 @@ class TradingBotService:
             for position in state.positions.values()
         ]
 
-        # Fetch Kalshi account balance when credentials are configured
+        # Fetch Kalshi account balance with TTL cache to avoid network
+        # calls on every run() / status() invocation.
         kalshi_balance: float | None = None
         if self.kalshi_client.can_trade:
-            try:
-                kalshi_balance = round(self.kalshi_client.get_balance(), 2)
-            except Exception as exc:
-                self.logger.debug("Could not fetch Kalshi balance: %s", exc)
+            now_ts = time.monotonic()
+            if (now_ts - self._kalshi_balance_cache_ts) < self._kalshi_balance_cache_ttl:
+                kalshi_balance = self._kalshi_balance_cache
+            else:
+                try:
+                    kalshi_balance = round(self.kalshi_client.get_balance(), 2)
+                    self._kalshi_balance_cache = kalshi_balance
+                    self._kalshi_balance_cache_ts = now_ts
+                except Exception as exc:
+                    self.logger.debug("Could not fetch Kalshi balance: %s", exc)
+                    kalshi_balance = self._kalshi_balance_cache  # stale is better than None
 
         # AI/multi-analyst metadata
         ai_info: dict[str, Any] | None = None

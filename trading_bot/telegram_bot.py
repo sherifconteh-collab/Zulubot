@@ -8,6 +8,7 @@ Inbound: /status, /crypto, /stocks, /polymarket, /positions, /risk,
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime
@@ -654,13 +655,13 @@ class TradingTelegramBot:
                     for key in analysts:
                         persona = get_analyst(key)
                         if persona:
-                            lines.append(f"  \u2022 <b>{persona.display_name}</b>")
-                            lines.append(f"    <i>{persona.description}</i>")
+                            lines.append(f"  \u2022 <b>{html.escape(persona.display_name)}</b>")
+                            lines.append(f"    <i>{html.escape(persona.description)}</i>")
                         else:
-                            lines.append(f"  \u2022 {key}")
+                            lines.append(f"  \u2022 {html.escape(key)}")
                 except ImportError:
                     for key in analysts:
-                        lines.append(f"  \u2022 {key}")
+                        lines.append(f"  \u2022 {html.escape(key)}")
                 lines.append(f"")
                 lines.append(f"\U0001f504 Signals aggregated via weighted voting")
             else:
