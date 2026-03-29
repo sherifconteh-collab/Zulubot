@@ -10,7 +10,7 @@ from trading_bot.clients import (
     BinanceFuturesClient,
     CoinbaseClient,
     FinancialModelingPrepClient,
-    UnusualWhalesClient,
+    FreeMarketIntelligenceClient,
 )
 from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGammaClient
@@ -62,16 +62,10 @@ class TradingBotService:
             logger=logger,
         )
 
-        # Unusual Whales client (optional — requires API key + enabled flag)
-        self.uw_client: UnusualWhalesClient | None = None
-        if config.unusual_whales.enabled and config.unusual_whales.api_key:
-            self.uw_client = UnusualWhalesClient(
-                api_key=config.unusual_whales.api_key,
-                timeout_seconds=config.unusual_whales.timeout_seconds,
-                min_flow_premium=config.unusual_whales.min_flow_premium,
-                logger=logger,
-            )
-            self.logger.info("Unusual Whales client enabled.")
+        # Free market intelligence (options sentiment, insider activity, short interest)
+        # Uses yfinance — no API key required.
+        self.market_intel_client = FreeMarketIntelligenceClient(logger=logger)
+        self.logger.info("Free market intelligence client enabled (yfinance).")
 
         # TradingAgents AI service (optional)
         self.ai_service = None
@@ -99,7 +93,7 @@ class TradingBotService:
             confirmation_mode=config.trading_agents.confirmation_mode,
             # Coinbase API is crypto-only — stock positions tracked internally
             coinbase_broker=None,
-            uw_client=self.uw_client,
+            market_intel_client=self.market_intel_client,
         )
 
         self.crypto_strategy = CryptoSentimentFundingStrategy(

@@ -109,22 +109,22 @@ class StockStrategyTests(unittest.TestCase):
         self.assertNotIn("AAA", state.positions)
 
 
-class UnusualWhalesIntegrationTests(unittest.TestCase):
-    """Tests for StockValueStrategy Unusual Whales client integration."""
+class MarketIntelligenceIntegrationTests(unittest.TestCase):
+    """Tests for StockValueStrategy free market intelligence client integration."""
 
     _SAMPLE_SIGNALS = {
         "options_flow": {
-            "calls": 7, "puts": 2, "sweeps": 1,
-            "total_premium_usd": 300_000, "flow_count": 9,
+            "calls_volume": 7_500, "puts_volume": 2_000,
+            "calls_open_interest": 50_000, "puts_open_interest": 15_000,
+            "put_call_volume_ratio": 0.27,
             "net_sentiment": "bullish",
         },
-        "darkpool": {"recent_trades": 3, "total_volume_shares": 50_000, "total_premium_usd": 750_000},
-        "insider": {"recent_buys": 1, "recent_sells": 0, "net_sentiment": "bullish"},
-        "congress": {"recent_buys": 0, "recent_sells": 0, "net_sentiment": "neutral"},
+        "insider": {"recent_buys": 2, "recent_sells": 0, "net_sentiment": "bullish"},
+        "short_interest": {"short_percent_of_float": 3.1, "days_to_cover": 2.5, "net_sentiment": "bullish"},
     }
 
     def setUp(self) -> None:
-        self.logger = logging.getLogger("test_uw_integration")
+        self.logger = logging.getLogger("test_market_intel")
         self.now = datetime(2026, 3, 28, 12, 0, tzinfo=ZoneInfo("America/New_York"))
         self.client = _make_fmp_client()
         self.broker = PaperBroker(True, self.logger)
@@ -132,21 +132,21 @@ class UnusualWhalesIntegrationTests(unittest.TestCase):
 
     def _make_strategy(
         self,
-        uw_client=None,
+        market_intel_client=None,
         ai_service=None,
     ) -> StockValueStrategy:
         return StockValueStrategy(
             config=StockStrategyConfig(),
             client=self.client,
             logger=self.logger,
-            uw_client=uw_client,
+            market_intel_client=market_intel_client,
             ai_service=ai_service,
         )
 
-    def test_uw_signals_persisted_in_position_meta(self) -> None:
-        """UW signals returned by the client must be stored in opened position meta."""
-        uw_client = _FakeUwClient(self._SAMPLE_SIGNALS)
-        strategy = self._make_strategy(uw_client=uw_client)
+    def test_market_signals_persisted_in_position_meta(self) -> None:
+        """Market signals returned by the client must be stored in opened position meta."""
+        intel_client = _FakeMarketIntelClient(self._SAMPLE_SIGNALS)
+        strategy = self._make_strategy(market_intel_client=intel_client)
 
         state = PortfolioState(
             cash=100_000.0,
@@ -158,14 +158,14 @@ class UnusualWhalesIntegrationTests(unittest.TestCase):
         strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now, force=True)
 
         for symbol, position in state.positions.items():
-            self.assertIn("uw_signals", position.meta, f"Missing uw_signals in meta for {symbol}")
-            self.assertEqual(position.meta["uw_signals"], self._SAMPLE_SIGNALS)
+            self.assertIn("market_signals", position.meta, f"Missing market_signals in meta for {symbol}")
+            self.assertEqual(position.meta["market_signals"], self._SAMPLE_SIGNALS)
 
-    def test_uw_signals_passed_to_ai_evaluate_stock(self) -> None:
-        """UW signals must be forwarded to ai_service.evaluate_stock."""
-        uw_client = _FakeUwClient(self._SAMPLE_SIGNALS)
+    def test_market_signals_passed_to_ai_evaluate_stock(self) -> None:
+        """Market signals must be forwarded to ai_service.evaluate_stock."""
+        intel_client = _FakeMarketIntelClient(self._SAMPLE_SIGNALS)
         ai_service = _RecordingAiService()
-        strategy = self._make_strategy(uw_client=uw_client, ai_service=ai_service)
+        strategy = self._make_strategy(market_intel_client=intel_client, ai_service=ai_service)
 
         state = PortfolioState(
             cash=100_000.0,
@@ -178,12 +178,12 @@ class UnusualWhalesIntegrationTests(unittest.TestCase):
 
         self.assertTrue(ai_service.calls, "ai_service.evaluate_stock was never called")
         for call_kwargs in ai_service.calls:
-            self.assertEqual(call_kwargs.get("uw_signals"), self._SAMPLE_SIGNALS)
+            self.assertEqual(call_kwargs.get("market_signals"), self._SAMPLE_SIGNALS)
 
-    def test_uw_client_exception_does_not_abort_strategy(self) -> None:
-        """A raising uw_client must not crash the strategy loop; buys continue with uw_signals=None."""
-        uw_client = _ErrorUwClient()
-        strategy = self._make_strategy(uw_client=uw_client)
+    def test_market_intel_client_exception_does_not_abort_strategy(self) -> None:
+        """A raising market_intel_client must not crash the strategy loop; buys continue with None signals."""
+        intel_client = _ErrorMarketIntelClient()
+        strategy = self._make_strategy(market_intel_client=intel_client)
 
         state = PortfolioState(
             cash=100_000.0,
@@ -197,9 +197,9 @@ class UnusualWhalesIntegrationTests(unittest.TestCase):
         )
 
         # Strategy should still open positions (graceful degradation)
-        self.assertTrue(result.get("buys"), "Expected buys even when UW client raises")
+        self.assertTrue(result.get("buys"), "Expected buys even when market intel client raises")
         for symbol, position in state.positions.items():
-            self.assertNotIn("uw_signals", position.meta, f"uw_signals must be absent when fetch failed")
+            self.assertNotIn("market_signals", position.meta, f"market_signals must be absent when fetch failed")
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -209,7 +209,7 @@ def _make_fmp_client() -> FakeFmpClient:
     return FakeFmpClient()
 
 
-class _FakeUwClient:
+class _FakeMarketIntelClient:
     """Returns a fixed signals dict for every ticker."""
     def __init__(self, signals: dict) -> None:
         self._signals = signals
@@ -218,10 +218,10 @@ class _FakeUwClient:
         return self._signals
 
 
-class _ErrorUwClient:
+class _ErrorMarketIntelClient:
     """Always raises on get_stock_signals."""
     def get_stock_signals(self, ticker: str) -> dict:
-        raise RuntimeError("Simulated UW API failure")
+        raise RuntimeError("Simulated market intel failure")
 
 
 class _RecordingAiService:

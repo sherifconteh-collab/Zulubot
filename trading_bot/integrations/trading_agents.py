@@ -146,55 +146,55 @@ class TradingAgentsService:
         symbol: str,
         fundamentals: dict[str, Any],
         vix_value: float,
-        uw_signals: dict[str, Any] | None = None,
+        market_signals: dict[str, Any] | None = None,
     ) -> AgentVerdict | None:
         """Evaluate a stock buy/sell signal with AI.
 
         Called only when quant signals (value screen + VIX threshold) fire.
-        Optionally enriched with Unusual Whales market intelligence (options
-        flow, dark pool, insider trades, congressional trades) when available.
+        Optionally enriched with free market intelligence (options sentiment,
+        insider activity, and short interest) when available.
         """
         if not self.is_available:
             return None
 
         cache_key = f"stock:{symbol}"
-        if uw_signals:
-            # Include a lightweight fingerprint of UW signals so cached verdicts
-            # are not served when intelligence data has changed.
-            flow = uw_signals.get("options_flow") or {}
+        if market_signals:
+            # Include a lightweight fingerprint so cached verdicts are not served
+            # when market intelligence data has changed.
+            flow = market_signals.get("options_flow") or {}
             cache_key = (
                 f"stock:{symbol}:"
-                f"fc{flow.get('flow_count', 0)}"
-                f"c{flow.get('calls', 0)}"
-                f"p{flow.get('puts', 0)}"
+                f"cv{flow.get('calls_volume', 0)}"
+                f"pv{flow.get('puts_volume', 0)}"
             )
         cached = self._check_cache(cache_key)
         if cached is not None:
             return cached
 
-        uw_section = ""
-        if uw_signals:
-            flow = uw_signals.get("options_flow", {})
-            dp = uw_signals.get("darkpool", {})
-            ins = uw_signals.get("insider", {})
-            cong = uw_signals.get("congress", {})
-            options_lean = flow.get("net_sentiment", "neutral")
-            uw_section = (
-                f"\nMarket Intelligence (Unusual Whales):\n"
-                f"  Options Flow: {flow.get('flow_count', 0)} alerts — "
-                f"{flow.get('calls', 0)} calls / {flow.get('puts', 0)} puts, "
-                f"{flow.get('sweeps', 0)} sweeps, "
-                f"${flow.get('total_premium_usd', 0):,.0f} total premium, "
-                f"lean={options_lean}\n"
-                f"  Dark Pool: {dp.get('recent_trades', 0)} recent block trades, "
-                f"{dp.get('total_volume_shares', 0):,.0f} shares, "
-                f"${dp.get('total_premium_usd', 0):,.0f} premium\n"
+        intel_section = ""
+        if market_signals:
+            flow = market_signals.get("options_flow") or {}
+            ins = market_signals.get("insider") or {}
+            short = market_signals.get("short_interest") or {}
+            calls_vol = flow.get("calls_volume", 0)
+            puts_vol = flow.get("puts_volume", 0)
+            ratio = flow.get("put_call_volume_ratio")
+            ratio_str = f"{ratio:.2f}" if ratio is not None else "n/a"
+            short_pct = short.get("short_percent_of_float")
+            days_to_cover = short.get("days_to_cover")
+            short_str = (
+                f"{short_pct:.1f}% shorted, {days_to_cover:.1f}d to cover"
+                if short_pct is not None
+                else "n/a"
+            )
+            intel_section = (
+                f"\nMarket Intelligence:\n"
+                f"  Options: {calls_vol:,} calls / {puts_vol:,} puts volume "
+                f"(put/call ratio: {ratio_str}, lean={flow.get('net_sentiment', 'neutral')})\n"
                 f"  Insider Activity: {ins.get('recent_buys', 0)} buys / "
                 f"{ins.get('recent_sells', 0)} sells "
                 f"({ins.get('net_sentiment', 'neutral')})\n"
-                f"  Congressional Trading: {cong.get('recent_buys', 0)} buys / "
-                f"{cong.get('recent_sells', 0)} sells "
-                f"({cong.get('net_sentiment', 'neutral')})\n"
+                f"  Short Interest: {short_str} ({short.get('net_sentiment', 'neutral')})\n"
             )
 
         prompt = (
@@ -206,7 +206,7 @@ class TradingAgentsService:
             f"  FCF Signal: {fundamentals.get('fcf_positive_signal', 'N/A')}\n"
             f"  P/FCF Ratio: {fundamentals.get('pfcf_ratio', 'N/A')}\n"
             f"  VIX: {vix_value}"
-            f"{uw_section}\n"
+            f"{intel_section}\n"
             f"Respond with JSON: {{\"action\": \"buy\"|\"sell\"|\"hold\"|\"skip\", "
             f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
         )

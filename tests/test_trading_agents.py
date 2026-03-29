@@ -75,15 +75,15 @@ class TradingAgentsServiceTests(unittest.TestCase):
         self.assertGreater(verdict.confidence, 0.5)
         self.assertIn("Strong value", verdict.reasoning)
 
-    def test_evaluate_stock_with_uw_signals_includes_market_intelligence(self) -> None:
-        """uw_signals should inject the Market Intelligence section into the prompt."""
+    def test_evaluate_stock_with_market_signals_includes_market_intelligence(self) -> None:
+        """market_signals should inject the Market Intelligence section into the prompt."""
         captured_prompts: list[str] = []
 
         class CapturingClient:
             def __init__(self) -> None:
                 self._responses = [
                     "yes",
-                    '{"action": "buy", "confidence": 0.85, "reasoning": "UW confirms bullish"}',
+                    '{"action": "buy", "confidence": 0.85, "reasoning": "Signals confirm bullish"}',
                 ]
                 self._call_idx = 0
                 self.messages = self
@@ -100,43 +100,43 @@ class TradingAgentsServiceTests(unittest.TestCase):
         service.config = self.config
         service._anthropic_client = CapturingClient()
 
-        uw_signals = {
+        market_signals = {
             "options_flow": {
-                "calls": 8, "puts": 3, "sweeps": 2,
-                "total_premium_usd": 500_000, "flow_count": 11,
+                "calls_volume": 8_000, "puts_volume": 2_000,
+                "calls_open_interest": 60_000, "puts_open_interest": 15_000,
+                "put_call_volume_ratio": 0.25,
                 "net_sentiment": "bullish",
             },
-            "darkpool": {"recent_trades": 5, "total_volume_shares": 100_000, "total_premium_usd": 2_000_000},
             "insider": {"recent_buys": 2, "recent_sells": 0, "net_sentiment": "bullish"},
-            "congress": {"recent_buys": 1, "recent_sells": 0, "net_sentiment": "bullish"},
+            "short_interest": {"short_percent_of_float": 2.5, "days_to_cover": 1.8, "net_sentiment": "bullish"},
         }
 
         verdict = service.evaluate_stock(
             symbol="AAPL",
             fundamentals={"pe_ratio": 15, "pb_ratio": 2.0, "debt_to_equity": 0.3},
             vix_value=28.0,
-            uw_signals=uw_signals,
+            market_signals=market_signals,
         )
 
         self.assertIsNotNone(verdict)
         self.assertEqual(verdict.action, "buy")
         combined = "\n".join(captured_prompts)
-        self.assertIn("Market Intelligence (Unusual Whales)", combined)
+        self.assertIn("Market Intelligence", combined)
         self.assertIn("lean=bullish", combined)
 
-    def test_evaluate_stock_with_partial_uw_signals_does_not_error(self) -> None:
-        """evaluate_stock must not raise when uw_signals is missing nested fields."""
+    def test_evaluate_stock_with_partial_market_signals_does_not_error(self) -> None:
+        """evaluate_stock must not raise when market_signals is missing nested fields."""
         service = self._make_service([
             "yes",
             '{"action": "hold", "confidence": 0.5, "reasoning": "Partial data"}',
         ])
 
-        # Intentionally sparse uw_signals — must not KeyError
+        # Intentionally sparse market_signals — must not KeyError
         verdict = service.evaluate_stock(
             symbol="MSFT",
             fundamentals={"pe_ratio": 20},
             vix_value=20.0,
-            uw_signals={"options_flow": {}, "darkpool": {}},
+            market_signals={"options_flow": {}, "insider": {}},
         )
 
         self.assertIsNotNone(verdict)
