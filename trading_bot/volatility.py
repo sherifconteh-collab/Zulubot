@@ -115,6 +115,8 @@ class VolatilityEngine:
         relative to the target allocation.
         """
         if target_alloc <= 0:
+            # If target is zero, rebalance only when current is non-zero (need to close out).
+            # When both are zero there is nothing to do.
             return current_alloc != 0
         drift = abs(current_alloc - target_alloc) / target_alloc
         return drift > band
