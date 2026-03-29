@@ -201,8 +201,7 @@ class TestRiskManagerPositionNotional(unittest.TestCase):
             vol_config=VolatilityConfig(enabled=False),
         )
         state = _make_state()
-        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD", asset_type="crypto")
-        self.assertAlmostEqual(result, 200.0, places=2)  # 2% of 10k
+        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD")
 
     def test_falls_back_when_insufficient_history(self) -> None:
         rm = RiskManager(
@@ -210,7 +209,7 @@ class TestRiskManagerPositionNotional(unittest.TestCase):
             vol_config=VolatilityConfig(enabled=True, vol_window_days=20, use_ewma=False),
         )
         state = _make_state({"BTC-USD": _flat_prices(50_000.0, 5)})  # only 5 days
-        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD", asset_type="crypto")
+        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD")
         self.assertAlmostEqual(result, 200.0, places=2)
 
     def test_vol_adjusted_sizing_active_with_sufficient_history(self) -> None:
@@ -228,7 +227,7 @@ class TestRiskManagerPositionNotional(unittest.TestCase):
         # 25-day price series with moderate volatility
         prices = _volatile_prices(50_000.0, 25, daily_return=0.02)
         state = _make_state({"BTC-USD": prices})
-        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD", asset_type="crypto")
+        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD")
         # With 2% daily returns, annualised vol ≈ 32%, so leverage ≈ 0.31
         # result should NOT equal flat 200 — vol-adjusted sizing is active
         self.assertNotAlmostEqual(result, 200.0, places=0)
@@ -250,7 +249,7 @@ class TestRiskManagerPositionNotional(unittest.TestCase):
         )
         # No price history → falls back to flat sizing
         state = _make_state()
-        result = rm.position_notional(state, equity=10_000.0, symbol="PM:abc:YES", asset_type="prediction")
+        result = rm.position_notional(state, equity=10_000.0, symbol="PM:abc:YES")
         self.assertAlmostEqual(result, 200.0, places=2)
 
     def test_capped_by_available_cash(self) -> None:
@@ -267,7 +266,7 @@ class TestRiskManagerPositionNotional(unittest.TestCase):
         # Very low vol → leverage wants to push notional way above cash
         prices = [100.0 + i * 0.001 for i in range(30)]  # near-flat, very low vol
         state = PortfolioState(cash=500.0, price_history={"BTC-USD": prices})
-        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD", asset_type="crypto")
+        result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD")
         self.assertLessEqual(result, 500.0)
 
 

@@ -43,7 +43,8 @@ class PortfolioState:
     realized_pnl: float = 0.0
     rotation_data: dict[str, Any] = field(default_factory=dict)
     price_history: dict[str, list[float]] = field(default_factory=dict)
-    # price_history: symbol → ordered list of daily close prices (oldest first).
+    # price_history: symbol → ordered list of one price snapshot per calendar day
+    # (first mark recorded that day, oldest first; not guaranteed to be the market close).
     # Populated once per calendar day by PaperBroker.mark_positions().
     # Used by VolatilityEngine to compute realized / EWMA vol for position sizing.
     last_price_record_date: str = ""

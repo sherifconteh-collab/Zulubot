@@ -71,8 +71,8 @@ class VolatilityConfig:
     vol_window_days: int = 20        # rolling-std window (min history required)
     use_ewma: bool = True            # True=EWMA(decay), False=rolling std
     ewma_decay: float = 0.94         # RiskMetrics / professional-fund standard
-    max_leverage: float = 1.5        # hard leverage cap (never exceed 1.5× capital)
-    min_allocation: float = 0.20     # floor: always allocate ≥ 20% of base notional
+    max_leverage: float = 2.0        # hard leverage cap (never exceed 2× capital)
+    min_allocation: float = 0.20     # floor: always allocate ≥ 20% of total equity (min leverage)
     no_trade_band: float = 0.10      # skip rebalance if allocation drift < 10%
     max_history_days: int = 60       # keep at most 60 daily prices per symbol
 
@@ -173,7 +173,7 @@ class AltcoinRotationConfig:
     min_trade_usd: float = 1.0           # minimum $1 trade
     excluded_coins: list[str] = field(default_factory=list)  # coins to never trade
     max_coins_to_track: int = 50         # limit to top 50 by volume
-    capital_allocation_pct: float = 0.40 # use 40% of total capital for rotation
+    capital_allocation_pct: float = 0.60 # use 60% of total capital for rotation
 
 
 @dataclass(frozen=True)
@@ -191,7 +191,7 @@ class PredictionConfig:
     min_volume_usd: float = 5_000        # Minimum 24h volume to consider a market tradeable
     max_spread_usd: float = 0.15         # Maximum bid/ask spread allowed per side
     market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather"])
-    capital_allocation_pct: float = 0.25 # use 25% of total capital for predictions
+    capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
 
 
 @dataclass(frozen=True)
