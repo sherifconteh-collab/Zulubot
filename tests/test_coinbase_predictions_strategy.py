@@ -18,23 +18,27 @@ def _make_market(
     yes_ask: float = 0.25,
     yes_bid: float = 0.20,
     volume: float = 10_000.0,
+    no_ask: float | None = None,
+    no_bid: float | None = None,
 ) -> dict[str, Any]:
     """Build a minimal Kalshi market dict as returned by the strategy's _discover_markets."""
+    resolved_no_ask = (1.0 - yes_bid) if no_ask is None else no_ask
+    resolved_no_bid = (1.0 - yes_ask) if no_bid is None else no_bid
     return {
         "ticker": ticker,
         "title": f"Test market {ticker}",
         "yes_ask_dollars": str(yes_ask),
         "yes_bid_dollars": str(yes_bid),
-        "no_ask_dollars": str(1.0 - yes_bid),
-        "no_bid_dollars": str(1.0 - yes_ask),
+        "no_ask_dollars": str(resolved_no_ask),
+        "no_bid_dollars": str(resolved_no_bid),
         "last_price_dollars": str(yes_ask),
         "volume_fp": str(volume),
         "_series": "KXBTC",
         "_category": "crypto",
         "_yes_ask": yes_ask,
         "_yes_bid": yes_bid,
-        "_no_ask": 1.0 - yes_bid,
-        "_no_bid": 1.0 - yes_ask,
+        "_no_ask": resolved_no_ask,
+        "_no_bid": resolved_no_bid,
         "_last": yes_ask,
         "_volume": volume,
         "_mid": (yes_bid + yes_ask) / 2,
@@ -233,6 +237,39 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
         result = strategy._evaluate_signal(market, mid=0.21, fear_greed_value=None)
         self.assertIsNotNone(result)
         self.assertEqual(result[0], "yes")
+
+    def test_evaluate_signal_rejects_missing_yes_bid(self) -> None:
+        """Markets missing one side of the YES book should fail liquidity checks."""
+        market = _make_market(yes_ask=0.22, yes_bid=0.0, volume=10_000)
+        strategy = self._make_strategy()
+        result = strategy._evaluate_signal(market, mid=0.21, fear_greed_value=None)
+        self.assertIsNone(result)
+
+    def test_evaluate_signal_rejects_missing_no_ask(self) -> None:
+        """Markets missing one side of the NO book should fail liquidity checks."""
+        market = _make_market(yes_ask=0.22, yes_bid=0.20, volume=10_000, no_ask=0.0, no_bid=0.78)
+        strategy = self._make_strategy()
+        result = strategy._evaluate_signal(market, mid=0.80, fear_greed_value=None)
+        self.assertIsNone(result)
+
+    def test_evaluate_signal_respects_configured_spread_threshold(self) -> None:
+        """max_spread_usd from config should control the liquidity guard."""
+        market = _make_market(yes_ask=0.50, yes_bid=0.32, no_ask=0.68, no_bid=0.50)
+        default_strategy = self._make_strategy()
+        self.assertIsNone(default_strategy._evaluate_signal(market, mid=0.41, fear_greed_value=None))
+
+        config_wider = PredictionConfig(
+            enabled=True,
+            market_categories=["crypto"],
+            max_spread_usd=0.20,
+        )
+        strategy_wider = CoinbasePredictionStrategy(
+            config=config_wider,
+            kalshi_client=FakeKalshiClient([]),  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        result = strategy_wider._evaluate_signal(market, mid=0.29, fear_greed_value=None)
+        self.assertEqual(result, ("yes", 0.50))
 
 
 if __name__ == "__main__":
