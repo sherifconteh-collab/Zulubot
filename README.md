@@ -193,10 +193,12 @@ Rotates capital into the best-performing altcoin vs BTC/ETH ratio:
 
 ### 4. Prediction Markets — Kalshi
 Trades binary prediction contracts directly via the Kalshi API:
-- Scans crypto and economics categories
+- Scans crypto, economics, finance, politics, and weather categories
 - **Buy YES** when contract price < 0.30
 - **Buy NO** when contract price > 0.70
 - Optional Fear & Greed confirmation for crypto-tagged markets
+- Filters out markets below the configurable 24h volume threshold (`PREDICTION_MIN_VOLUME_USD`, default `5000`)
+- Rejects markets when either the YES or NO bid/ask spread exceeds 15 cents
 - Market discovery works without credentials; trading requires Kalshi API key
 
 ### 5. Latency Arbitrage — Kalshi
@@ -266,6 +268,8 @@ INITIAL_CASH=10000
 # Enable latency arb
 LATENCY_ARB_ENABLED=true
 PREDICTION_ENABLED=true
+PREDICTION_MARKET_CATEGORIES=crypto,economics,finance,politics,weather
+PREDICTION_MIN_VOLUME_USD=5000
 ```
 
 ### Security Notes
