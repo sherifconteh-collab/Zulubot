@@ -5,40 +5,31 @@ An automated trading system combining value investing, crypto sentiment, altcoin
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph Entrypoint
-        MAIN["__main__.py"]
-    end
-
-    subgraph Daemon
-        SCHED["SchedulerService"]
-    end
-
-    subgraph Orchestrator
-        SVC["TradingBotService"]
-    end
-
-    MAIN --> SCHED
-    MAIN --> SVC
-    SCHED --> SVC
+flowchart TB
+    MAIN["__main__.py"] --> SVC["TradingBotService"]
+    MAIN --> SCHED["SchedulerService"] --> SVC
 
     subgraph Strategies
-        STK["StockValueStrategy"]
-        CRY["CryptoSentimentFundingStrategy"]
-        ROT["AltcoinRotationStrategy"]
-        PRED["CoinbasePredictionStrategy"]
-        POLY["PolymarketStrategy"]
-        LARB["LatencyArbStrategy"]
+        direction LR
+        STRAT["Strategy Hub"]
+        STK["Stock Value"]
+        CRY["Crypto Sentiment"]
+        ROT["Altcoin Rotation"]
+        PRED["Kalshi Predictions"]
+        POLY["Polymarket"]
+        LARB["Latency Arb"]
     end
 
-    SVC --> STK
-    SVC --> CRY
-    SVC --> ROT
-    SVC --> PRED
-    SVC --> POLY
-    SVC --> LARB
+    SVC --> STRAT
+    STRAT --> STK
+    STRAT --> CRY
+    STRAT --> ROT
+    STRAT --> PRED
+    STRAT --> POLY
+    STRAT --> LARB
 
     subgraph Brokers
+        direction LR
         PB["PaperBroker"]
         CB["CoinbaseBroker"]
         PMB["PolymarketBroker"]
@@ -51,53 +42,41 @@ graph TB
     POLY --> PMB
     LARB --> PB
 
-    subgraph "API Clients"
-        COIN["CoinbaseClient"]
-        BIN["BinanceFuturesClient"]
-        FMP["FMPClient"]
-        ALT["AlternativeMeClient"]
-        KAL["KalshiClient"]
-        GAMMA["PolymarketGammaClient"]
-        CLOB["PolymarketClobClient"]
-        MINT["FreeMarketIntelClient"]
+    subgraph Data["Market Data"]
+        direction LR
+        D_CB["Coinbase · Binance · AlternativeMe"]
+        D_FMP["FMP · MarketIntel"]
+        D_KAL["Kalshi"]
+        D_POLY["Polymarket CLOB · Gamma"]
     end
 
-    CB --> COIN
-    CRY --> BIN
-    CRY --> ALT
-    STK --> FMP
-    STK --> MINT
-    PRED --> KAL
-    LARB --> KAL
-    POLY --> GAMMA
-    POLY --> CLOB
+    CRY --> D_CB
+    STK --> D_FMP
+    PRED --> D_KAL
+    LARB --> D_KAL
+    POLY --> D_POLY
 
-    subgraph "AI Analysts"
-        AI["TradingAgentsService"]
-        PERSONAS["Analyst Personas"]
+    subgraph AI["AI Analyst Team"]
+        direction LR
+        TAS["TradingAgentsService"] --> PER["Analyst Personas"]
     end
 
-    STK --> AI
-    CRY --> AI
-    ROT --> AI
-    PRED --> AI
-    LARB --> AI
-    AI --> PERSONAS
+    Strategies -.-> AI
 
-    subgraph Infrastructure
-        STATE["StateStore · JSON"]
+    subgraph Infra["Infrastructure"]
+        direction LR
+        INFRA["Infra Hub"]
+        STATE["StateStore"]
         RISK["RiskManager"]
-        NOTIF["NotificationDispatcher"]
-        TG["TelegramBot"]
-        FEED["CoinbasePriceFeed"]
+        TG["Telegram"]
+        FEED["PriceFeed"]
     end
 
-    SVC --> STATE
-    SVC --> RISK
-    SVC --> NOTIF
-    NOTIF --> TG
-    LARB --> FEED
-    FEED --> COIN
+    SVC --> INFRA
+    INFRA --> STATE
+    INFRA --> RISK
+    INFRA --> TG
+    INFRA --> FEED
 ```
 
 ## Multi-Analyst AI System
@@ -193,10 +172,12 @@ Rotates capital into the best-performing altcoin vs BTC/ETH ratio:
 
 ### 4. Prediction Markets — Kalshi
 Trades binary prediction contracts directly via the Kalshi API:
-- Scans crypto and economics categories
+- Scans crypto, economics, finance, politics, and weather categories
 - **Buy YES** when contract price < 0.30
 - **Buy NO** when contract price > 0.70
 - Optional Fear & Greed confirmation for crypto-tagged markets
+- Filters out markets below the configurable 24h volume threshold (`PREDICTION_MIN_VOLUME_USD`, default `5000`)
+- Rejects markets when either side is missing a live bid/ask or when the spread exceeds the configurable limit (`PREDICTION_MAX_SPREAD_USD`, default `0.15`)
 - Market discovery works without credentials; trading requires Kalshi API key
 
 ### 5. Latency Arbitrage — Kalshi
@@ -266,6 +247,9 @@ INITIAL_CASH=10000
 # Enable latency arb
 LATENCY_ARB_ENABLED=true
 PREDICTION_ENABLED=true
+PREDICTION_MARKET_CATEGORIES=crypto,economics,finance,politics,weather
+PREDICTION_MIN_VOLUME_USD=5000
+PREDICTION_MAX_SPREAD_USD=0.15
 ```
 
 ### Security Notes

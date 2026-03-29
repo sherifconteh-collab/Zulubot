@@ -36,14 +36,20 @@ except ImportError:
     apply_ai_confirmation = None  # type: ignore[assignment]
 
 
-# Series tickers to scan on Kalshi (crypto + economics focus)
+# Series tickers to scan on Kalshi
 CRYPTO_SERIES = ["KXBTC", "KXETH", "KXSOL", "KXDOGE", "KXXRP"]
 ECONOMICS_SERIES = ["KXCPI", "KXCPIYOY", "KXGDP", "KXFED", "KXFOMC", "KXNFP", "KXRECESSION", "KXTARIFF"]
-OTHER_SERIES = ["KXNEWPOPE", "KXINX", "KXSPY"]
+FINANCE_SERIES = ["KXINX", "KXSPY", "KXNDX", "KXIWM", "KXGLD", "KXWTI"]
+POLITICS_SERIES = ["KXTRUMP", "KXPOTUS", "KXSENATE", "KXHOUSE"]
+WEATHER_SERIES = ["KXTEMP", "KXHURRICANE"]
+OTHER_SERIES = ["KXNEWPOPE"]
 
 SERIES_BY_CATEGORY: dict[str, list[str]] = {
     "crypto": CRYPTO_SERIES,
     "economics": ECONOMICS_SERIES,
+    "finance": FINANCE_SERIES,
+    "politics": POLITICS_SERIES,
+    "weather": WEATHER_SERIES,
     "other": OTHER_SERIES,
 }
 
@@ -169,8 +175,16 @@ class CoinbasePredictionStrategy:
                     m["_last"] = _parse_dollars(m.get("last_price_dollars"))
                     m["_volume"] = _parse_dollars(m.get("volume_fp"))
                     m["_mid"] = self._mid_price(m)
-                    # Only include markets with some price data
-                    if m["_yes_ask"] > 0.01 or m["_yes_bid"] > 0 or m["_volume"] > 0:
+                    # Only include markets with price data and sufficient volume
+                    has_price = (
+                        m["_yes_ask"] > 0.01
+                        or m["_yes_bid"] > 0
+                        or m["_no_ask"] > 0.01
+                        or m["_no_bid"] > 0
+                        or m["_last"] > 0
+                    )
+                    has_volume = m["_volume"] >= self.config.min_volume_usd
+                    if has_price and has_volume:
                         all_markets.append(m)
                 time.sleep(0.3)  # Rate limit
             except Exception as exc:
@@ -502,6 +516,22 @@ class CoinbasePredictionStrategy:
         category = market.get("_category", "other")
         yes_ask = market["_yes_ask"]
         no_ask = market["_no_ask"]
+        yes_bid = market["_yes_bid"]
+        no_bid = market["_no_bid"]
+
+        spread_threshold = self.config.max_spread_usd
+
+        # Reject markets with poor liquidity:
+        # - missing bid or ask on either side
+        # - or bid-ask spreads wider than the configured threshold
+        if yes_ask <= 0 or yes_bid <= 0:
+            return None
+        if (yes_ask - yes_bid) > spread_threshold:
+            return None
+        if no_ask <= 0 or no_bid <= 0:
+            return None
+        if (no_ask - no_bid) > spread_threshold:
+            return None
 
         # Crypto markets: require Fear & Greed confirmation
         if category == "crypto" and fear_greed_value is not None:
@@ -513,7 +543,8 @@ class CoinbasePredictionStrategy:
                     return ("no", no_ask if no_ask > 0 else (1.0 - mid))
             return None
 
-        # Non-crypto: pure threshold signals
+        # Pure threshold signals for non-crypto categories (finance/economics/politics/weather/other),
+        # and for crypto when Fear & Greed data is unavailable.
         if mid < self.config.buy_yes_threshold:
             return ("yes", yes_ask if yes_ask > 0 else mid)
         elif mid > self.config.buy_no_threshold:
