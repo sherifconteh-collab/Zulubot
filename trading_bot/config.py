@@ -172,10 +172,10 @@ class PredictionConfig:
     buy_no_threshold: float = 0.70       # Buy NO above this price
     take_profit_threshold: float = 0.50  # Take profit at 0.50
     stop_loss_pct: float = 0.15          # Stop loss at 15% move against
-    max_positions: int = 3
+    max_positions: int = 5
     check_interval_minutes: int = 60
     min_trade_usd: float = 1.0
-    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics"])
+    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather"])
     capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
 
 
@@ -339,10 +339,10 @@ class AppConfig:
                 buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.70),
                 take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
                 stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
-                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 3),
+                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 5),
                 check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 60),
                 min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
-                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics"]),
+                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather"]),
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
             ),
             freqtrade=FreqtradeConfig(
