@@ -72,7 +72,7 @@ class VolatilityConfig:
     use_ewma: bool = True            # True=EWMA(decay), False=rolling std
     ewma_decay: float = 0.94         # RiskMetrics / professional-fund standard
     max_leverage: float = 2.0        # hard leverage cap (never exceed 2× capital)
-    min_allocation: float = 0.20     # floor: always allocate ≥ 20% of total equity (min leverage)
+    min_allocation: float = 0.20     # floor: never allocate < 20% of base notional (min leverage multiplier)
     no_trade_band: float = 0.10      # skip rebalance if allocation drift < 10%
     max_history_days: int = 60       # keep at most 60 daily prices per symbol
 
