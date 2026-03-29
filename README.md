@@ -68,6 +68,7 @@ flowchart TB
         INFRA["Infra Hub"]
         STATE["StateStore"]
         RISK["RiskManager"]
+        VOL["VolatilityEngine"]
         TG["Telegram"]
         FEED["PriceFeed"]
     end
@@ -75,6 +76,7 @@ flowchart TB
     SVC --> INFRA
     INFRA --> STATE
     INFRA --> RISK
+    RISK --> VOL
     INFRA --> TG
     INFRA --> FEED
 ```
@@ -193,6 +195,50 @@ Trades on Polymarket prediction markets:
 - Scans for markets matching configured tags
 - Evaluates YES/NO pricing against configurable thresholds
 
+### Volatility Targeting
+
+Position size adjusts automatically so that every trade carries the **same dollar-risk**, regardless of how volatile the underlying market is. The formula is simple:
+
+```
+leverage = target_annual_vol / realized_vol
+position_size = clamp(leverage, min_allocation, max_leverage) × equity
+```
+
+- **High vol** (e.g. crypto during a spike) → leverage < 1 → smaller position
+- **Low vol** (e.g. a quiet sideways market) → leverage > 1 → larger position
+- Applies to crypto, stocks, and prediction market positions
+- Enabled via `VOL_TARGETING_ENABLED=true`; off by default (flat 2% sizing preserved)
+- Falls back to flat sizing for any symbol without 2+ days of recorded price history
+
+Vol is estimated with an **EWMA** (decay = 0.94, the RiskMetrics standard), which reacts faster to regime changes than a plain rolling standard deviation:
+
+```
+ewma_variance[t] = (1 − 0.94) × return[t]² + 0.94 × ewma_variance[t−1]
+annual_vol = sqrt(ewma_variance × 252)
+```
+
+A **no-trade band** (default 10%) prevents micro-rebalancing — size is only adjusted when the target allocation has drifted more than 10% from the current allocation.
+
+```mermaid
+graph TD
+    PRICES["Daily Price Snapshots\n(recorded by PaperBroker)"]
+    VOL_ENGINE["VolatilityEngine\nEWMA · decay=0.94"]
+    PRICES --> VOL_ENGINE
+
+    VOL_ENGINE --> VOL["Realized Vol"]
+    TARGET["Target Annual Vol\ndefault 10%"]
+
+    VOL --> FORMULA["leverage = target / realized"]
+    TARGET --> FORMULA
+
+    FORMULA --> CLAMP["clamp(leverage, 0.20, 2.0)"]
+    CLAMP --> NOTIONAL["position_size = leverage × equity"]
+
+    NOTIONAL --> BAND{"drift > no-trade band\n(10%)?"}
+    BAND -->|"Yes"| TRADE["Resize position"]
+    BAND -->|"No"| HOLD["Keep current size"]
+```
+
 ### Risk Controls
 
 ```mermaid
@@ -205,13 +251,15 @@ graph TD
     DD_DAILY -->|"Breached"| HALT["Daily Halt · No new trades until tomorrow"]
     DD_TOTAL -->|"Breached"| KILL["Kill Switch · Close all positions"]
 
-    EQUITY --> POS_SIZE["Position Sizing · default 2% of equity"]
+    EQUITY --> VOL_TARGET["Volatility Targeting\ntarget_vol / realized_vol × equity"]
+    VOL_TARGET --> POS_SIZE["Vol-adjusted position size\n(falls back to 2% flat if disabled)"]
 
     HALT --> LOG["Telegram Alert + Log"]
     KILL --> LOG
 ```
 
-- Configurable position size per trade (default 2% of equity)
+- **Volatility-targeted position sizing** (opt-in) — scales each position so dollar-risk stays constant
+- Configurable flat position size per trade (default 2% of equity, used when vol targeting is off or history is insufficient)
 - 5% daily drawdown halt on new entries
 - 15% peak-to-equity kill switch (closes all positions)
 - `PAPER_MODE=true` by default — no real money until explicitly enabled
@@ -243,6 +291,11 @@ TELEGRAM_CHAT_ID=your_chat_id
 # Risk and mode
 PAPER_MODE=true
 INITIAL_CASH=10000
+
+# Volatility targeting (off by default; enable after ~20 trading days of history)
+# VOL_TARGETING_ENABLED=true
+# VOL_TARGET_ANNUAL=0.10
+# VOL_MAX_LEVERAGE=2.0
 
 # Enable latency arb
 LATENCY_ARB_ENABLED=true
@@ -374,6 +427,20 @@ graph LR
 | `LATENCY_ARB_TAKE_PROFIT` | `0.20` | Exit at +20% price gain |
 | `LATENCY_ARB_STOP_LOSS` | `0.15` | Exit at -15% price loss |
 | `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode |
+
+### Volatility Targeting
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `VOL_TARGETING_ENABLED` | `false` | Enable vol-adjusted position sizing |
+| `VOL_TARGET_ANNUAL` | `0.10` | Target annual portfolio volatility (10%) |
+| `VOL_WINDOW_DAYS` | `20` | Rolling window for realized vol (days) |
+| `VOL_USE_EWMA` | `true` | Use EWMA instead of rolling std |
+| `VOL_EWMA_DECAY` | `0.94` | EWMA decay factor (0.94 = RiskMetrics standard) |
+| `VOL_MAX_LEVERAGE` | `2.0` | Hard leverage cap (never exceed 2× equity) |
+| `VOL_MIN_ALLOCATION` | `0.20` | Minimum leverage floor (always stay 20% in) |
+| `VOL_NO_TRADE_BAND` | `0.10` | Skip resize when drift < 10% (reduces costs) |
+| `VOL_MAX_HISTORY_DAYS` | `60` | Max daily prices stored per symbol |
 
 ### AI Integration
 
