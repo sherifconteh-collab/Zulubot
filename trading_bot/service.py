@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any
-
-import time
 
 from trading_bot.broker import PaperBroker
 from trading_bot.clients import (
@@ -508,7 +507,8 @@ class TradingBotService:
                     self._kalshi_balance_cache_ts = now_ts
                 except Exception as exc:
                     self.logger.debug("Could not fetch Kalshi balance: %s", exc)
-                    kalshi_balance = self._kalshi_balance_cache  # stale is better than None
+                    if self._kalshi_balance_cache is not None:
+                        kalshi_balance = self._kalshi_balance_cache  # stale is better than None
 
         # AI/multi-analyst metadata
         ai_info: dict[str, Any] | None = None
