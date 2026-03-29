@@ -51,7 +51,7 @@ flowchart TB
 
     subgraph AI["AI Analyst Team"]
         direction LR
-        TAS["TradingAgentsService"] --> PER["6 Analyst Personas"]
+        TAS["TradingAgentsService"] --> PER["Analyst Personas"]
     end
 
     Strategies -.-> AI
