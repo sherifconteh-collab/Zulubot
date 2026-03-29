@@ -228,7 +228,9 @@ def aggregate_analyst_signals(
     else:
         final_score = 0.0
 
-    # Convert score to action (matching Zulubot's buy/sell/hold convention)
+    # Convert score to action (matching Zulubot's buy/sell/hold convention).
+    # The ±0.2 threshold prevents weak/split signals from triggering trades;
+    # a score of 0.2 requires meaningful directional agreement among analysts.
     if final_score > 0.2:
         action = "buy"
     elif final_score < -0.2:

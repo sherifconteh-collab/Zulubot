@@ -227,7 +227,7 @@ class TradingAgentsService:
                 f"  D/E Ratio: {fundamentals.get('debt_to_equity', 'N/A')}\n"
                 f"  FCF Signal: {fundamentals.get('fcf_positive_signal', 'N/A')}\n"
                 f"  P/FCF Ratio: {fundamentals.get('pfcf_ratio', 'N/A')}\n"
-                f"  VIX: {vix_value}"
+                f"  VIX: {vix_value}\n"
                 f"{intel_section}"
             )
             return self._multi_analyst_evaluation(cache_key, data_prompt)
