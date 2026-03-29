@@ -56,7 +56,7 @@ class SchedulerService:
         """Main daemon loop. Runs until shutdown signal received."""
         self._install_signal_handlers()
         await self.telegram.start()
-        await self.notifier.notify_startup(self.config.paper_mode)
+        await self.notifier.notify_startup(self.config.paper_mode, self.config.volatility.enabled)
 
         self.logger.info(
             "Scheduler started. crypto=%dm rotation=%dm predictions=%dm stock_hour=%d "
