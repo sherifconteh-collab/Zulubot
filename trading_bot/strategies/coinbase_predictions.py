@@ -519,10 +519,18 @@ class CoinbasePredictionStrategy:
         yes_bid = market["_yes_bid"]
         no_bid = market["_no_bid"]
 
-        # Reject markets with wide bid-ask spreads (>15 cents) — poor liquidity
-        if yes_ask > 0 and yes_bid > 0 and (yes_ask - yes_bid) > 0.15:
+        spread_threshold = self.config.max_spread_usd
+
+        # Reject markets with poor liquidity:
+        # - missing bid or ask on either side
+        # - or bid-ask spreads wider than the configured threshold
+        if yes_ask <= 0 or yes_bid <= 0:
             return None
-        if no_ask > 0 and no_bid > 0 and (no_ask - no_bid) > 0.15:
+        if (yes_ask - yes_bid) > spread_threshold:
+            return None
+        if no_ask <= 0 or no_bid <= 0:
+            return None
+        if (no_ask - no_bid) > spread_threshold:
             return None
 
         # Crypto markets: require Fear & Greed confirmation
@@ -535,7 +543,8 @@ class CoinbasePredictionStrategy:
                     return ("no", no_ask if no_ask > 0 else (1.0 - mid))
             return None
 
-        # Finance/economics/politics/weather: pure threshold signals
+        # Pure threshold signals for non-crypto categories (finance/economics/politics/weather/other),
+        # and for crypto when Fear & Greed data is unavailable.
         if mid < self.config.buy_yes_threshold:
             return ("yes", yes_ask if yes_ask > 0 else mid)
         elif mid > self.config.buy_no_threshold:

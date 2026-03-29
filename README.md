@@ -11,6 +11,7 @@ flowchart TB
 
     subgraph Strategies
         direction LR
+        STRAT["Strategy Hub"]
         STK["Stock Value"]
         CRY["Crypto Sentiment"]
         ROT["Altcoin Rotation"]
@@ -19,7 +20,13 @@ flowchart TB
         LARB["Latency Arb"]
     end
 
-    SVC --> Strategies
+    SVC --> STRAT
+    STRAT --> STK
+    STRAT --> CRY
+    STRAT --> ROT
+    STRAT --> PRED
+    STRAT --> POLY
+    STRAT --> LARB
 
     subgraph Brokers
         direction LR
@@ -58,13 +65,18 @@ flowchart TB
 
     subgraph Infra["Infrastructure"]
         direction LR
+        INFRA["Infra Hub"]
         STATE["StateStore"]
         RISK["RiskManager"]
         TG["Telegram"]
         FEED["PriceFeed"]
     end
 
-    SVC --> Infra
+    SVC --> INFRA
+    INFRA --> STATE
+    INFRA --> RISK
+    INFRA --> TG
+    INFRA --> FEED
 ```
 
 ## Multi-Analyst AI System
@@ -165,7 +177,7 @@ Trades binary prediction contracts directly via the Kalshi API:
 - **Buy NO** when contract price > 0.70
 - Optional Fear & Greed confirmation for crypto-tagged markets
 - Filters out markets below the configurable 24h volume threshold (`PREDICTION_MIN_VOLUME_USD`, default `5000`)
-- Rejects markets when either the YES or NO bid/ask spread exceeds 15 cents
+- Rejects markets when either side is missing a live bid/ask or when the spread exceeds the configurable limit (`PREDICTION_MAX_SPREAD_USD`, default `0.15`)
 - Market discovery works without credentials; trading requires Kalshi API key
 
 ### 5. Latency Arbitrage — Kalshi
@@ -237,6 +249,7 @@ LATENCY_ARB_ENABLED=true
 PREDICTION_ENABLED=true
 PREDICTION_MARKET_CATEGORIES=crypto,economics,finance,politics,weather
 PREDICTION_MIN_VOLUME_USD=5000
+PREDICTION_MAX_SPREAD_USD=0.15
 ```
 
 ### Security Notes
