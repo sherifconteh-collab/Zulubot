@@ -5,40 +5,24 @@ An automated trading system combining value investing, crypto sentiment, altcoin
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph Entrypoint
-        MAIN["__main__.py"]
-    end
-
-    subgraph Daemon
-        SCHED["SchedulerService"]
-    end
-
-    subgraph Orchestrator
-        SVC["TradingBotService"]
-    end
-
-    MAIN --> SCHED
-    MAIN --> SVC
-    SCHED --> SVC
+flowchart TB
+    MAIN["__main__.py"] --> SVC["TradingBotService"]
+    MAIN --> SCHED["SchedulerService"] --> SVC
 
     subgraph Strategies
-        STK["StockValueStrategy"]
-        CRY["CryptoSentimentFundingStrategy"]
-        ROT["AltcoinRotationStrategy"]
-        PRED["CoinbasePredictionStrategy"]
-        POLY["PolymarketStrategy"]
-        LARB["LatencyArbStrategy"]
+        direction LR
+        STK["Stock Value"]
+        CRY["Crypto Sentiment"]
+        ROT["Altcoin Rotation"]
+        PRED["Kalshi Predictions"]
+        POLY["Polymarket"]
+        LARB["Latency Arb"]
     end
 
-    SVC --> STK
-    SVC --> CRY
-    SVC --> ROT
-    SVC --> PRED
-    SVC --> POLY
-    SVC --> LARB
+    SVC --> Strategies
 
     subgraph Brokers
+        direction LR
         PB["PaperBroker"]
         CB["CoinbaseBroker"]
         PMB["PolymarketBroker"]
@@ -51,53 +35,36 @@ graph TB
     POLY --> PMB
     LARB --> PB
 
-    subgraph "API Clients"
-        COIN["CoinbaseClient"]
-        BIN["BinanceFuturesClient"]
-        FMP["FMPClient"]
-        ALT["AlternativeMeClient"]
-        KAL["KalshiClient"]
-        GAMMA["PolymarketGammaClient"]
-        CLOB["PolymarketClobClient"]
-        MINT["FreeMarketIntelClient"]
+    subgraph Data["Market Data"]
+        direction LR
+        D_CB["Coinbase · Binance · AlternativeMe"]
+        D_FMP["FMP · MarketIntel"]
+        D_KAL["Kalshi"]
+        D_POLY["Polymarket CLOB · Gamma"]
     end
 
-    CB --> COIN
-    CRY --> BIN
-    CRY --> ALT
-    STK --> FMP
-    STK --> MINT
-    PRED --> KAL
-    LARB --> KAL
-    POLY --> GAMMA
-    POLY --> CLOB
+    CRY --> D_CB
+    STK --> D_FMP
+    PRED --> D_KAL
+    LARB --> D_KAL
+    POLY --> D_POLY
 
-    subgraph "AI Analysts"
-        AI["TradingAgentsService"]
-        PERSONAS["Analyst Personas"]
+    subgraph AI["AI Analyst Team"]
+        direction LR
+        TAS["TradingAgentsService"] --> PER["6 Analyst Personas"]
     end
 
-    STK --> AI
-    CRY --> AI
-    ROT --> AI
-    PRED --> AI
-    LARB --> AI
-    AI --> PERSONAS
+    Strategies -.-> AI
 
-    subgraph Infrastructure
-        STATE["StateStore · JSON"]
+    subgraph Infra["Infrastructure"]
+        direction LR
+        STATE["StateStore"]
         RISK["RiskManager"]
-        NOTIF["NotificationDispatcher"]
-        TG["TelegramBot"]
-        FEED["CoinbasePriceFeed"]
+        TG["Telegram"]
+        FEED["PriceFeed"]
     end
 
-    SVC --> STATE
-    SVC --> RISK
-    SVC --> NOTIF
-    NOTIF --> TG
-    LARB --> FEED
-    FEED --> COIN
+    SVC --> Infra
 ```
 
 ## Multi-Analyst AI System
