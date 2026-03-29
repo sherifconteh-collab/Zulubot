@@ -48,7 +48,7 @@ class StockValueStrategy:
         ai_service: Any | None = None,
         confirmation_mode: str = "log_only",
         coinbase_broker: Any | None = None,
-        uw_client: Any | None = None,
+        market_intel_client: Any | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -56,7 +56,7 @@ class StockValueStrategy:
         self.ai_service = ai_service
         self.confirmation_mode = confirmation_mode
         self.coinbase_broker = coinbase_broker
-        self.uw_client = uw_client
+        self.market_intel_client = market_intel_client
 
     def run(
         self,
@@ -140,31 +140,28 @@ class StockValueStrategy:
                     self.logger.warning("Skipping stock buy for %s because position size is zero.", fundamentals.symbol)
                     continue
 
-                # Unusual Whales market intelligence (optional)
-                uw_signals: dict[str, Any] | None = None
-                if self.uw_client is not None:
+                # Free market intelligence (options, insider, short interest)
+                market_signals: dict[str, Any] | None = None
+                if self.market_intel_client is not None:
                     try:
-                        uw_signals = self.uw_client.get_stock_signals(fundamentals.symbol)
+                        market_signals = self.market_intel_client.get_stock_signals(fundamentals.symbol)
                     except Exception:
                         self.logger.warning(
-                            "Failed to fetch Unusual Whales signals for %s; continuing without them.",
+                            "Failed to fetch market intelligence for %s; continuing without it.",
                             fundamentals.symbol,
                             exc_info=True,
                         )
                     else:
-                        uw_root = uw_signals or {}
-                        options_flow = uw_root.get("options_flow") or {}
-                        darkpool = uw_root.get("darkpool") or {}
-                        insider = uw_root.get("insider") or {}
-                        congress = uw_root.get("congress") or {}
+                        sig = market_signals or {}
+                        options = sig.get("options_flow") or {}
+                        insider = sig.get("insider") or {}
+                        short = sig.get("short_interest") or {}
                         self.logger.info(
-                            "UW signals for %s: flow=%d options, dp=%d blocks, "
-                            "insider=%s, congress=%s",
+                            "Market signals for %s: options=%s insider=%s short=%s",
                             fundamentals.symbol,
-                            options_flow.get("flow_count", 0),
-                            darkpool.get("recent_trades", 0),
+                            options.get("net_sentiment", "n/a"),
                             insider.get("net_sentiment", "n/a"),
-                            congress.get("net_sentiment", "n/a"),
+                            short.get("net_sentiment", "n/a"),
                         )
 
                 # AI confirmation (optional)
@@ -174,7 +171,7 @@ class StockValueStrategy:
                         symbol=fundamentals.symbol,
                         fundamentals=fundamentals.to_dict(),
                         vix_value=vix_value,
-                        uw_signals=uw_signals,
+                        market_signals=market_signals,
                     )
                     notional, ai_meta = apply_ai_confirmation(
                         verdict, self.confirmation_mode, notional, self.logger,
@@ -200,7 +197,7 @@ class StockValueStrategy:
                     meta={
                         "fundamentals": fundamentals.to_dict(),
                         "vix_value": vix_value,
-                        **({"uw_signals": uw_signals} if uw_signals else {}),
+                        **({"market_signals": market_signals} if market_signals else {}),
                         **ai_meta,
                     },
                 )

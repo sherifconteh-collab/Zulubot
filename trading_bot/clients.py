@@ -4,6 +4,7 @@ import logging
 from typing import Any, Iterable
 
 import requests
+import yfinance as yf
 
 from trading_bot.models import FearGreedReading, FundingSnapshot
 
@@ -73,7 +74,6 @@ class FinancialModelingPrepClient:
     def __init__(self, *, api_key: str = "", timeout_seconds: int = 20, logger: logging.Logger) -> None:
         self.logger = logger.getChild("yfinance")
         self.api_key = api_key  # Kept for interface compat, not used
-        import yfinance as yf
         self._yf = yf
 
     def get_sp500_constituents(self) -> list[str]:
@@ -462,161 +462,133 @@ class CoinbaseClient(BaseHttpClient):
         return payload.get("candles", []) if isinstance(payload, dict) else payload
 
 
-class UnusualWhalesClient(BaseHttpClient):
-    """Unusual Whales market intelligence client.
+class FreeMarketIntelligenceClient:
+    """Free market intelligence client powered by yfinance (no API key required).
 
-    Provides options flow alerts, dark pool transactions, insider trades,
-    and congressional trading data for a given ticker.
-
-    Requires a paid Unusual Whales API key (set UNUSUAL_WHALES_API_KEY).
-    All methods return empty lists on error so callers degrade gracefully.
+    Provides options sentiment, insider transaction activity, and short
+    interest data to enrich AI stock evaluation prompts.  All data comes
+    from Yahoo Finance via the yfinance library which is already a project
+    dependency.  Every sub-call degrades gracefully so get_stock_signals()
+    never raises.
     """
 
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        timeout_seconds: int,
-        logger: logging.Logger,
-        min_flow_premium: float = 50_000,
-    ) -> None:
-        super().__init__(
-            base_url="https://api.unusualwhales.com",
-            timeout_seconds=timeout_seconds,
-            logger=logger.getChild("unusual_whales"),
-        )
-        self.session.headers["Authorization"] = f"Bearer {api_key}"
-        self.min_flow_premium = min_flow_premium
+    def __init__(self, *, logger: logging.Logger) -> None:
+        self.logger = logger.getChild("market_intel")
+        self._yf = yf
 
-    def get_options_flow(
-        self, ticker: str, *, min_premium: float = 50_000, limit: int = 20
-    ) -> list[dict[str, Any]]:
-        """Recent unusual options flow alerts for a ticker."""
-        try:
-            payload = self._get_json(
-                "api/option-trades/flow-alerts",
-                {"ticker_symbol": ticker, "min_premium": int(min_premium), "limit": limit},
-            )
-            data = payload.get("data", payload) if isinstance(payload, dict) else payload
-            return data if isinstance(data, list) else []
-        except Exception as exc:
-            self.logger.warning("Options flow failed for %s: %s", ticker, exc)
-            return []
-
-    def get_darkpool(self, ticker: str, *, limit: int = 20) -> list[dict[str, Any]]:
-        """Recent dark pool transactions for a ticker."""
-        try:
-            payload = self._get_json(f"api/darkpool/{ticker}", {"limit": limit})
-            data = payload.get("data", payload) if isinstance(payload, dict) else payload
-            return data if isinstance(data, list) else []
-        except Exception as exc:
-            self.logger.warning("Dark pool failed for %s: %s", ticker, exc)
-            return []
-
-    def get_insider_trades(self, ticker: str, *, limit: int = 10) -> list[dict[str, Any]]:
-        """Recent insider (executive/director) trades for a ticker."""
-        try:
-            payload = self._get_json(f"api/insider/{ticker}", {"limit": limit})
-            data = payload.get("data", payload) if isinstance(payload, dict) else payload
-            return data if isinstance(data, list) else []
-        except Exception as exc:
-            self.logger.warning("Insider trades failed for %s: %s", ticker, exc)
-            return []
-
-    def get_congress_trades(self, ticker: str, *, limit: int = 10) -> list[dict[str, Any]]:
-        """Recent congressional trading disclosures for a ticker."""
-        try:
-            payload = self._get_json(
-                "api/congress/recent-trades", {"ticker": ticker, "limit": limit}
-            )
-            data = payload.get("data", payload) if isinstance(payload, dict) else payload
-            return data if isinstance(data, list) else []
-        except Exception as exc:
-            self.logger.warning("Congress trades failed for %s: %s", ticker, exc)
-            return []
+    # ── Public API ────────────────────────────────────────────────────
 
     def get_stock_signals(self, ticker: str) -> dict[str, Any]:
-        """Fetch and summarize all Unusual Whales signals for a ticker.
+        """Fetch and summarize free market intelligence signals for a ticker.
 
         Returns a structured dict safe to serialize and pass into an AI prompt.
-        All sub-calls degrade to empty lists on failure so this never raises.
+        Keys: options_flow, insider, short_interest.
+        All values default to neutral/zero on error.
         """
-        flow = self.get_options_flow(ticker, min_premium=self.min_flow_premium, limit=20)
-        darkpool = self.get_darkpool(ticker, limit=20)
-        insider = self.get_insider_trades(ticker, limit=10)
-        congress = self.get_congress_trades(ticker, limit=10)
-
-        # Options flow summary
-        calls = sum(1 for f in flow if str(f.get("put_call", "")).upper() == "C")
-        puts = sum(1 for f in flow if str(f.get("put_call", "")).upper() == "P")
-        sweeps = sum(1 for f in flow if f.get("is_sweep"))
-        flow_premium = sum((_parse_float(f.get("premium", 0) or 0) or 0.0) for f in flow)
-
-        # Dark pool summary
-        dp_volume = sum((_parse_float(t.get("size", 0) or 0) or 0.0) for t in darkpool)
-        dp_premium = sum((_parse_float(t.get("premium", 0) or 0) or 0.0) for t in darkpool)
-
-        # Insider summary (P=purchase, S=sale)
-        insider_buys = sum(
-            1 for t in insider if str(t.get("transaction_code", "")).upper() == "P"
-        )
-        insider_sells = sum(
-            1 for t in insider if str(t.get("transaction_code", "")).upper() == "S"
-        )
-
-        # Congressional summary
-        congress_buys = sum(
-            1 for t in congress
-            if str(t.get("transaction_type", "")).lower() in ("buy", "purchase")
-        )
-        congress_sells = sum(
-            1 for t in congress
-            if str(t.get("transaction_type", "")).lower() in ("sell", "sale")
-        )
-
-        self.logger.debug(
-            "%s UW signals: flow=%d(C%d/P%d) dp=%d insider=%d/%d congress=%d/%d",
-            ticker, len(flow), calls, puts, len(darkpool),
-            insider_buys, insider_sells, congress_buys, congress_sells,
-        )
-
-        return {
-            "options_flow": {
-                "calls": calls,
-                "puts": puts,
-                "sweeps": sweeps,
-                "total_premium_usd": round(flow_premium, 2),
-                "flow_count": len(flow),
-                "net_sentiment": (
-                    "bullish" if calls > puts
-                    else "bearish" if puts > calls
-                    else "neutral"
-                ),
-            },
-            "darkpool": {
-                "recent_trades": len(darkpool),
-                "total_volume_shares": round(dp_volume, 0),
-                "total_premium_usd": round(dp_premium, 2),
-            },
-            "insider": {
-                "recent_buys": insider_buys,
-                "recent_sells": insider_sells,
-                "net_sentiment": (
-                    "bullish" if insider_buys > insider_sells
-                    else "bearish" if insider_sells > insider_buys
-                    else "neutral"
-                ),
-            },
-            "congress": {
-                "recent_buys": congress_buys,
-                "recent_sells": congress_sells,
-                "net_sentiment": (
-                    "bullish" if congress_buys > congress_sells
-                    else "bearish" if congress_sells > congress_buys
-                    else "neutral"
-                ),
-            },
+        signals = {
+            "options_flow": self._get_options_summary(ticker),
+            "insider": self._get_insider_summary(ticker),
+            "short_interest": self._get_short_interest(ticker),
         }
+        self.logger.debug(
+            "%s market signals: options=%s insider=%s short=%s",
+            ticker,
+            signals["options_flow"]["net_sentiment"],
+            signals["insider"]["net_sentiment"],
+            signals["short_interest"]["net_sentiment"],
+        )
+        return signals
+
+    # ── Private helpers ───────────────────────────────────────────────
+
+    def _get_options_summary(self, ticker: str) -> dict[str, Any]:
+        """Put/call volume and open interest from the nearest options expiry."""
+        try:
+            t = self._yf.Ticker(ticker)
+            expirations = t.options
+            if not expirations:
+                return self._empty_options()
+            chain = t.option_chain(expirations[0])
+            calls_vol = int(chain.calls["volume"].fillna(0).sum())
+            puts_vol = int(chain.puts["volume"].fillna(0).sum())
+            calls_oi = int(chain.calls["openInterest"].fillna(0).sum())
+            puts_oi = int(chain.puts["openInterest"].fillna(0).sum())
+            ratio = round(puts_vol / calls_vol, 2) if calls_vol > 0 else None
+            return {
+                "calls_volume": calls_vol,
+                "puts_volume": puts_vol,
+                "calls_open_interest": calls_oi,
+                "puts_open_interest": puts_oi,
+                "put_call_volume_ratio": ratio,
+                "net_sentiment": (
+                    "bullish" if calls_vol > puts_vol
+                    else "bearish" if puts_vol > calls_vol
+                    else "neutral"
+                ),
+            }
+        except Exception as exc:
+            self.logger.warning("Options summary failed for %s: %s", ticker, exc)
+            return self._empty_options()
+
+    def _get_insider_summary(self, ticker: str) -> dict[str, Any]:
+        """Recent insider buy/sell counts from SEC Form 4 disclosures via yfinance."""
+        try:
+            t = self._yf.Ticker(ticker)
+            txns = t.insider_transactions
+            if txns is None or (hasattr(txns, "empty") and txns.empty):
+                return self._empty_insider()
+            # Identify the transaction-type column (varies slightly by yfinance version)
+            txn_col = next(
+                (c for c in txns.columns if "transaction" in c.lower()), None
+            )
+            if txn_col is None:
+                return self._empty_insider()
+            txn_text = txns[txn_col].fillna("").str.lower()
+            buys = int((txn_text.str.contains("buy|purchase")).sum())
+            sells = int((txn_text.str.contains("sell|sale")).sum())
+            return {
+                "recent_buys": buys,
+                "recent_sells": sells,
+                "net_sentiment": (
+                    "bullish" if buys > sells
+                    else "bearish" if sells > buys
+                    else "neutral"
+                ),
+            }
+        except Exception as exc:
+            self.logger.warning("Insider summary failed for %s: %s", ticker, exc)
+            return self._empty_insider()
+
+    def _get_short_interest(self, ticker: str) -> dict[str, Any]:
+        """Short percentage of float and days-to-cover from yfinance ticker.info."""
+        try:
+            info = self._yf.Ticker(ticker).info
+            short_pct_raw = _parse_float(info.get("shortPercentOfFloat"))
+            short_ratio_raw = _parse_float(info.get("shortRatio"))
+            short_pct = round(short_pct_raw * 100, 2) if short_pct_raw is not None else None
+            days_to_cover = round(short_ratio_raw, 1) if short_ratio_raw is not None else None
+            # >10% short float is typically considered a meaningful bearish signal
+            bearish = short_pct is not None and short_pct > 10.0
+            return {
+                "short_percent_of_float": short_pct,
+                "days_to_cover": days_to_cover,
+                "net_sentiment": "bearish" if bearish else "bullish",
+            }
+        except Exception as exc:
+            self.logger.warning("Short interest failed for %s: %s", ticker, exc)
+            return {"short_percent_of_float": None, "days_to_cover": None, "net_sentiment": "neutral"}
+
+    @staticmethod
+    def _empty_options() -> dict[str, Any]:
+        return {
+            "calls_volume": 0, "puts_volume": 0,
+            "calls_open_interest": 0, "puts_open_interest": 0,
+            "put_call_volume_ratio": None, "net_sentiment": "neutral",
+        }
+
+    @staticmethod
+    def _empty_insider() -> dict[str, Any]:
+        return {"recent_buys": 0, "recent_sells": 0, "net_sentiment": "neutral"}
 
 
 def _chunked(items: list[str], size: int) -> list[list[str]]:
