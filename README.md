@@ -1,6 +1,176 @@
 # ZuluBot — Multi-Strategy Trading Bot
 
-An automated trading system combining value investing, crypto sentiment, altcoin rotation, prediction markets, and latency arbitrage. All modules share the same paper portfolio, persistent state, and risk controls.
+An automated trading system combining value investing, crypto sentiment, altcoin rotation, prediction markets, and latency arbitrage — all orchestrated by a multi-analyst AI agent team. All modules share the same paper portfolio, persistent state, and risk controls.
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Entrypoint
+        MAIN["__main__.py"]
+    end
+
+    subgraph Daemon
+        SCHED["SchedulerService"]
+    end
+
+    subgraph Orchestrator
+        SVC["TradingBotService"]
+    end
+
+    MAIN --> SCHED
+    MAIN --> SVC
+    SCHED --> SVC
+
+    subgraph Strategies
+        STK["StockValueStrategy"]
+        CRY["CryptoSentimentFundingStrategy"]
+        ROT["AltcoinRotationStrategy"]
+        PRED["CoinbasePredictionStrategy"]
+        POLY["PolymarketStrategy"]
+        LARB["LatencyArbStrategy"]
+    end
+
+    SVC --> STK
+    SVC --> CRY
+    SVC --> ROT
+    SVC --> PRED
+    SVC --> POLY
+    SVC --> LARB
+
+    subgraph Brokers
+        PB["PaperBroker"]
+        CB["CoinbaseBroker"]
+        PMB["PolymarketBroker"]
+    end
+
+    STK --> PB
+    CRY --> CB
+    ROT --> CB
+    PRED --> PB
+    POLY --> PMB
+    LARB --> PB
+
+    subgraph "API Clients"
+        COIN["CoinbaseClient"]
+        BIN["BinanceFuturesClient"]
+        FMP["FMPClient"]
+        ALT["AlternativeMeClient"]
+        KAL["KalshiClient"]
+        GAMMA["PolymarketGammaClient"]
+        CLOB["PolymarketClobClient"]
+        MINT["FreeMarketIntelClient"]
+    end
+
+    CB --> COIN
+    CRY --> BIN
+    CRY --> ALT
+    STK --> FMP
+    STK --> MINT
+    PRED --> KAL
+    LARB --> KAL
+    POLY --> GAMMA
+    POLY --> CLOB
+
+    subgraph "AI Analysts"
+        AI["TradingAgentsService"]
+        PERSONAS["Analyst Personas"]
+    end
+
+    STK --> AI
+    CRY --> AI
+    ROT --> AI
+    PRED --> AI
+    LARB --> AI
+    AI --> PERSONAS
+
+    subgraph Infrastructure
+        STATE["StateStore · JSON"]
+        RISK["RiskManager"]
+        NOTIF["NotificationDispatcher"]
+        TG["TelegramBot"]
+        FEED["CoinbasePriceFeed"]
+    end
+
+    SVC --> STATE
+    SVC --> RISK
+    SVC --> NOTIF
+    NOTIF --> TG
+    LARB --> FEED
+    FEED --> COIN
+```
+
+## Multi-Analyst AI System
+
+Inspired by [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), ZuluBot uses a **team-of-analysts** approach where multiple AI personas independently evaluate signals and aggregate their views via confidence-weighted voting.
+
+```mermaid
+graph LR
+    DATA["Market Data"]
+
+    subgraph "Analyst Team"
+        V["Value Investor"]
+        G["Growth Investor"]
+        C["Contrarian"]
+        T["Technical Analyst"]
+        S["Sentiment Analyst"]
+        R["Risk Analyst"]
+    end
+
+    AGG["Signal Aggregation"]
+    VERDICT["Final Verdict"]
+
+    DATA --> V
+    DATA --> G
+    DATA --> C
+    DATA --> T
+    DATA --> S
+    DATA --> R
+
+    V --> AGG
+    G --> AGG
+    C --> AGG
+    T --> AGG
+    S --> AGG
+    R --> AGG
+
+    AGG --> VERDICT
+```
+
+Each analyst produces an independent signal:
+
+```
+AnalystSignal(persona_key, signal="bullish"|"bearish"|"neutral", confidence=0.0-1.0, reasoning="...")
+```
+
+Signals are aggregated via weighted voting:
+- Each signal is scored: bullish=+1, neutral=0, bearish=−1
+- Weighted by confidence
+- Final score > 0.2 → **buy**, < −0.2 → **sell**, else → **hold**
+
+### AI Confirmation Modes
+
+| Mode | Behavior |
+|------|----------|
+| `boost` | AI verdict adjusts position size (1.5× if agree, 0.5× if disagree) |
+| `require` | AI must agree before trade executes |
+| `log_only` | AI verdict logged for analysis, not used for decisions |
+
+### Cost-Optimized LLM Architecture
+
+| Strategy | Model | Cache TTL | Purpose |
+|----------|-------|-----------|---------|
+| Stocks | Haiku → Sonnet | 6 h | Validate fundamentals screen |
+| Crypto | Haiku → Sonnet | 6 h | Validate F&G + funding signal |
+| Kalshi predictions | Haiku → Sonnet | 6 h | Estimate fair probability |
+| Latency arb — entry | Haiku only | 10 min | Filter noise from momentum signals |
+| Latency arb — exit | Haiku only | 5 min | Veto premature stop-loss / take-profit exits |
+| Latency arb — regime | Haiku only | 1 h | Adjust momentum threshold |
+| Altcoin rotation | Haiku only | 30 min | Check target coin for macro red flags |
+
+When multi-analyst mode is enabled (`TRADING_AGENTS_MULTI_ANALYST=true`), stock and crypto evaluations run N×Haiku calls (~$0.001 each) instead of the standard Haiku→Sonnet pipeline (~$0.03).
+
+---
 
 ## Strategies
 
@@ -29,16 +199,37 @@ Trades binary prediction contracts directly via the Kalshi API:
 - Optional Fear & Greed confirmation for crypto-tagged markets
 - Market discovery works without credentials; trading requires Kalshi API key
 
-### 5. Latency Arbitrage — Kalshi (NEW)
+### 5. Latency Arbitrage — Kalshi
 High-frequency strategy that exploits Kalshi contract mispricing:
 - Polls Coinbase BTC-USD / ETH-USD spot prices every ~2 seconds
 - Detects sharp momentum moves (≥ 0.30% in 30 seconds)
 - When contract odds are stale relative to the price move, buys the correct side
 - Uses fractional Kelly criterion (25% of full Kelly) for position sizing
 - Manages exits via take-profit (20%) and stop-loss (15%)
-- Paper mode by default; goes live when `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY` are set and `LATENCY_ARB_ENABLED=true`
 
-### Shared Risk Controls
+### 6. Polymarket
+Trades on Polymarket prediction markets:
+- Scans for markets matching configured tags
+- Evaluates YES/NO pricing against configurable thresholds
+
+### Risk Controls
+
+```mermaid
+graph TD
+    EQUITY["Portfolio Equity"]
+
+    EQUITY --> DD_DAILY["Daily Drawdown Check · default 5%"]
+    EQUITY --> DD_TOTAL["Total Drawdown Check · default 15%"]
+
+    DD_DAILY -->|"Breached"| HALT["Daily Halt · No new trades until tomorrow"]
+    DD_TOTAL -->|"Breached"| KILL["Kill Switch · Close all positions"]
+
+    EQUITY --> POS_SIZE["Position Sizing · default 2% of equity"]
+
+    HALT --> LOG["Telegram Alert + Log"]
+    KILL --> LOG
+```
+
 - Configurable position size per trade (default 2% of equity)
 - 5% daily drawdown halt on new entries
 - 15% peak-to-equity kill switch (closes all positions)
@@ -103,7 +294,7 @@ python -m trading_bot predictions     # Kalshi prediction markets
 python -m trading_bot latency_arb     # single latency arb scan
 ```
 
-Show portfolio status (including Kalshi positions):
+Show portfolio status (including Kalshi positions and balance):
 ```bash
 python -m trading_bot status
 ```
@@ -121,12 +312,44 @@ The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and la
 
 When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes interactive commands and sends automatic notifications.
 
+```mermaid
+graph LR
+    subgraph Outbound
+        TA["Trade Alerts"]
+        HB["Heartbeat"]
+        RA["Risk Alerts"]
+        ER["Error Reports"]
+    end
+
+    subgraph "Inbound Commands"
+        MON["/status /positions /risk /history"]
+        EXEC["/crypto /stocks /rotation /predict /polymarket /backtest"]
+        CTRL["/pause /resume /kill"]
+        CFG["/config /ai"]
+    end
+
+    BOT["Telegram Bot"]
+    SVC2["TradingBotService"]
+
+    SVC2 --> BOT
+    BOT --> TA
+    BOT --> HB
+    BOT --> RA
+    BOT --> ER
+
+    MON --> BOT
+    EXEC --> BOT
+    CTRL --> BOT
+    CFG --> BOT
+    BOT --> SVC2
+```
+
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `/status` | Portfolio dashboard (equity, P&L, positions) |
-| `/positions` | List open positions |
+| `/status` | Portfolio dashboard (equity, P&L, Kalshi balance, positions) |
+| `/positions` | Open positions grouped by asset type |
 | `/risk` | Risk metrics (drawdown, kill switch state) |
 | `/history` | Recent trade log |
 | `/crypto` | Force a crypto sentiment cycle |
@@ -139,7 +362,7 @@ When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes
 | `/resume` | Resume trading |
 | `/kill` | Emergency stop (kill switch) |
 | `/config` | Show current configuration |
-| `/ai` | AI cost & budget summary |
+| `/ai` | AI analyst team status & budget |
 
 ### Notifications
 
@@ -147,11 +370,13 @@ When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes
 - **No-signal cycles** (no trades, no errors) are suppressed to reduce spam.
 - **Risk events** (kill switch, daily halt) always surface even when there are no trades.
 - **Interactive commands** always return a completion message (including "no trades executed" when applicable).
-- **Heartbeat** runs on a configurable interval showing equity, positions, strategy status, and last scan dates.
+- **Heartbeat** shows equity, Kalshi balance, positions grouped by type, AI analyst status, and last scan dates.
 
 ---
 
-## Kalshi Latency Arb — Configuration
+## Configuration
+
+### Kalshi Latency Arb
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
@@ -164,33 +389,20 @@ When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes
 | `LATENCY_ARB_SCAN_INTERVAL` | `2.0` | Seconds between scans |
 | `LATENCY_ARB_TAKE_PROFIT` | `0.20` | Exit at +20% price gain |
 | `LATENCY_ARB_STOP_LOSS` | `0.15` | Exit at -15% price loss |
-| `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode: `boost`, `require`, or `log_only` |
+| `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode |
 
----
-
-## AI Integration
-
-All strategies optionally use Claude (Haiku + Sonnet) for signal validation. Enable by setting `TRADING_AGENTS_ENABLED=true` and `ANTHROPIC_API_KEY`.
+### AI Integration
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `TRADING_AGENTS_ENABLED` | `false` | Enable AI analysis across all strategies |
 | `ANTHROPIC_API_KEY` | | Anthropic API key (`sk-ant-...`) |
-| `TRADING_AGENTS_CONFIRMATION_MODE` | `boost` | `boost` (1.5×/0.5× sizing), `require` (AI must agree), `log_only` (advisory) |
+| `TRADING_AGENTS_CONFIRMATION_MODE` | `boost` | `boost`, `require`, or `log_only` |
 | `TRADING_AGENTS_MAX_COST_PER_MONTH` | `10.00` | Hard monthly spend cap in USD |
+| `TRADING_AGENTS_MULTI_ANALYST` | `false` | Enable multi-analyst persona mode |
+| `TRADING_AGENTS_ANALYSTS` | `value_investor,contrarian,sentiment_analyst` | Comma-separated persona keys |
 
-### AI coverage per strategy
-
-| Strategy | Model | Cache TTL | Purpose |
-|----------|-------|-----------|---------|
-| Stocks | Haiku → Sonnet | 6 h | Validate fundamentals screen |
-| Crypto | Haiku → Sonnet | 6 h | Validate F&G + funding signal |
-| Polymarket (legacy) | Sonnet | 6 h | Estimate fair probability |
-| Kalshi predictions | Haiku → Sonnet | 6 h | Estimate fair probability |
-| Latency arb — entry | Haiku only | 10 min | Filter noise from momentum signals |
-| Latency arb — exit | Haiku only | 5 min | Veto premature stop-loss / take-profit exits |
-| Latency arb — regime | Haiku only | 1 h | Adjust momentum threshold (volatile ↑ / bullish ↓) |
-| Altcoin rotation | Haiku only | 30 min | Check target coin for macro red flags before swap |
+Available analyst personas: `value_investor`, `growth_investor`, `contrarian`, `technical_analyst`, `sentiment_analyst`, `risk_analyst`
 
 Cost tracking uses **actual token counts** from the Anthropic response for precise monthly budget management.
 

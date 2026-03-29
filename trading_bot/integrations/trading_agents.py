@@ -27,6 +27,12 @@ from datetime import datetime
 from typing import Any
 
 from trading_bot.config import TradingAgentsConfig
+from trading_bot.integrations.analyst_personas import (
+    ANALYST_REGISTRY,
+    AnalystSignal,
+    aggregate_analyst_signals,
+    get_default_analysts,
+)
 
 
 @dataclass(frozen=True)
@@ -211,6 +217,21 @@ class TradingAgentsService:
             f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
         )
 
+        # Multi-analyst mode: run multiple personas and aggregate
+        if self.config.multi_analyst_enabled:
+            data_prompt = (
+                f"Evaluate {symbol} for a potential trade.\n\n"
+                f"Fundamentals:\n"
+                f"  P/E Ratio: {fundamentals.get('pe_ratio', 'N/A')}\n"
+                f"  P/B Ratio: {fundamentals.get('pb_ratio', 'N/A')}\n"
+                f"  D/E Ratio: {fundamentals.get('debt_to_equity', 'N/A')}\n"
+                f"  FCF Signal: {fundamentals.get('fcf_positive_signal', 'N/A')}\n"
+                f"  P/FCF Ratio: {fundamentals.get('pfcf_ratio', 'N/A')}\n"
+                f"  VIX: {vix_value}\n"
+                f"{intel_section}"
+            )
+            return self._multi_analyst_evaluation(cache_key, data_prompt)
+
         return self._two_tier_analysis(cache_key, prompt)
 
     def evaluate_crypto(
@@ -243,6 +264,19 @@ class TradingAgentsService:
             f"Respond with JSON: {{\"action\": \"buy\"|\"sell\"|\"hold\"|\"skip\", "
             f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
         )
+
+        # Multi-analyst mode: run multiple personas and aggregate
+        if self.config.multi_analyst_enabled:
+            data_prompt = (
+                f"Evaluate {symbol} for a potential trade.\n\n"
+                f"Signals:\n"
+                f"  Fear & Greed Index: {fear_greed_value}\n"
+                f"  Binance Funding Rate: {funding_rate:.6f}\n"
+                f"  Current Price: ${price:,.2f}\n\n"
+                f"Context: Fear < 25 with negative funding = potential buy signal. "
+                f"Fear > 75 = potential sell signal."
+            )
+            return self._multi_analyst_evaluation(cache_key, data_prompt)
 
         return self._two_tier_analysis(cache_key, prompt)
 
@@ -635,6 +669,148 @@ class TradingAgentsService:
         verdict = self._call_model(self.config.deep_model, prompt, expect_probability=expect_probability)
         if verdict is not None:
             self._set_cache(cache_key, verdict)
+        return verdict
+
+    # ── Multi-analyst evaluation pipeline ──────────────────────────
+
+    def _multi_analyst_evaluation(
+        self,
+        cache_key: str,
+        data_prompt: str,
+        persona_keys: tuple[str, ...] | None = None,
+    ) -> AgentVerdict | None:
+        """Run multiple analyst personas and aggregate their signals.
+
+        Inspired by virattt/ai-hedge-fund's multi-agent pattern where
+        independent analyst agents (value, growth, contrarian, etc.) each
+        analyze the same data from their unique perspective.  Their signals
+        are aggregated via confidence-weighted voting.
+
+        Each persona uses Haiku (~$0.001/call) keeping costs comparable to
+        the standard two-tier pipeline while providing richer analysis.
+
+        Args:
+            cache_key: Cache key for the aggregated result.
+            data_prompt: The raw market data to evaluate (no persona framing).
+            persona_keys: Which personas to use; defaults to config.selected_analysts.
+
+        Returns:
+            Combined AgentVerdict or None if budget is exhausted.
+        """
+        keys = persona_keys or self.config.selected_analysts
+        if not keys:
+            keys = get_default_analysts()
+
+        # Validate personas exist
+        personas = []
+        for k in keys:
+            persona = ANALYST_REGISTRY.get(k)
+            if persona is not None:
+                personas.append(persona)
+            else:
+                self.logger.warning("Unknown analyst persona '%s', skipping.", k)
+
+        if not personas:
+            self.logger.warning("No valid analyst personas selected.")
+            return None
+
+        # Check budget for analyst calls upfront.
+        # `_check_budget` enforces `max_cost_per_run` as a per-call cap, so we
+        # must compare it against the per-call cost, not the combined estimate.
+        per_call_cost = self._estimate_cost(self.config.quick_model)
+        total_estimated = per_call_cost * len(personas)
+        if not self._check_budget(per_call_cost):
+            self.logger.warning(
+                "Budget insufficient for %d analyst calls (per-call $%.4f, total est $%.4f). Skipping.",
+                len(personas), per_call_cost, total_estimated,
+            )
+            return None
+
+        signals: list[AnalystSignal] = []
+        total_cost = 0.0
+
+        for persona in personas:
+            full_prompt = (
+                f"{persona.system_prompt}\n\n"
+                f"{data_prompt}\n\n"
+                f"Respond with JSON only: "
+                f"{{\"signal\": \"bullish\"|\"bearish\"|\"neutral\", "
+                f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
+            )
+
+            try:
+                response = self._anthropic_client.messages.create(
+                    model=self.config.quick_model,
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": full_prompt}],
+                )
+                try:
+                    usage = response.usage
+                    cost = self._actual_cost(
+                        self.config.quick_model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                    )
+                except (AttributeError, TypeError):
+                    cost = per_call_cost
+                self._record_cost(cost)
+                total_cost += cost
+
+                text = response.content[0].text.strip()
+                json_text = text
+                if "```" in json_text:
+                    start = json_text.find("{")
+                    end = json_text.rfind("}") + 1
+                    if start >= 0 and end > start:
+                        json_text = json_text[start:end]
+                try:
+                    data = json.loads(json_text)
+                except json.JSONDecodeError:
+                    start = text.find("{")
+                    end = text.rfind("}") + 1
+                    if start >= 0 and end > start:
+                        data = json.loads(text[start:end])
+                    else:
+                        self.logger.warning(
+                            "Could not parse %s response: %s",
+                            persona.key, text[:100],
+                        )
+                        continue
+
+                signal_val = data.get("signal", "neutral")
+                if signal_val not in ("bullish", "bearish", "neutral"):
+                    signal_val = "neutral"
+
+                signals.append(AnalystSignal(
+                    persona_key=persona.key,
+                    signal=signal_val,
+                    confidence=max(0.0, min(1.0, float(data.get("confidence", 0.5)))),
+                    reasoning=str(data.get("reasoning", ""))[:200],
+                ))
+                self.logger.debug(
+                    "Analyst %s: %s (%.0f%%) — %s",
+                    persona.key, signal_val,
+                    float(data.get("confidence", 0.5)) * 100,
+                    str(data.get("reasoning", ""))[:80],
+                )
+
+            except Exception as exc:
+                self.logger.error("Analyst %s failed: %s", persona.key, exc)
+                continue
+
+        if not signals:
+            return None
+
+        aggregated = aggregate_analyst_signals(signals)
+
+        verdict = AgentVerdict(
+            action=aggregated["action"],
+            confidence=aggregated["confidence"],
+            reasoning=aggregated["reasoning"],
+            cost_usd=total_cost,
+            model_used=f"multi-analyst({len(signals)}x{self.config.quick_model})",
+        )
+        self._set_cache(cache_key, verdict)
         return verdict
 
     def _quick_screen(self, prompt: str) -> bool:

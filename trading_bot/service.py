@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -169,6 +170,11 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
         )
+
+        # Kalshi balance cache (avoids network call on every summary)
+        self._kalshi_balance_cache: float | None = None
+        self._kalshi_balance_cache_ts: float = 0.0
+        self._kalshi_balance_cache_ttl: float = 120.0  # 2-minute TTL
 
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
@@ -487,6 +493,34 @@ class TradingBotService:
             for position in state.positions.values()
         ]
 
+        # Fetch Kalshi account balance with TTL cache to avoid network
+        # calls on every run() / status() invocation.
+        kalshi_balance: float | None = None
+        if self.kalshi_client.can_trade:
+            now_ts = time.monotonic()
+            if (now_ts - self._kalshi_balance_cache_ts) < self._kalshi_balance_cache_ttl:
+                kalshi_balance = self._kalshi_balance_cache
+            else:
+                try:
+                    kalshi_balance = round(self.kalshi_client.get_balance(), 2)
+                    self._kalshi_balance_cache = kalshi_balance
+                    self._kalshi_balance_cache_ts = now_ts
+                except Exception as exc:
+                    self.logger.debug("Could not fetch Kalshi balance: %s", exc)
+                    if self._kalshi_balance_cache is not None:
+                        kalshi_balance = self._kalshi_balance_cache  # stale is better than None
+
+        # AI/multi-analyst metadata
+        ai_info: dict[str, Any] | None = None
+        if self.ai_service:
+            ai_info = {
+                "budget_remaining_usd": round(self.ai_service.get_budget_remaining(), 4),
+                "monthly_cost_usd": round(self.ai_service.get_monthly_cost(), 4),
+                "multi_analyst_enabled": self.config.trading_agents.multi_analyst_enabled,
+                "selected_analysts": list(self.config.trading_agents.selected_analysts),
+                "confirmation_mode": self.config.trading_agents.confirmation_mode,
+            }
+
         return {
             "timestamp": datetime.now(self.config.timezone).isoformat(),
             "paper_mode": self.config.paper_mode,
@@ -508,6 +542,9 @@ class TradingBotService:
             "modules": modules,
             "pre_risk_equity": round(pre_risk.equity, 2),
             "post_risk_equity": round(post_risk.equity, 2),
+            "kalshi_balance": kalshi_balance,
+            "ai_info": ai_info,
+            # Keep for backwards compatibility
             "ai_budget_remaining_usd": round(self.ai_service.get_budget_remaining(), 4) if self.ai_service else None,
         }
 
