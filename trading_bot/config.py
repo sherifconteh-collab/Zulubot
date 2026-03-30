@@ -83,20 +83,20 @@ class VolatilityConfig:
 
 @dataclass(frozen=True)
 class StockStrategyConfig:
-    max_pe_ratio: float = 20.0
-    max_pb_ratio: float = 3.0
-    max_debt_to_equity: float = 0.5
+    max_pe_ratio: float = 25.0
+    max_pb_ratio: float = 3.5
+    max_debt_to_equity: float = 0.75
     min_positive_fcf_signal: float = 0.0
-    vix_buy_threshold: float = 25.0
-    run_interval_days: int = 7
-    max_positions: int = 3
+    vix_buy_threshold: float = 20.0
+    run_interval_days: int = 3
+    max_positions: int = 5
     vix_symbol: str = "^VIX"
 
 
 @dataclass(frozen=True)
 class CryptoStrategyConfig:
     symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
-    buy_fear_threshold: int = 25
+    buy_fear_threshold: int = 35
     sell_fear_threshold: int = 75
     use_coinbase_pricing: bool = True
 
@@ -119,11 +119,11 @@ class TelegramConfig:
 
 @dataclass(frozen=True)
 class SchedulerConfig:
-    crypto_interval_minutes: int = 15
+    crypto_interval_minutes: int = 10
     stock_check_hour: int = 9
-    polymarket_interval_minutes: int = 30
+    polymarket_interval_minutes: int = 20
     heartbeat_interval_minutes: int = 60
-    poll_interval_seconds: int = 60
+    poll_interval_seconds: int = 45
 
 
 @dataclass(frozen=True)
@@ -150,13 +150,13 @@ class TradingAgentsConfig:
 class PolymarketStrategyConfig:
     enabled: bool = False
     market_tags: list[str] = field(default_factory=lambda: ["crypto", "finance"])
-    min_volume: float = 100_000.0
-    min_liquidity: float = 10_000.0
-    buy_yes_threshold: float = 0.30
-    buy_no_threshold: float = 0.70
+    min_volume: float = 50_000.0
+    min_liquidity: float = 5_000.0
+    buy_yes_threshold: float = 0.35
+    buy_no_threshold: float = 0.65
     take_profit_threshold: float = 0.50
     stop_loss_threshold: float = 0.15
-    max_positions: int = 3
+    max_positions: int = 5
     use_trading_agents: bool = False
 
 
@@ -171,9 +171,9 @@ class PolymarketConfig:
 @dataclass(frozen=True)
 class AltcoinRotationConfig:
     enabled: bool = True
-    scout_multiplier: float = 5.0        # ratio must exceed fees × this to justify swap
+    scout_multiplier: float = 3.0        # ratio must exceed fees × this to justify swap
     fee_pct: float = 0.006               # Coinbase taker fee ~0.6%
-    check_interval_minutes: int = 60     # check every hour
+    check_interval_minutes: int = 30     # check every 30 minutes
     min_trade_usd: float = 1.0           # minimum $1 trade
     excluded_coins: list[str] = field(default_factory=list)  # coins to never trade
     max_coins_to_track: int = 50         # limit to top 50 by volume
@@ -185,15 +185,15 @@ class PredictionConfig:
     enabled: bool = False                # OFF by default
     kalshi_key_id: str = ""              # Kalshi API key ID
     kalshi_private_key: str = ""         # Kalshi RSA private key PEM
-    buy_yes_threshold: float = 0.30      # Buy YES below this price
-    buy_no_threshold: float = 0.70       # Buy NO above this price
+    buy_yes_threshold: float = 0.35      # Buy YES below this price
+    buy_no_threshold: float = 0.65       # Buy NO above this price
     take_profit_threshold: float = 0.50  # Take profit at 0.50
     stop_loss_pct: float = 0.15          # Stop loss at 15% move against
-    max_positions: int = 5
-    check_interval_minutes: int = 60
+    max_positions: int = 8
+    check_interval_minutes: int = 30
     min_trade_usd: float = 1.0
-    min_volume_usd: float = 5_000        # Minimum 24h volume to consider a market tradeable
-    max_spread_usd: float = 0.15         # Maximum bid/ask spread allowed per side
+    min_volume_usd: float = 3_000        # Minimum 24h volume to consider a market tradeable
+    max_spread_usd: float = 0.20         # Maximum bid/ask spread allowed per side
     market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather"])
     capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
 
@@ -277,18 +277,18 @@ class AppConfig:
                 cooldown_periods=_env_int("COOLDOWN_PERIODS", 3),
             ),
             stock=StockStrategyConfig(
-                max_pe_ratio=_env_float("STOCK_MAX_PE", 20.0),
-                max_pb_ratio=_env_float("STOCK_MAX_PB", 3.0),
-                max_debt_to_equity=_env_float("STOCK_MAX_DEBT_TO_EQUITY", 0.5),
+                max_pe_ratio=_env_float("STOCK_MAX_PE", 25.0),
+                max_pb_ratio=_env_float("STOCK_MAX_PB", 3.5),
+                max_debt_to_equity=_env_float("STOCK_MAX_DEBT_TO_EQUITY", 0.75),
                 min_positive_fcf_signal=_env_float("STOCK_MIN_POSITIVE_FCF_SIGNAL", 0.0),
-                vix_buy_threshold=_env_float("STOCK_VIX_BUY_THRESHOLD", 25.0),
-                run_interval_days=_env_int("STOCK_RUN_INTERVAL_DAYS", 7),
-                max_positions=_env_int("STOCK_MAX_POSITIONS", 3),
+                vix_buy_threshold=_env_float("STOCK_VIX_BUY_THRESHOLD", 20.0),
+                run_interval_days=_env_int("STOCK_RUN_INTERVAL_DAYS", 3),
+                max_positions=_env_int("STOCK_MAX_POSITIONS", 5),
                 vix_symbol=os.getenv("STOCK_VIX_SYMBOL", "^VIX").strip() or "^VIX",
             ),
             crypto=CryptoStrategyConfig(
                 symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
-                buy_fear_threshold=_env_int("CRYPTO_BUY_FEAR_THRESHOLD", 25),
+                buy_fear_threshold=_env_int("CRYPTO_BUY_FEAR_THRESHOLD", 35),
                 sell_fear_threshold=_env_int("CRYPTO_SELL_FEAR_THRESHOLD", 75),
                 use_coinbase_pricing=_env_bool("CRYPTO_USE_COINBASE_PRICING", True),
             ),
@@ -301,11 +301,11 @@ class AppConfig:
                 chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
             ),
             scheduler=SchedulerConfig(
-                crypto_interval_minutes=_env_int("SCHEDULER_CRYPTO_INTERVAL_MINUTES", 15),
+                crypto_interval_minutes=_env_int("SCHEDULER_CRYPTO_INTERVAL_MINUTES", 10),
                 stock_check_hour=_env_int("SCHEDULER_STOCK_CHECK_HOUR", 9),
-                polymarket_interval_minutes=_env_int("SCHEDULER_POLYMARKET_INTERVAL_MINUTES", 30),
+                polymarket_interval_minutes=_env_int("SCHEDULER_POLYMARKET_INTERVAL_MINUTES", 20),
                 heartbeat_interval_minutes=_env_int("SCHEDULER_HEARTBEAT_INTERVAL_MINUTES", 60),
-                poll_interval_seconds=_env_int("SCHEDULER_POLL_INTERVAL_SECONDS", 60),
+                poll_interval_seconds=_env_int("SCHEDULER_POLL_INTERVAL_SECONDS", 45),
             ),
             polymarket=PolymarketConfig(
                 api_key=os.getenv("POLYMARKET_API_KEY", "").strip(),
@@ -316,13 +316,13 @@ class AppConfig:
             polymarket_strategy=PolymarketStrategyConfig(
                 enabled=_env_bool("POLYMARKET_ENABLED", False),
                 market_tags=_env_list_lower("POLYMARKET_MARKET_TAGS", ["crypto", "finance"]),
-                min_volume=_env_float("POLYMARKET_MIN_VOLUME", 100_000.0),
-                min_liquidity=_env_float("POLYMARKET_MIN_LIQUIDITY", 10_000.0),
-                buy_yes_threshold=_env_float("POLYMARKET_BUY_YES_THRESHOLD", 0.30),
-                buy_no_threshold=_env_float("POLYMARKET_BUY_NO_THRESHOLD", 0.70),
+                min_volume=_env_float("POLYMARKET_MIN_VOLUME", 50_000.0),
+                min_liquidity=_env_float("POLYMARKET_MIN_LIQUIDITY", 5_000.0),
+                buy_yes_threshold=_env_float("POLYMARKET_BUY_YES_THRESHOLD", 0.35),
+                buy_no_threshold=_env_float("POLYMARKET_BUY_NO_THRESHOLD", 0.65),
                 take_profit_threshold=_env_float("POLYMARKET_TAKE_PROFIT", 0.50),
                 stop_loss_threshold=_env_float("POLYMARKET_STOP_LOSS", 0.15),
-                max_positions=_env_int("POLYMARKET_MAX_POSITIONS", 3),
+                max_positions=_env_int("POLYMARKET_MAX_POSITIONS", 5),
                 use_trading_agents=_env_bool("POLYMARKET_USE_TRADING_AGENTS", False),
             ),
             trading_agents=TradingAgentsConfig(
@@ -347,9 +347,9 @@ class AppConfig:
             ),
             altcoin_rotation=AltcoinRotationConfig(
                 enabled=_env_bool("ROTATION_ENABLED", True),
-                scout_multiplier=_env_float("ROTATION_SCOUT_MULTIPLIER", 5.0),
+                scout_multiplier=_env_float("ROTATION_SCOUT_MULTIPLIER", 3.0),
                 fee_pct=_env_float("ROTATION_FEE_PCT", 0.006),
-                check_interval_minutes=_env_int("ROTATION_CHECK_INTERVAL_MINUTES", 60),
+                check_interval_minutes=_env_int("ROTATION_CHECK_INTERVAL_MINUTES", 30),
                 min_trade_usd=_env_float("ROTATION_MIN_TRADE_USD", 1.0),
                 excluded_coins=_env_list("ROTATION_EXCLUDED_COINS", []),
                 max_coins_to_track=_env_int("ROTATION_MAX_COINS_TO_TRACK", 50),
@@ -359,15 +359,15 @@ class AppConfig:
                 enabled=_env_bool("PREDICTION_ENABLED", False),
                 kalshi_key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
                 kalshi_private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
-                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.30),
-                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.70),
+                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.35),
+                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.65),
                 take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
                 stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
-                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 5),
-                check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 60),
+                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 8),
+                check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 30),
                 min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
-                min_volume_usd=_env_float("PREDICTION_MIN_VOLUME_USD", 5_000),
-                max_spread_usd=_env_float("PREDICTION_MAX_SPREAD_USD", 0.15),
+                min_volume_usd=_env_float("PREDICTION_MIN_VOLUME_USD", 3_000),
+                max_spread_usd=_env_float("PREDICTION_MAX_SPREAD_USD", 0.20),
                 market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather"]),
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
             ),
