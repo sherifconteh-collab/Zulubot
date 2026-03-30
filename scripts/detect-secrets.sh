@@ -21,17 +21,25 @@ FOUND=0
 
 # Check staged files (or all tracked files if not in a git hook context)
 if git rev-parse --git-dir > /dev/null 2>&1; then
-  FILES=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || git ls-files)
+  FILES=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+  if [ -z "$FILES" ]; then
+    FILES=$(git ls-files)
+  fi
 else
   FILES=$(find . -type f -not -path './.git/*')
 fi
 
 for pattern in "${PATTERNS[@]}"; do
-  MATCHES=$(echo "$FILES" | xargs grep -rEn "$pattern" 2>/dev/null \
+  MATCHES=$(
+    while IFS= read -r file; do
+      [ -f "$file" ] || continue
+      grep -En "$pattern" "$file" 2>/dev/null || true
+    done <<< "$FILES" \
     | grep -v '\.env\.example' \
     | grep -v 'detect-secrets\.sh' \
     | grep -v 'node_modules' \
-    || true)
+    || true
+  )
   if [ -n "$MATCHES" ]; then
     if [ "$FOUND" -eq 0 ]; then
       echo "🚨 Potential secrets detected! Review before committing:"

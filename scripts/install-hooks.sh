@@ -8,7 +8,7 @@ HOOK_DIR="$REPO_ROOT/.git/hooks"
 # Pre-commit: secret detection
 cat > "$HOOK_DIR/pre-commit" << 'HOOK'
 #!/usr/bin/env bash
-exec "$(git rev-parse --show-toplevel)/scripts/detect-secrets.sh"
+exec bash "$(git rev-parse --show-toplevel)/scripts/detect-secrets.sh"
 HOOK
 chmod +x "$HOOK_DIR/pre-commit"
 
