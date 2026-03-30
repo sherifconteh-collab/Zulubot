@@ -4,6 +4,8 @@ An automated trading system combining value investing, crypto sentiment, altcoin
 
 ## Architecture
 
+The diagram below shows how `__main__.py` wires together the scheduler, strategies, brokers, market-data clients, AI analyst team, and shared infrastructure.
+
 ```mermaid
 flowchart TB
     MAIN["__main__.py"] --> SVC["TradingBotService"]
@@ -68,6 +70,7 @@ flowchart TB
         INFRA["Infra Hub"]
         STATE["StateStore"]
         RISK["RiskManager"]
+        VOL["VolatilityEngine"]
         TG["Telegram"]
         FEED["PriceFeed"]
     end
@@ -75,6 +78,7 @@ flowchart TB
     SVC --> INFRA
     INFRA --> STATE
     INFRA --> RISK
+    RISK --> VOL
     INFRA --> TG
     INFRA --> FEED
 ```
@@ -82,6 +86,8 @@ flowchart TB
 ## Multi-Analyst AI System
 
 Inspired by [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), ZuluBot uses a **team-of-analysts** approach where multiple AI personas independently evaluate signals and aggregate their views via confidence-weighted voting.
+
+The diagram below shows how market data flows through each analyst persona and is aggregated into a final trading verdict.
 
 ```mermaid
 graph LR
@@ -193,7 +199,52 @@ Trades on Polymarket prediction markets:
 - Scans for markets matching configured tags
 - Evaluates YES/NO pricing against configurable thresholds
 
+### Volatility Targeting
+
+Position size adjusts automatically so that every trade carries the **same dollar-risk**, regardless of how volatile the underlying market is. The formula is simple:
+
+```
+leverage = target_annual_vol / realized_vol
+position_size = clamp(leverage, min_allocation, max_leverage) × base_notional
+```
+
+where `base_notional = equity × max_position_fraction` (the configured per-trade budget).
+
+- **High vol** (e.g. crypto during a spike) → leverage < 1 → smaller position
+- **Low vol** (e.g. a quiet sideways market) → leverage > 1 → larger position
+- Applies to crypto and stock positions sized via the shared `RiskManager`
+- Kalshi prediction strategies keep their own budget-based sizing and do not use vol targeting
+- Enabled via `VOL_TARGETING_ENABLED=true`; off by default (flat 2% sizing preserved)
+- In EWMA mode (`VOL_USE_EWMA=true`, default), falls back to flat sizing for any symbol without 2+ days of recorded price history; in rolling-window mode (`VOL_USE_EWMA=false`), requires at least `VOL_WINDOW_DAYS+1` daily prices (21 by default) before vol-adjusted sizing activates
+
+Vol is estimated with an **EWMA** (decay = 0.94, the RiskMetrics standard), which reacts faster to regime changes than a plain rolling standard deviation:
+
+```
+ewma_variance[t] = (1 − 0.94) × return[t]² + 0.94 × ewma_variance[t−1]
+annual_vol = sqrt(ewma_variance × 252)
+```
+
+The following diagram shows how daily price snapshots flow through the volatility engine into a final position size:
+
+```mermaid
+graph TD
+    PRICES["Daily Price Snapshots\n(recorded by PaperBroker)"]
+    VOL_ENGINE["VolatilityEngine\nEWMA · decay=0.94"]
+    PRICES --> VOL_ENGINE
+
+    VOL_ENGINE --> VOL["Realized Vol"]
+    TARGET["Target Annual Vol\ndefault 10%"]
+
+    VOL --> FORMULA["leverage = target / realized"]
+    TARGET --> FORMULA
+
+    FORMULA --> CLAMP["clamp(leverage, 0.20, 2.0)"]
+    CLAMP --> NOTIONAL["position_size = leverage × base_notional"]
+```
+
 ### Risk Controls
+
+The following diagram shows the risk-management pipeline that runs before and after every trade cycle:
 
 ```mermaid
 graph TD
@@ -205,13 +256,15 @@ graph TD
     DD_DAILY -->|"Breached"| HALT["Daily Halt · No new trades until tomorrow"]
     DD_TOTAL -->|"Breached"| KILL["Kill Switch · Close all positions"]
 
-    EQUITY --> POS_SIZE["Position Sizing · default 2% of equity"]
+    EQUITY --> VOL_TARGET["Volatility Targeting\ntarget_vol / realized_vol × base_notional"]
+    VOL_TARGET --> POS_SIZE["Vol-adjusted position size\n(falls back to 2% flat if disabled)"]
 
     HALT --> LOG["Telegram Alert + Log"]
     KILL --> LOG
 ```
 
-- Configurable position size per trade (default 2% of equity)
+- **Volatility-targeted position sizing** (opt-in) — scales each position so dollar-risk stays constant
+- Configurable flat position size per trade (default 2% of equity, used when vol targeting is off or history is insufficient)
 - 5% daily drawdown halt on new entries
 - 15% peak-to-equity kill switch (closes all positions)
 - `PAPER_MODE=true` by default — no real money until explicitly enabled
@@ -243,6 +296,11 @@ TELEGRAM_CHAT_ID=your_chat_id
 # Risk and mode
 PAPER_MODE=true
 INITIAL_CASH=10000
+
+# Volatility targeting (off by default; enable after ~20 trading days of history)
+# VOL_TARGETING_ENABLED=true
+# VOL_TARGET_ANNUAL=0.10
+# VOL_MAX_LEVERAGE=2.0
 
 # Enable latency arb
 LATENCY_ARB_ENABLED=true
@@ -295,6 +353,8 @@ The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and la
 ## Telegram Bot
 
 When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, the bot exposes interactive commands and sends automatic notifications.
+
+The diagram below shows the outbound notification types and inbound command categories the bot handles:
 
 ```mermaid
 graph LR
@@ -374,6 +434,20 @@ graph LR
 | `LATENCY_ARB_TAKE_PROFIT` | `0.20` | Exit at +20% price gain |
 | `LATENCY_ARB_STOP_LOSS` | `0.15` | Exit at -15% price loss |
 | `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode |
+
+### Volatility Targeting
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `VOL_TARGETING_ENABLED` | `false` | Enable vol-adjusted position sizing |
+| `VOL_TARGET_ANNUAL` | `0.10` | Target annual portfolio volatility (10%) |
+| `VOL_WINDOW_DAYS` | `20` | Rolling window for realized vol (days) |
+| `VOL_USE_EWMA` | `true` | Use EWMA instead of rolling std |
+| `VOL_EWMA_DECAY` | `0.94` | EWMA decay factor (0.94 = RiskMetrics standard) |
+| `VOL_MAX_LEVERAGE` | `2.0` | Hard leverage cap (never exceed 2× equity) |
+| `VOL_MIN_ALLOCATION` | `0.20` | Minimum leverage floor (always allocate ≥ 20% of base notional) |
+| `VOL_NO_TRADE_BAND` | `0.10` | Drift threshold for `should_rebalance()` (not yet wired into sizing) |
+| `VOL_MAX_HISTORY_DAYS` | `60` | Max daily prices stored per symbol |
 
 ### AI Integration
 

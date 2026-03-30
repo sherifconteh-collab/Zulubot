@@ -3,6 +3,139 @@ builder = "nixpacks"
 
 [deploy]
 startCommand = "python -m trading_bot run-daemon"
-healthcheckPath = ""
 restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 5
+restartPolicyMaxRetries = 10
+# Railway keeps workers alive — no sleep needed for a long-running daemon
+sleepApplication = false
+
+# ── Persistent storage ────────────────────────────────────────────────────────
+# Attach a Railway Volume and mount it at /data.
+# Dashboard: Service → Volumes → Add → Mount path: /data
+# This keeps state.json and logs across deploys and restarts.
+
+# ── Default variable values ───────────────────────────────────────────────────
+# These are picked up as variable defaults in the Railway dashboard.
+# Secrets (API keys, private keys) must be set manually — they are intentionally
+# left blank here and should never be committed to the repository.
+[variables]
+
+# Storage — points to the mounted Railway Volume (required for persistence)
+BOT_STORAGE_DIR = "/data"
+
+# Bot mode
+PAPER_MODE = "true"
+INITIAL_CASH = "100000"
+BOT_TIMEZONE = "America/New_York"
+LOG_LEVEL = "INFO"
+REQUEST_TIMEOUT_SECONDS = "20"
+
+# Risk
+MAX_POSITION_FRACTION = "0.02"
+DAILY_HALT_DRAWDOWN = "0.05"
+KILL_SWITCH_DRAWDOWN = "0.15"
+
+# Volatility targeting (enable after ~20 days of price history)
+VOL_TARGETING_ENABLED = "false"
+VOL_TARGET_ANNUAL = "0.10"
+VOL_WINDOW_DAYS = "20"
+VOL_USE_EWMA = "true"
+VOL_EWMA_DECAY = "0.94"
+VOL_MAX_LEVERAGE = "2.0"
+VOL_MIN_ALLOCATION = "0.20"
+VOL_NO_TRADE_BAND = "0.10"
+VOL_MAX_HISTORY_DAYS = "60"
+
+# Stock strategy
+STOCK_MAX_PE = "20"
+STOCK_MAX_PB = "3"
+STOCK_MAX_DEBT_TO_EQUITY = "0.5"
+STOCK_VIX_BUY_THRESHOLD = "25"
+STOCK_RUN_INTERVAL_DAYS = "7"
+STOCK_MAX_POSITIONS = "3"
+STOCK_VIX_SYMBOL = "^VIX"
+
+# Crypto strategy
+CRYPTO_SYMBOLS = "BTCUSDT,ETHUSDT"
+CRYPTO_BUY_FEAR_THRESHOLD = "25"
+CRYPTO_SELL_FEAR_THRESHOLD = "75"
+CRYPTO_USE_COINBASE_PRICING = "true"
+
+# Scheduler
+SCHEDULER_CRYPTO_INTERVAL_MINUTES = "15"
+SCHEDULER_STOCK_CHECK_HOUR = "9"
+SCHEDULER_POLYMARKET_INTERVAL_MINUTES = "30"
+SCHEDULER_HEARTBEAT_INTERVAL_MINUTES = "60"
+SCHEDULER_POLL_INTERVAL_SECONDS = "60"
+
+# Polymarket
+POLYMARKET_ENABLED = "false"
+POLYMARKET_MARKET_TAGS = "crypto,finance"
+POLYMARKET_MIN_VOLUME = "100000"
+POLYMARKET_MIN_LIQUIDITY = "10000"
+POLYMARKET_BUY_YES_THRESHOLD = "0.30"
+POLYMARKET_BUY_NO_THRESHOLD = "0.70"
+POLYMARKET_TAKE_PROFIT = "0.50"
+POLYMARKET_STOP_LOSS = "0.15"
+POLYMARKET_MAX_POSITIONS = "3"
+POLYMARKET_USE_TRADING_AGENTS = "false"
+
+# Kalshi / Predictions
+PREDICTION_ENABLED = "false"
+PREDICTION_MAX_POSITIONS = "5"
+PREDICTION_MARKET_CATEGORIES = "crypto,economics,finance,politics,weather"
+PREDICTION_CHECK_INTERVAL_MINUTES = "15"
+PREDICTION_MIN_VOLUME_USD = "5000"
+PREDICTION_MAX_SPREAD_USD = "0.15"
+PREDICTION_CAPITAL_PCT = "0.40"
+
+# Latency arb
+LATENCY_ARB_ENABLED = "false"
+LATENCY_ARB_SYMBOLS = "BTC-USD,ETH-USD"
+LATENCY_ARB_MOMENTUM_THRESHOLD = "0.30"
+LATENCY_ARB_MIN_EDGE = "0.05"
+LATENCY_ARB_KELLY_FRACTION = "0.25"
+LATENCY_ARB_MAX_POSITION_PCT = "0.08"
+LATENCY_ARB_MAX_OPEN_CONTRACTS = "4"
+LATENCY_ARB_SCAN_INTERVAL = "2.0"
+LATENCY_ARB_TAKE_PROFIT = "0.20"
+LATENCY_ARB_STOP_LOSS = "0.15"
+LATENCY_ARB_AI_CONFIRMATION = "boost"
+
+# Altcoin rotation
+ROTATION_ENABLED = "true"
+ROTATION_SCOUT_MULTIPLIER = "5.0"
+ROTATION_FEE_PCT = "0.006"
+ROTATION_CHECK_INTERVAL_MINUTES = "60"
+ROTATION_CAPITAL_PCT = "0.60"
+
+# AI analyst team
+TRADING_AGENTS_ENABLED = "false"
+TRADING_AGENTS_LLM_PROVIDER = "anthropic"
+TRADING_AGENTS_QUICK_MODEL = "claude-haiku-4-5-20251001"
+TRADING_AGENTS_DEEP_MODEL = "claude-sonnet-4-6"
+TRADING_AGENTS_CONFIRMATION_MODE = "log_only"
+TRADING_AGENTS_CACHE_TTL_HOURS = "4"
+TRADING_AGENTS_MAX_COST_PER_RUN = "0.50"
+TRADING_AGENTS_MAX_COST_PER_MONTH = "20.00"
+TRADING_AGENTS_MAX_DEBATE_ROUNDS = "1"
+TRADING_AGENTS_TIMEOUT_SECONDS = "120"
+TRADING_AGENTS_MULTI_ANALYST = "false"
+TRADING_AGENTS_ANALYSTS = "value_investor,contrarian,sentiment_analyst"
+
+# Freqtrade
+FREQTRADE_ENABLED = "false"
+FREQTRADE_API_SERVER_PORT = "8080"
+
+# ── Secrets — set these in the Railway dashboard, never commit values ─────────
+# FMP_API_KEY
+# COINBASE_API_KEY
+# COINBASE_API_SECRET
+# KALSHI_KEY_ID
+# KALSHI_PRIVATE_KEY
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_CHAT_ID
+# ANTHROPIC_API_KEY
+# POLYMARKET_API_KEY
+# POLYMARKET_API_SECRET
+# POLYMARKET_API_PASSPHRASE
+# POLYMARKET_PRIVATE_KEY

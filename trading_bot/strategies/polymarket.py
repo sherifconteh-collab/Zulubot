@@ -317,8 +317,9 @@ class PolymarketStrategy:
 
             side, price = signal
 
-            # Position sizing via risk manager
-            notional = equity * risk_manager.config.max_position_fraction
+            # Position sizing via risk manager (vol-adjusted when enabled)
+            pm_symbol = f"PM:{market.condition_id[:8]}:{side}"
+            notional = risk_manager.position_notional(state, equity, symbol=pm_symbol)
             notional = min(notional, state.cash * 0.95)  # Leave 5% cash buffer
 
             if notional < 1.0:

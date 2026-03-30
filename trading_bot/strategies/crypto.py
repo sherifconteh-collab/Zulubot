@@ -134,7 +134,7 @@ class CryptoSentimentFundingStrategy:
                         )
                         continue
                     equity = broker.portfolio_equity(state)
-                    notional = risk_manager.position_notional(state, equity)
+                    notional = risk_manager.position_notional(state, equity, symbol=symbol)
                     if notional <= 0:
                         self.logger.warning("Skipping crypto buy for %s because position size is zero.", symbol)
                         continue
