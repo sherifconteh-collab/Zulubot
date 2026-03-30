@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -232,6 +233,112 @@ class RiskManagerTests(unittest.TestCase):
 
         snapshot = manager.evaluate(state, equity=100_000.0, now=self.now)
         self.assertFalse(snapshot.cooldown_active)
+
+    def test_cooldown_does_not_extend_while_already_active(self) -> None:
+        """Additional losses during an active cooldown must not reset the timer."""
+        manager = RiskManager(RiskConfig(cooldown_consecutive_losses=2, cooldown_periods=5))
+        state = PortfolioState(cash=90_000.0)
+
+        # Trigger cooldown
+        manager.record_trade_result(state, is_loss=True)
+        manager.record_trade_result(state, is_loss=True)
+        self.assertEqual(state.cooldown_remaining, 5)
+
+        # Tick down a bit
+        manager.tick_cooldown(state)
+        manager.tick_cooldown(state)
+        self.assertEqual(state.cooldown_remaining, 3)
+
+        # Another loss recorded during cooldown should NOT reset the timer
+        manager.record_trade_result(state, is_loss=True)
+        self.assertEqual(state.cooldown_remaining, 3)
+
+    # ------------------------------------------------------------------ #
+    # Broker on_close callback tests                                       #
+    # ------------------------------------------------------------------ #
+
+    def test_broker_on_close_callback_fires(self) -> None:
+        """Verify that PaperBroker invokes the on_close callback on every close."""
+        from trading_bot.broker import PaperBroker
+
+        broker = PaperBroker(paper_mode=True, logger=logging.getLogger("test"))
+        results: list[tuple[float, float]] = []
+
+        def _on_close(state: PortfolioState, entry: float, close: float) -> None:
+            results.append((entry, close))
+
+        broker.set_on_close(_on_close)
+
+        state = PortfolioState(cash=100_000.0)
+        broker.open_position(
+            state, symbol="BTC", asset_type="crypto", strategy="test",
+            price=100.0, notional=1000.0, opened_at=self.now,
+        )
+        broker.close_position(state, symbol="BTC", price=90.0, reason="test_close")
+
+        self.assertEqual(len(results), 1)
+        self.assertAlmostEqual(results[0][0], 100.0)
+        self.assertAlmostEqual(results[0][1], 90.0)
+
+    def test_broker_on_close_not_called_without_callback(self) -> None:
+        """Verify close works normally when no callback is set."""
+        from trading_bot.broker import PaperBroker
+
+        broker = PaperBroker(paper_mode=True, logger=logging.getLogger("test"))
+        state = PortfolioState(cash=100_000.0)
+        broker.open_position(
+            state, symbol="ETH", asset_type="crypto", strategy="test",
+            price=50.0, notional=500.0, opened_at=self.now,
+        )
+        closed = broker.close_position(state, symbol="ETH", price=55.0, reason="test")
+        self.assertIsNotNone(closed)
+
+    # ------------------------------------------------------------------ #
+    # State persistence round-trip                                         #
+    # ------------------------------------------------------------------ #
+
+    def test_state_store_round_trips_new_fields(self) -> None:
+        """Verify StateStore.load() hydrates the new risk fields from disk."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from trading_bot.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            store = StateStore(path, initial_cash=100_000.0, timezone=self.timezone)
+
+            state = PortfolioState(
+                cash=90_000.0,
+                position_high_watermarks={"BTC": 120.0, "ETH": 50.0},
+                consecutive_losses=3,
+                cooldown_remaining=2,
+            )
+            store.save(state)
+
+            loaded = store.load()
+            self.assertEqual(loaded.position_high_watermarks, {"BTC": 120.0, "ETH": 50.0})
+            self.assertEqual(loaded.consecutive_losses, 3)
+            self.assertEqual(loaded.cooldown_remaining, 2)
+
+    def test_state_store_loads_defaults_for_old_state_files(self) -> None:
+        """Verify StateStore.load() provides safe defaults for legacy state files."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from trading_bot.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            # Simulate an old state file without the new fields
+            old_payload = {"cash": 80_000.0, "positions": {}, "last_prices": {}}
+            path.write_text(json.dumps(old_payload), encoding="utf-8")
+
+            store = StateStore(path, initial_cash=100_000.0, timezone=self.timezone)
+            loaded = store.load()
+            self.assertEqual(loaded.position_high_watermarks, {})
+            self.assertEqual(loaded.consecutive_losses, 0)
+            self.assertEqual(loaded.cooldown_remaining, 0)
 
     # ------------------------------------------------------------------ #
     # State serialisation includes new fields                              #

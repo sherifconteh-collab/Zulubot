@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Callable
 
 from trading_bot.models import PortfolioState, Position
 from trading_bot.volatility import VolatilityEngine
@@ -20,6 +20,19 @@ class PaperBroker:
         self.paper_mode = paper_mode
         self.logger = logger.getChild("broker")
         self._max_price_history_days = max_price_history_days
+        self._on_close: Callable[[PortfolioState, float, float], None] | None = None
+
+    def set_on_close(
+        self,
+        callback: Callable[[PortfolioState, float, float], None],
+    ) -> None:
+        """Register a callback invoked after every ``close_position()``.
+
+        The callback receives ``(state, entry_price, close_price)`` so it can
+        track trade results (e.g. consecutive-loss cooldown) regardless of
+        which code path closed the position.
+        """
+        self._on_close = callback
 
     def mark_positions(
         self,
@@ -120,8 +133,9 @@ class PaperBroker:
             return None
 
         close_price = price or state.last_prices.get(symbol, position.current_price or position.entry_price)
+        entry_price = position.entry_price
         proceeds = position.quantity * close_price
-        realized_pnl = (close_price - position.entry_price) * position.quantity
+        realized_pnl = (close_price - entry_price) * position.quantity
         state.cash += proceeds
         state.realized_pnl += realized_pnl
         state.last_prices[symbol] = close_price
@@ -135,6 +149,8 @@ class PaperBroker:
             realized_pnl,
             reason,
         )
+        if self._on_close is not None:
+            self._on_close(state, entry_price, close_price)
         return position
 
     def close_all(self, state: PortfolioState, *, reason: str) -> None:

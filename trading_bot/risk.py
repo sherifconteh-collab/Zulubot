@@ -139,7 +139,7 @@ class RiskManager:
             state.consecutive_losses = 0
 
         threshold = self.config.cooldown_consecutive_losses
-        if threshold > 0 and state.consecutive_losses >= threshold:
+        if threshold > 0 and state.consecutive_losses >= threshold and state.cooldown_remaining == 0:
             state.cooldown_remaining = self.config.cooldown_periods
             logger.warning(
                 "Cooldown activated: %d consecutive losses (threshold=%d). "
