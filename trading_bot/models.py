@@ -55,6 +55,13 @@ class PortfolioState:
     #   "last_rotation_date": "2026-03-28",
     # }
 
+    # Trailing stop-loss: per-position high watermark tracking
+    position_high_watermarks: dict[str, float] = field(default_factory=dict)
+
+    # Consecutive loss cooldown tracking
+    consecutive_losses: int = 0
+    cooldown_remaining: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "cash": self.cash,
@@ -72,6 +79,9 @@ class PortfolioState:
             "rotation_data": self.rotation_data,
             "price_history": self.price_history,
             "last_price_record_date": self.last_price_record_date,
+            "position_high_watermarks": self.position_high_watermarks,
+            "consecutive_losses": self.consecutive_losses,
+            "cooldown_remaining": self.cooldown_remaining,
         }
 
 
