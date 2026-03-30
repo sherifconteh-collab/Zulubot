@@ -135,7 +135,7 @@ class StockValueStrategy:
                     self.logger.warning("Skipping stock buy for %s because no quote was returned.", fundamentals.symbol)
                     continue
                 equity = broker.portfolio_equity(state)
-                notional = risk_manager.position_notional(state, equity)
+                notional = risk_manager.position_notional(state, equity, symbol=fundamentals.symbol)
                 if notional <= 0:
                     self.logger.warning("Skipping stock buy for %s because position size is zero.", fundamentals.symbol)
                     continue

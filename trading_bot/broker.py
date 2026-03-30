@@ -3,24 +3,47 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from trading_bot.models import PortfolioState, Position
+from trading_bot.volatility import VolatilityEngine
 
 
 class PaperBroker:
-    def __init__(self, paper_mode: bool, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        paper_mode: bool,
+        logger: logging.Logger,
+        max_price_history_days: int = 60,
+    ) -> None:
         self.paper_mode = paper_mode
         self.logger = logger.getChild("broker")
+        self._max_price_history_days = max_price_history_days
 
-    def mark_positions(self, state: PortfolioState, prices: dict[str, float]) -> None:
+    def mark_positions(
+        self,
+        state: PortfolioState,
+        prices: dict[str, float],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        today = now.date().isoformat() if now is not None else date.today().isoformat()
+        record_today = state.last_price_record_date != today
+
         for symbol, price in prices.items():
             if price <= 0:
                 continue
             state.last_prices[symbol] = price
             if symbol in state.positions:
                 state.positions[symbol].current_price = price
+            if record_today:
+                VolatilityEngine.record_price(
+                    symbol, price, state.price_history, self._max_price_history_days
+                )
+
+        if record_today and prices:
+            state.last_price_record_date = today
 
     def portfolio_equity(self, state: PortfolioState) -> float:
         market_value = 0.0

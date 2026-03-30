@@ -37,6 +37,10 @@ class StateStore:
             symbol: Position(**position_payload)
             for symbol, position_payload in payload.get("positions", {}).items()
         }
+        price_history = {
+            sym: [float(p) for p in prices]
+            for sym, prices in payload.get("price_history", {}).items()
+        }
         return PortfolioState(
             cash=float(payload["cash"]),
             positions=positions,
@@ -51,6 +55,8 @@ class StateStore:
             last_predictions_scan_date=payload.get("last_predictions_scan_date"),
             realized_pnl=float(payload.get("realized_pnl", 0.0)),
             rotation_data=payload.get("rotation_data", {}),
+            price_history=price_history,
+            last_price_record_date=payload.get("last_price_record_date", ""),
         )
 
     def save(self, state: PortfolioState) -> None:
