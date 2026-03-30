@@ -36,7 +36,11 @@ class TestCalculateRealizedVol(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_returns_float_with_sufficient_data(self) -> None:
-        prices = _flat_prices(100.0, 21)
+        # Alternating up/down creates actual variance; constant returns give 0 std
+        prices = [100.0]
+        for i in range(20):
+            pct = 0.01 if i % 2 == 0 else -0.005
+            prices.append(prices[-1] * (1.0 + pct))
         result = VolatilityEngine.calculate_realized_vol(prices, window=20)
         self.assertIsNotNone(result)
         self.assertGreater(result, 0.0)  # type: ignore[arg-type]
@@ -202,6 +206,7 @@ class TestRiskManagerPositionNotional(unittest.TestCase):
         )
         state = _make_state()
         result = rm.position_notional(state, equity=10_000.0, symbol="BTC-USD")
+        self.assertAlmostEqual(result, 200.0, places=2)  # 2% of 10k
 
     def test_falls_back_when_insufficient_history(self) -> None:
         rm = RiskManager(

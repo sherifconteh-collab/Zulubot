@@ -445,8 +445,8 @@ graph LR
 | `VOL_USE_EWMA` | `true` | Use EWMA instead of rolling std |
 | `VOL_EWMA_DECAY` | `0.94` | EWMA decay factor (0.94 = RiskMetrics standard) |
 | `VOL_MAX_LEVERAGE` | `2.0` | Hard leverage cap (never exceed 2× equity) |
-| `VOL_MIN_ALLOCATION` | `0.20` | Minimum leverage floor (always stay 20% in) |
-| `VOL_NO_TRADE_BAND` | `0.10` | Skip resize when drift < 10% (reduces costs) |
+| `VOL_MIN_ALLOCATION` | `0.20` | Minimum leverage floor (always allocate ≥ 20% of base notional) |
+| `VOL_NO_TRADE_BAND` | `0.10` | Drift threshold for `should_rebalance()` (not yet wired into sizing) |
 | `VOL_MAX_HISTORY_DAYS` | `60` | Max daily prices stored per symbol |
 
 ### AI Integration
