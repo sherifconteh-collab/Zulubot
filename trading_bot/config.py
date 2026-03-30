@@ -62,6 +62,10 @@ class RiskConfig:
     max_position_fraction: float = 0.02
     daily_halt_drawdown: float = 0.05
     kill_switch_drawdown: float = 0.15
+    trailing_stop_pct: float = 0.0          # 0 = disabled; e.g. 0.10 → close when price drops 10% from peak
+    max_open_positions: int = 0             # 0 = unlimited; portfolio-wide cap across all strategies
+    cooldown_consecutive_losses: int = 0    # 0 = disabled; pause after N consecutive losing trades
+    cooldown_periods: int = 3               # number of trade cycles to skip after cooldown triggers
 
 
 @dataclass(frozen=True)
@@ -267,6 +271,10 @@ class AppConfig:
                 max_position_fraction=_env_float("MAX_POSITION_FRACTION", 0.02),
                 daily_halt_drawdown=_env_float("DAILY_HALT_DRAWDOWN", 0.05),
                 kill_switch_drawdown=_env_float("KILL_SWITCH_DRAWDOWN", 0.15),
+                trailing_stop_pct=_env_float("TRAILING_STOP_PCT", 0.0),
+                max_open_positions=_env_int("MAX_OPEN_POSITIONS", 0),
+                cooldown_consecutive_losses=_env_int("COOLDOWN_CONSECUTIVE_LOSSES", 0),
+                cooldown_periods=_env_int("COOLDOWN_PERIODS", 3),
             ),
             stock=StockStrategyConfig(
                 max_pe_ratio=_env_float("STOCK_MAX_PE", 20.0),
