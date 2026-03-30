@@ -43,6 +43,13 @@ class TradingBotService:
         self.broker = PaperBroker(config.paper_mode, logger, max_price_history_days=config.volatility.max_history_days)
         self.risk_manager = RiskManager(config.risk, vol_config=config.volatility)
 
+        # Wire broker close callback → risk manager so all close paths update
+        # the consecutive-loss counter (strategies, trailing stops, kill switch).
+        def _on_position_closed(state: PortfolioState, entry_price: float, close_price: float) -> None:
+            self.risk_manager.record_trade_result(state, is_loss=close_price < entry_price)
+
+        self.broker.set_on_close(_on_position_closed)
+
         self.fmp_client = FinancialModelingPrepClient(
             api_key=config.fmp_api_key,
             timeout_seconds=config.request_timeout_seconds,
@@ -467,16 +474,20 @@ class TradingBotService:
             self.logger.warning("Failed to sync Kalshi positions: %s", exc)
 
     def _enforce_trailing_stops(self, state: PortfolioState) -> list[str]:
-        """Close positions that breach their trailing stop-loss and track losses."""
+        """Close positions that breach their trailing stop-loss.
+
+        Trade-result tracking (consecutive-loss cooldown) is handled
+        automatically by the broker's ``on_close`` callback.
+        """
         symbols = self.risk_manager.check_trailing_stops(state)
         closed: list[str] = []
         for symbol in symbols:
             position = state.positions.get(symbol)
             if position is None:
                 continue
-            is_loss = position.current_price < position.entry_price
-            self.broker.close_position(state, symbol=symbol, reason="trailing_stop")
-            self.risk_manager.record_trade_result(state, is_loss=is_loss)
+            self.broker.close_position(
+                state, symbol=symbol, reason="trailing_stop", price=position.current_price,
+            )
             closed.append(symbol)
         return closed
 
