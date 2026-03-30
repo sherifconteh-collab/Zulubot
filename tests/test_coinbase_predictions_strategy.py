@@ -189,9 +189,15 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
             "last_price_dollars": "0.22",
             "volume_fp": "3000.0",
         }
-        # With default threshold (5000), market should be excluded
-        strategy_default = self._make_strategy(markets=[market])
-        self.assertEqual(len(strategy_default._discover_markets()), 0)
+        # With a threshold above the market's volume, market should be excluded
+        config_high = PredictionConfig(enabled=True, market_categories=["crypto"], min_volume_usd=5_000)
+        kalshi_high = FakeKalshiClient([market])
+        strategy_high = CoinbasePredictionStrategy(
+            config=config_high,
+            kalshi_client=kalshi_high,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        self.assertEqual(len(strategy_high._discover_markets()), 0)
 
         # With lower threshold (1000), market should be included
         config_low = PredictionConfig(enabled=True, market_categories=["crypto"], min_volume_usd=1_000)
@@ -216,14 +222,19 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_evaluate_signal_rejects_wide_no_spread(self) -> None:
-        """_evaluate_signal() returns None when NO bid-ask spread > 15 cents."""
+        """_evaluate_signal() returns None when NO bid-ask spread exceeds threshold."""
+        # Use explicit config with a threshold that the spread will exceed
+        config = PredictionConfig(enabled=True, market_categories=["crypto"], max_spread_usd=0.15)
+        kalshi = FakeKalshiClient([])
+        strategy = CoinbasePredictionStrategy(
+            config=config, kalshi_client=kalshi, logger=self.logger,  # type: ignore[arg-type]
+        )
         # Tight YES spread but wide NO spread
         market = _make_market(yes_ask=0.22, yes_bid=0.20)  # YES spread = 0.02 (tight)
         # Override NO side to have a wide spread
         market["_no_ask"] = 0.95
         market["_no_bid"] = 0.75  # NO spread = 0.20 > 0.15
         market["_mid"] = (market["_yes_bid"] + market["_yes_ask"]) / 2
-        strategy = self._make_strategy()
         # Wide NO spread rejects the entire market regardless of signal direction
         result = strategy._evaluate_signal(market, mid=0.80, fear_greed_value=None)
         self.assertIsNone(result)
