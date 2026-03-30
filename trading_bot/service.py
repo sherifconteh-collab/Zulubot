@@ -43,6 +43,13 @@ class TradingBotService:
         self.broker = PaperBroker(config.paper_mode, logger, max_price_history_days=config.volatility.max_history_days)
         self.risk_manager = RiskManager(config.risk, vol_config=config.volatility)
 
+        # Wire broker close callback → risk manager so all close paths update
+        # the consecutive-loss counter (strategies, trailing stops, kill switch).
+        def _on_position_closed(state: PortfolioState, entry_price: float, close_price: float) -> None:
+            self.risk_manager.record_trade_result(state, is_loss=close_price < entry_price)
+
+        self.broker.set_on_close(_on_position_closed)
+
         self.fmp_client = FinancialModelingPrepClient(
             api_key=config.fmp_api_key,
             timeout_seconds=config.request_timeout_seconds,
@@ -180,14 +187,28 @@ class TradingBotService:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
 
+        # Tick down cooldown counter each trade cycle
+        self.risk_manager.tick_cooldown(state)
+
         # Sync real balances when in live mode
         if not self.config.paper_mode:
             self._sync_coinbase_balance(state)
         self._sync_kalshi_positions(state)
 
         self.refresh_open_positions(state, now=now)
+
+        # Update trailing-stop high watermarks and close breached positions
+        self.risk_manager.update_high_watermarks(state)
+        trailing_closed = self._enforce_trailing_stops(state)
+
         pre_risk = self._evaluate_risk(state, now)
         module_results: dict[str, Any] = {}
+
+        if trailing_closed:
+            module_results["trailing_stops"] = {
+                "closed": trailing_closed,
+                "count": len(trailing_closed),
+            }
 
         if command in {"stocks", "all"}:
             module_results["stocks"] = self._run_module(
@@ -452,6 +473,24 @@ class TradingBotService:
         except Exception as exc:
             self.logger.warning("Failed to sync Kalshi positions: %s", exc)
 
+    def _enforce_trailing_stops(self, state: PortfolioState) -> list[str]:
+        """Close positions that breach their trailing stop-loss.
+
+        Trade-result tracking (consecutive-loss cooldown) is handled
+        automatically by the broker's ``on_close`` callback.
+        """
+        symbols = self.risk_manager.check_trailing_stops(state)
+        closed: list[str] = []
+        for symbol in symbols:
+            position = state.positions.get(symbol)
+            if position is None:
+                continue
+            self.broker.close_position(
+                state, symbol=symbol, reason="trailing_stop", price=position.current_price,
+            )
+            closed.append(symbol)
+        return closed
+
     def _evaluate_risk(self, state: PortfolioState, now: datetime) -> RiskSnapshot:
         equity = self.broker.portfolio_equity(state)
         snapshot = self.risk_manager.evaluate(state, equity, now)
@@ -535,6 +574,9 @@ class TradingBotService:
                 "total_drawdown_pct": round(post_risk.total_drawdown * 100, 2),
                 "peak_equity": round(state.peak_equity, 2),
                 "daily_baseline_equity": round(state.daily_baseline_equity, 2),
+                "cooldown_active": post_risk.cooldown_active,
+                "consecutive_losses": state.consecutive_losses,
+                "cooldown_remaining": state.cooldown_remaining,
             },
             "last_stock_screen_date": state.last_stock_screen_date,
             "last_polymarket_scan_date": state.last_polymarket_scan_date,

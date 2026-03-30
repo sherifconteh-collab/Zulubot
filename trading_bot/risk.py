@@ -19,6 +19,7 @@ class RiskSnapshot:
     daily_halt_active: bool
     kill_switch_active: bool
     kill_switch_triggered_now: bool
+    cooldown_active: bool = False
 
 
 class RiskManager:
@@ -63,10 +64,103 @@ class RiskManager:
             daily_halt_active=state.halt_new_trades_for_day,
             kill_switch_active=state.kill_switch_engaged,
             kill_switch_triggered_now=kill_switch_triggered_now,
+            cooldown_active=state.cooldown_remaining > 0,
         )
 
+    # ------------------------------------------------------------------ #
+    # Gate for new entries                                                 #
+    # ------------------------------------------------------------------ #
+
     def can_open_new_position(self, state: PortfolioState) -> bool:
-        return not state.kill_switch_engaged and not state.halt_new_trades_for_day
+        if state.kill_switch_engaged or state.halt_new_trades_for_day:
+            return False
+        if self.config.max_open_positions > 0 and len(state.positions) >= self.config.max_open_positions:
+            return False
+        if state.cooldown_remaining > 0:
+            return False
+        return True
+
+    # ------------------------------------------------------------------ #
+    # Trailing stop-loss                                                   #
+    # ------------------------------------------------------------------ #
+
+    def update_high_watermarks(self, state: PortfolioState) -> None:
+        """Update per-position high watermarks from current prices."""
+        for symbol, position in state.positions.items():
+            price = position.current_price
+            prev_high = state.position_high_watermarks.get(symbol, 0.0)
+            if price > prev_high:
+                state.position_high_watermarks[symbol] = price
+
+        # Clean up watermarks for closed positions
+        closed = [s for s in state.position_high_watermarks if s not in state.positions]
+        for s in closed:
+            del state.position_high_watermarks[s]
+
+    def check_trailing_stops(self, state: PortfolioState) -> list[str]:
+        """Return symbols that should be closed due to trailing stop-loss.
+
+        A trailing stop triggers when the current price has fallen
+        ``trailing_stop_pct`` (e.g. 10%) below the recorded high watermark.
+        Returns an empty list when the feature is disabled (pct == 0).
+        """
+        if self.config.trailing_stop_pct <= 0:
+            return []
+
+        to_close: list[str] = []
+        for symbol, position in state.positions.items():
+            high = state.position_high_watermarks.get(symbol, position.entry_price)
+            if high <= 0:
+                continue
+            drop_pct = (high - position.current_price) / high
+            if drop_pct >= self.config.trailing_stop_pct:
+                logger.info(
+                    "Trailing stop triggered for %s: high=%.4f current=%.4f drop=%.2f%%",
+                    symbol, high, position.current_price, drop_pct * 100,
+                )
+                to_close.append(symbol)
+        return to_close
+
+    # ------------------------------------------------------------------ #
+    # Consecutive loss cooldown                                            #
+    # ------------------------------------------------------------------ #
+
+    def record_trade_result(self, state: PortfolioState, *, is_loss: bool) -> None:
+        """Update consecutive-loss counter after a position is closed.
+
+        When the loss streak reaches ``cooldown_consecutive_losses`` (and the
+        feature is enabled), ``cooldown_remaining`` is set to
+        ``cooldown_periods`` which blocks new entries until it is decremented
+        back to zero.
+        """
+        if is_loss:
+            state.consecutive_losses += 1
+        else:
+            state.consecutive_losses = 0
+
+        threshold = self.config.cooldown_consecutive_losses
+        if threshold > 0 and state.consecutive_losses >= threshold and state.cooldown_remaining == 0:
+            state.cooldown_remaining = self.config.cooldown_periods
+            logger.warning(
+                "Cooldown activated: %d consecutive losses (threshold=%d). "
+                "Pausing new entries for %d trade cycles.",
+                state.consecutive_losses, threshold, self.config.cooldown_periods,
+            )
+
+    def tick_cooldown(self, state: PortfolioState) -> None:
+        """Decrement cooldown counter once per trade cycle.
+
+        Call this at the start of each ``service.run()`` invocation.
+        """
+        if state.cooldown_remaining > 0:
+            state.cooldown_remaining -= 1
+            if state.cooldown_remaining == 0:
+                logger.info("Cooldown expired — resuming normal trading.")
+                state.consecutive_losses = 0
+
+    # ------------------------------------------------------------------ #
+    # Position sizing                                                      #
+    # ------------------------------------------------------------------ #
 
     def position_notional(
         self,

@@ -57,6 +57,12 @@ class StateStore:
             rotation_data=payload.get("rotation_data", {}),
             price_history=price_history,
             last_price_record_date=payload.get("last_price_record_date", ""),
+            position_high_watermarks={
+                sym: float(val)
+                for sym, val in payload.get("position_high_watermarks", {}).items()
+            },
+            consecutive_losses=int(payload.get("consecutive_losses", 0)),
+            cooldown_remaining=int(payload.get("cooldown_remaining", 0)),
         )
 
     def save(self, state: PortfolioState) -> None:
