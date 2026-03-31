@@ -195,6 +195,9 @@ _SIGNAL_SCORES = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
 
 def aggregate_analyst_signals(
     signals: list[AnalystSignal],
+    *,
+    buy_threshold: float = 0.2,
+    sell_threshold: float = -0.2,
 ) -> dict[str, Any]:
     """Aggregate multiple analyst signals into a combined verdict.
 
@@ -228,12 +231,9 @@ def aggregate_analyst_signals(
     else:
         final_score = 0.0
 
-    # Convert score to action (matching Zulubot's buy/sell/hold convention).
-    # The ±0.2 threshold prevents weak/split signals from triggering trades;
-    # a score of 0.2 requires meaningful directional agreement among analysts.
-    if final_score > 0.2:
+    if final_score > buy_threshold:
         action = "buy"
-    elif final_score < -0.2:
+    elif final_score < sell_threshold:
         action = "sell"
     else:
         action = "hold"

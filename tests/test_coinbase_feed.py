@@ -178,6 +178,24 @@ class CoinbasePriceFeedTests(unittest.TestCase):
         feed = self._make_feed()
         self.assertEqual(feed.history_span_seconds("BTC-USD"), 0.0)
 
+    def test_latest_price_age_seconds_uses_last_tick(self) -> None:
+        feed = self._make_feed(symbols=["BTC-USD"])
+        now = time.time()
+        feed._history["BTC-USD"].append((now - 7.0, 70_000.0))
+
+        age = feed.latest_price_age_seconds("BTC-USD")
+
+        self.assertGreaterEqual(age, 6.0)
+        self.assertLess(age, 9.0)
+
+    def test_is_stale_detects_old_ticks(self) -> None:
+        feed = self._make_feed(symbols=["BTC-USD"])
+        now = time.time()
+        feed._history["BTC-USD"].append((now - 20.0, 70_000.0))
+
+        self.assertTrue(feed.is_stale("BTC-USD", 15.0))
+        self.assertFalse(feed.is_stale("BTC-USD", 25.0))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ import jwt
 import requests
 
 from trading_bot.clients import CoinbaseClient
+from trading_bot.clients import request_with_retry
+from trading_bot.config import HttpRetryConfig
 from trading_bot.models import PortfolioState, Position
 
 
@@ -41,6 +43,7 @@ class CoinbaseBroker:
         coinbase_client: CoinbaseClient,
         paper_mode: bool,
         logger: logging.Logger,
+        retry_config: HttpRetryConfig | None = None,
     ) -> None:
         self.api_key = api_key
         # Handle escaped newlines from .env files
@@ -48,6 +51,7 @@ class CoinbaseBroker:
         self.coinbase_client = coinbase_client
         self.paper_mode = paper_mode
         self.logger = logger.getChild("coinbase_broker")
+        self.retry_config = retry_config or HttpRetryConfig()
         self.session = requests.Session()
 
     def _build_jwt(self, method: str, path: str) -> str:
@@ -81,7 +85,16 @@ class CoinbaseBroker:
         headers = self._auth_headers("POST", path)
         url = f"{self.BASE_URL}{path}"
         self.logger.debug("POST %s payload=%s", url, body)
-        resp = self.session.post(url, headers=headers, data=body, timeout=15)
+        resp = request_with_retry(
+            self.session,
+            "POST",
+            url,
+            headers=headers,
+            data=body,
+            timeout_seconds=15,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -90,7 +103,16 @@ class CoinbaseBroker:
         clean_path = path.split("?")[0]
         headers = self._auth_headers("GET", clean_path)
         url = f"{self.BASE_URL}{clean_path}"
-        resp = self.session.get(url, headers=headers, params=params, timeout=15)
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            url,
+            headers=headers,
+            params=params,
+            timeout_seconds=15,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
         resp.raise_for_status()
         return resp.json()
 

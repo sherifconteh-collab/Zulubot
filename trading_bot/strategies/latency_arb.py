@@ -41,6 +41,7 @@ from trading_bot.broker import PaperBroker
 from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.config import LatencyArbConfig
+from trading_bot.charting import render_candlestick_chart_data_uri
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 
@@ -75,6 +76,8 @@ _ASSET_TO_SERIES: dict[str, list[str]] = {
 
 
 class LatencyArbStrategy:
+    _KALSHI_CASH_BUCKET = "kalshi"
+
     """Latency arbitrage on Kalshi prediction markets using Coinbase price feed."""
 
     def __init__(
@@ -86,6 +89,7 @@ class LatencyArbStrategy:
         paper_broker: PaperBroker,
         logger: logging.Logger,
         ai_service: Any | None = None,
+        live_trading_enabled: bool = False,
     ) -> None:
         self.config = config
         self.feed = price_feed
@@ -93,6 +97,7 @@ class LatencyArbStrategy:
         self.broker = paper_broker
         self.logger = logger.getChild("strategy.latency_arb")
         self.ai_service = ai_service  # Haiku-only signal validation (log_only, never blocks)
+        self.live_trading_enabled = live_trading_enabled
 
         # Cache discovered Kalshi markets to avoid hammering the API
         # Maps series_ticker → list of markets
@@ -133,7 +138,8 @@ class LatencyArbStrategy:
             "signals_detected": 0,
             "markets_scanned": 0,
             "momentum": {},
-            "can_trade_live": self.kalshi.can_trade,
+            "stale_symbols": [],
+            "can_trade_live": self.live_trading_enabled,
         }
 
         if not self.config.enabled:
@@ -163,7 +169,8 @@ class LatencyArbStrategy:
                 )
                 return result
 
-            equity = broker.portfolio_equity(state)
+            cash_bucket = self._KALSHI_CASH_BUCKET if self.live_trading_enabled else None
+            equity = broker.portfolio_equity_for_bucket(state, cash_bucket=cash_bucket)
 
             # Step 5: Detect market regime (Haiku-only, 1h cache) to adjust thresholds
             effective_threshold = self.config.momentum_min_threshold_pct
@@ -215,6 +222,14 @@ class LatencyArbStrategy:
                         "%s feed not ready (need %gs history).", symbol, self.config.momentum_window_seconds
                     )
                     continue
+                if hasattr(self.feed, "is_stale") and self.feed.is_stale(symbol, self.config.max_price_age_seconds):
+                    self.logger.warning(
+                        "%s feed is stale (> %.1fs). Skipping latency-arb signal.",
+                        symbol,
+                        self.config.max_price_age_seconds,
+                    )
+                    result["stale_symbols"].append(symbol)
+                    continue
 
                 momentum_pct = self.feed.get_momentum_pct(symbol, self.config.momentum_window_seconds)
                 result["momentum"][symbol] = round(momentum_pct, 4)
@@ -257,6 +272,7 @@ class LatencyArbStrategy:
                         entered = self._execute_trade(
                             state=state,
                             market=market,
+                            spot_symbol=symbol,
                             side=side,
                             ask_price=ask_price,
                             notional=notional,
@@ -444,6 +460,7 @@ class LatencyArbStrategy:
         *,
         state: PortfolioState,
         market: dict[str, Any],
+        spot_symbol: str,
         side: str,
         ask_price: float,
         notional: float,
@@ -466,12 +483,14 @@ class LatencyArbStrategy:
         ai_verdict = None
         if self.ai_service is not None:
             try:
+                image_urls = self._build_chart_images(spot_symbol)
                 ai_verdict = self.ai_service.evaluate_arb_signal(
                     asset=ticker.split("-")[0] if "-" in ticker else ticker[:6],
                     momentum_pct=momentum_pct,
                     contract_title=market.get("title", ""),
                     contract_price=ask_price,
                     edge=_kelly_edge(ask_price, self._estimate_true_prob(abs(momentum_pct))),
+                    image_urls=image_urls,
                 )
                 if ai_verdict is not None:
                     ai_meta = {
@@ -498,7 +517,11 @@ class LatencyArbStrategy:
                 "boost",
             )
             notional, conf_meta = apply_ai_confirmation(
-                ai_verdict, confirmation_mode, notional, self.logger
+                ai_verdict,
+                confirmation_mode,
+                notional,
+                self.logger,
+                config=getattr(self.ai_service, "config", None),
             )
             ai_meta.update({k: v for k, v in conf_meta.items() if k not in ai_meta})
 
@@ -515,6 +538,13 @@ class LatencyArbStrategy:
             return False
 
         actual_notional = quantity * ask_price
+        if self.live_trading_enabled:
+            available_cash = self.broker.get_cash_balance(state, cash_bucket=self._KALSHI_CASH_BUCKET)
+            actual_notional = min(actual_notional, available_cash * 0.95)
+            quantity = math.floor(actual_notional / ask_price)
+            if quantity < 1:
+                return False
+            actual_notional = quantity * ask_price
 
         meta = {
             "ticker": ticker,
@@ -524,6 +554,7 @@ class LatencyArbStrategy:
             "momentum_pct": round(momentum_pct, 4),
             "strategy": "latency_arb",
             "market_regime": market_regime,
+            "venue": "kalshi",
             **ai_meta,
         }
 
@@ -537,6 +568,7 @@ class LatencyArbStrategy:
             notional=actual_notional,
             opened_at=now,
             meta=meta,
+            cash_bucket=self._KALSHI_CASH_BUCKET if self.live_trading_enabled else None,
         )
         if position is None:
             return False
@@ -555,13 +587,13 @@ class LatencyArbStrategy:
 
         self.logger.info(
             "LATENCY ARB %s %s %s @ $%.2f × %d contracts = $%.2f | momentum=%.3f%%",
-            "PAPER" if not self.kalshi.can_trade else "LIVE",
+            "PAPER" if not self.live_trading_enabled else "LIVE",
             side.upper(), ticker, ask_price, filled_quantity,
             filled_quantity * ask_price, momentum_pct,
         )
 
         # Live execution
-        if self.kalshi.can_trade:
+        if self.live_trading_enabled:
             try:
                 yes_price_cents = int(ask_price * 100)
                 order_result = self.kalshi.place_order(
@@ -580,6 +612,24 @@ class LatencyArbStrategy:
                 # Keep the paper position for tracking; live failed
 
         return True
+
+    def _build_chart_images(self, symbol: str) -> list[str] | None:
+        ai_config = getattr(self.ai_service, "config", None)
+        if ai_config is None or not getattr(ai_config, "vision_enabled", False):
+            return None
+
+        history = self.feed.get_history(
+            symbol,
+            lookback_seconds=max(self.config.price_history_seconds, self.config.momentum_window_seconds * 4),
+        )
+        image = render_candlestick_chart_data_uri(
+            symbol,
+            history,
+            title=f"{symbol} momentum context",
+        )
+        if image is None:
+            return None
+        return [image]
 
     # ------------------------------------------------------------------
     # Position management

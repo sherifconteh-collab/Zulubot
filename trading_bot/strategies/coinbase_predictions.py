@@ -55,6 +55,8 @@ SERIES_BY_CATEGORY: dict[str, list[str]] = {
 
 
 class CoinbasePredictionStrategy:
+    _KALSHI_CASH_BUCKET = "kalshi"
+
     """Prediction market strategy using Kalshi for discovery and execution."""
 
     def __init__(
@@ -64,11 +66,13 @@ class CoinbasePredictionStrategy:
         kalshi_client: KalshiClient,
         logger: logging.Logger,
         ai_service: Any | None = None,
+        live_trading_enabled: bool = False,
     ) -> None:
         self.config = config
         self.kalshi = kalshi_client
         self.logger = logger.getChild("strategy.predictions")
         self.ai_service = ai_service
+        self.live_trading_enabled = live_trading_enabled
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -96,7 +100,7 @@ class CoinbasePredictionStrategy:
             "markets_discovered": 0,
             "resolved_closed": [],
             "fear_greed": fear_greed_value,
-            "can_trade": self.kalshi.can_trade,
+            "can_trade": self.live_trading_enabled,
         }
 
         try:
@@ -289,24 +293,31 @@ class CoinbasePredictionStrategy:
                 market = self.kalshi.get_market(ticker)
                 yes_bid = _parse_dollars(market.get("yes_bid_dollars"))
                 yes_ask = _parse_dollars(market.get("yes_ask_dollars"))
-                current_price = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else (yes_bid or yes_ask)
+                no_bid = _parse_dollars(market.get("no_bid_dollars"))
+                no_ask = _parse_dollars(market.get("no_ask_dollars"))
+                yes_mid = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else (yes_bid or yes_ask)
+                no_mid = (no_bid + no_ask) / 2 if no_bid > 0 and no_ask > 0 else (no_bid or no_ask)
+                if no_mid <= 0 and yes_mid > 0:
+                    no_mid = 1.0 - yes_mid
+                if yes_mid <= 0 and no_mid > 0:
+                    yes_mid = 1.0 - no_mid
+
+                side = position.meta.get("side", "yes")
+                current_price = yes_mid if side == "yes" else no_mid
 
                 if current_price <= 0:
                     continue
 
-                position.current_price = current_price
-                state.last_prices[symbol] = current_price
-
-                side = position.meta.get("side", "yes")
+                broker.mark_positions(state, {symbol: current_price})
                 entry_price = position.entry_price
 
                 # Take profit
-                if self._should_take_profit(side, entry_price, current_price):
+                if self._should_take_profit(entry_price, current_price):
                     self._close_position(state, broker, symbol, position, current_price, "take_profit", result)
                     continue
 
                 # Stop loss
-                if self._should_stop_loss(side, entry_price, current_price):
+                if self._should_stop_loss(entry_price, current_price):
                     self._close_position(state, broker, symbol, position, current_price, "stop_loss", result)
 
             except Exception as exc:
@@ -327,7 +338,7 @@ class CoinbasePredictionStrategy:
         side = position.meta.get("side", "yes")
 
         # Sell on Kalshi if we can trade
-        if self.kalshi.can_trade and ticker:
+        if self.live_trading_enabled and ticker:
             try:
                 self.kalshi.place_order(
                     ticker=ticker,
@@ -338,7 +349,13 @@ class CoinbasePredictionStrategy:
             except Exception as exc:
                 self.logger.warning("Kalshi sell failed for %s: %s", ticker, exc)
 
-        closed = broker.close_position(state, symbol=symbol, price=price, reason=reason)
+        closed = broker.close_position(
+            state,
+            symbol=symbol,
+            price=price,
+            reason=reason,
+            cash_bucket=self._KALSHI_CASH_BUCKET if self.live_trading_enabled else None,
+        )
         if closed is not None:
             result["sells"].append(symbol)
             self.logger.info(
@@ -346,21 +363,13 @@ class CoinbasePredictionStrategy:
                 reason, symbol, side, position.entry_price, price,
             )
 
-    def _should_take_profit(self, side: str, entry: float, current: float) -> bool:
+    def _should_take_profit(self, entry: float, current: float) -> bool:
         threshold = self.config.take_profit_threshold
-        if side == "yes":
-            return entry < threshold and current >= threshold
-        else:
-            no_current = 1.0 - current
-            return entry < threshold and no_current >= threshold
+        return entry < threshold and current >= threshold
 
-    def _should_stop_loss(self, side: str, entry: float, current: float) -> bool:
+    def _should_stop_loss(self, entry: float, current: float) -> bool:
         max_loss = self.config.stop_loss_pct
-        if side == "yes":
-            return (entry - current) >= max_loss
-        else:
-            no_current = 1.0 - current
-            return (entry - no_current) >= max_loss
+        return (entry - current) >= max_loss
 
     # ------------------------------------------------------------------
     # Entry scanning
@@ -382,7 +391,9 @@ class CoinbasePredictionStrategy:
             return
 
         slots_available = self.config.max_positions - existing_count
-        equity = broker.portfolio_equity(state)
+        cash_bucket = self._KALSHI_CASH_BUCKET if self.live_trading_enabled else None
+        equity = broker.portfolio_equity_for_bucket(state, cash_bucket=cash_bucket)
+        available_cash = broker.get_cash_balance(state, cash_bucket=cash_bucket)
 
         for market in markets:
             if slots_available <= 0:
@@ -414,10 +425,14 @@ class CoinbasePredictionStrategy:
             existing_value = sum(
                 pos.market_value for pos in state.positions.values()
                 if pos.strategy == "coinbase_predictions"
+                and (
+                    cash_bucket is None
+                    or pos.meta.get("cash_bucket") == cash_bucket
+                )
             )
             remaining = max(0.0, prediction_budget - existing_value)
             per_position = remaining / max(1, slots_available)
-            notional = min(per_position, state.cash * 0.95)
+            notional = min(per_position, available_cash * 0.95)
             notional = max(notional, 0.0)
 
             # AI probability estimation — adjusts position size via boost/require mode
@@ -437,6 +452,7 @@ class CoinbasePredictionStrategy:
                             confirmation_mode="boost",
                             base_notional=notional,
                             logger=self.logger,
+                            config=getattr(self.ai_service, "config", None),
                         )
                 except Exception as exc:
                     self.logger.debug("AI prediction evaluation failed (non-blocking): %s", exc)
@@ -453,7 +469,7 @@ class CoinbasePredictionStrategy:
             symbol = f"KX:{ticker}:{side}"
 
             # Execute on Kalshi (live)
-            if self.kalshi.can_trade:
+            if self.live_trading_enabled:
                 try:
                     yes_price_cents = int(price * 100) if side == "yes" else None
                     order = self.kalshi.place_order(
@@ -482,6 +498,7 @@ class CoinbasePredictionStrategy:
                 price=price,
                 notional=actual_notional,
                 opened_at=now,
+                cash_bucket=cash_bucket,
                 meta={
                     "ticker": ticker,
                     "side": side,
@@ -490,6 +507,7 @@ class CoinbasePredictionStrategy:
                     "fear_greed": fear_greed_value,
                     "title": market.get("title", ""),
                     "subtitle": market.get("subtitle", ""),
+                    "venue": "kalshi",
                     **ai_meta,
                 },
             )

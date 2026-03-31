@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+from trading_bot.audit import TradeAuditLog
 from trading_bot.broker import PaperBroker
 from trading_bot.clients import (
     AlternativeMeClient,
@@ -18,6 +19,7 @@ from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGamma
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AppConfig
 from trading_bot.models import PortfolioState, Position
+from trading_bot.observability import ModuleLatencyTracker
 from trading_bot.polymarket_broker import PolymarketBroker
 from trading_bot.risk import RiskManager, RiskSnapshot
 from trading_bot.state import StateStore
@@ -36,12 +38,21 @@ except ImportError:
 
 
 class TradingBotService:
+    _KALSHI_CASH_BUCKET = "kalshi"
+
     def __init__(self, config: AppConfig, logger: logging.Logger) -> None:
         self.config = config
         self.logger = logger.getChild("service")
         self.state_store = StateStore(config.state_path, config.initial_cash, config.timezone)
         self.broker = PaperBroker(config.paper_mode, logger, max_price_history_days=config.volatility.max_history_days)
         self.risk_manager = RiskManager(config.risk, vol_config=config.volatility)
+        self.latency_tracker = ModuleLatencyTracker(config.observability.module_latency_window)
+        self.trade_audit = TradeAuditLog(
+            config.trade_audit_path,
+            logger,
+            enabled=config.observability.trade_audit_enabled,
+        )
+        self.broker.set_on_trade(self.trade_audit.record)
 
         # Wire broker close callback → risk manager so all close paths update
         # the consecutive-loss counter (strategies, trailing stops, kill switch).
@@ -58,16 +69,19 @@ class TradingBotService:
         self.alternative_client = AlternativeMeClient(
             timeout_seconds=config.request_timeout_seconds,
             logger=logger,
+            retry_config=config.http_retry,
         )
         self.binance_client = BinanceFuturesClient(
             timeout_seconds=config.request_timeout_seconds,
             logger=logger,
+            retry_config=config.http_retry,
         )
         self.coinbase_client = CoinbaseClient(
             api_key=config.coinbase.api_key,
             api_secret=config.coinbase.api_secret,
             timeout_seconds=config.request_timeout_seconds,
             logger=logger,
+            retry_config=config.http_retry,
         )
 
         # Free market intelligence (options sentiment, insider activity, short interest)
@@ -80,6 +94,7 @@ class TradingBotService:
         if TradingAgentsService is not None and config.trading_agents.enabled:
             self.ai_service = TradingAgentsService(config.trading_agents, logger)
             if self.ai_service.is_available:
+                self._register_ai_tools()
                 self.logger.info("TradingAgents AI enabled. Mode: %s", config.trading_agents.confirmation_mode)
             else:
                 self.logger.warning("TradingAgents enabled but not available (missing API key or SDK).")
@@ -91,6 +106,7 @@ class TradingBotService:
             coinbase_client=self.coinbase_client,
             paper_mode=config.paper_mode,
             logger=logger,
+            retry_config=config.http_retry,
         )
 
         self.stock_strategy = StockValueStrategy(
@@ -154,12 +170,14 @@ class TradingBotService:
             private_key_pem=config.predictions.kalshi_private_key,
             timeout_seconds=config.request_timeout_seconds,
             logger=logger,
+            retry_config=config.http_retry,
         )
         self.prediction_strategy = CoinbasePredictionStrategy(
             config=config.predictions,
             kalshi_client=self.kalshi_client,
             logger=logger,
             ai_service=self.ai_service,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
@@ -176,6 +194,7 @@ class TradingBotService:
             paper_broker=self.broker,
             logger=logger,
             ai_service=self.ai_service,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
         # Kalshi balance cache (avoids network call on every summary)
@@ -186,6 +205,7 @@ class TradingBotService:
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
+        self._hydrate_ai_budget(state)
 
         # Tick down cooldown counter each trade cycle
         self.risk_manager.tick_cooldown(state)
@@ -193,7 +213,8 @@ class TradingBotService:
         # Sync real balances when in live mode
         if not self.config.paper_mode:
             self._sync_coinbase_balance(state)
-        self._sync_kalshi_positions(state)
+            self._sync_kalshi_balance(state)
+            self._sync_kalshi_positions(state)
 
         self.refresh_open_positions(state, now=now)
 
@@ -285,6 +306,7 @@ class TradingBotService:
 
         self.refresh_open_positions(state, now=now)
         post_risk = self._evaluate_risk(state, now)
+        self._persist_ai_budget(state)
         self.state_store.save(state)
 
         summary = self._build_summary(state, pre_risk=pre_risk, post_risk=post_risk, modules=module_results)
@@ -294,13 +316,232 @@ class TradingBotService:
     def status(self) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
+        self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
             self._sync_coinbase_balance(state)
-        self._sync_kalshi_positions(state)
+            self._sync_kalshi_balance(state)
+            self._sync_kalshi_positions(state)
         self.refresh_open_positions(state, now=now)
         risk = self._evaluate_risk(state, now)
+        self._persist_ai_budget(state)
         self.state_store.save(state)
         return self._build_summary(state, pre_risk=risk, post_risk=risk, modules={})
+
+    def _hydrate_ai_budget(self, state: PortfolioState) -> None:
+        if self.ai_service is None:
+            return
+        self.ai_service.load_budget_state(state.ai_monthly_usage)
+
+    def _persist_ai_budget(self, state: PortfolioState) -> None:
+        if self.ai_service is None:
+            return
+        state.ai_monthly_usage = self.ai_service.export_budget_state()
+
+    def _register_ai_tools(self) -> None:
+        if self.ai_service is None:
+            return
+
+        self.ai_service.clear_tools()
+        self.ai_service.register_tool(
+            "get_current_price",
+            "Get the latest spot price for a Coinbase product, Binance-style crypto symbol, or stock ticker.",
+            {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Coinbase product ID like BTC-USD, Binance symbol like BTCUSDT, or equity ticker like AAPL.",
+                    }
+                },
+                "required": ["symbol"],
+            },
+            self._ai_tool_get_current_price,
+        )
+        self.ai_service.register_tool(
+            "get_fear_greed_index",
+            "Get the latest Alternative.me crypto fear and greed reading.",
+            {
+                "type": "object",
+                "properties": {},
+            },
+            self._ai_tool_get_fear_greed_index,
+        )
+        self.ai_service.register_tool(
+            "get_funding_rate",
+            "Get the current funding rate and mark price for a crypto perpetual symbol.",
+            {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Binance-style symbol like BTCUSDT or a Coinbase-style symbol like BTC-USD.",
+                    }
+                },
+                "required": ["symbol"],
+            },
+            self._ai_tool_get_funding_rate,
+        )
+
+    def _ai_tool_get_current_price(self, payload: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(payload.get("symbol", "")).strip().upper()
+        if not symbol:
+            raise ValueError("symbol is required")
+
+        product_id = symbol
+        try:
+            if symbol.endswith("USDT"):
+                product_id = self.coinbase_client.to_coinbase_symbol(symbol)
+            elif "-" not in symbol:
+                quotes = self.fmp_client.get_batch_quotes([symbol])
+                price = quotes.get(symbol)
+                if price is None:
+                    raise ValueError(f"No price available for {symbol}")
+                return {
+                    "symbol": symbol,
+                    "resolved_symbol": symbol,
+                    "price": round(float(price), 8),
+                    "source": "yfinance",
+                }
+        except ValueError:
+            quotes = self.fmp_client.get_batch_quotes([symbol])
+            price = quotes.get(symbol)
+            if price is None:
+                raise
+            return {
+                "symbol": symbol,
+                "resolved_symbol": symbol,
+                "price": round(float(price), 8),
+                "source": "yfinance",
+            }
+
+        price = self.coinbase_client.get_spot_price_by_product_id(product_id)
+        return {
+            "symbol": symbol,
+            "resolved_symbol": product_id,
+            "price": round(float(price), 8),
+            "source": "coinbase",
+        }
+
+    def _ai_tool_get_fear_greed_index(self, _payload: dict[str, Any]) -> dict[str, Any]:
+        reading = self.alternative_client.get_fear_and_greed()
+        return {
+            "value": reading.value,
+            "classification": reading.classification,
+            "timestamp": reading.timestamp,
+            "time_until_update": reading.time_until_update,
+            "source": "alternative_me",
+        }
+
+    def _ai_tool_get_funding_rate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(payload.get("symbol", "")).strip().upper()
+        if not symbol:
+            raise ValueError("symbol is required")
+        if symbol.endswith("-USD"):
+            try:
+                symbol = self.coinbase_client.to_binance_symbol(symbol)
+            except ValueError:
+                symbol = f"{symbol.split('-', 1)[0]}USDT"
+        elif not symbol.endswith("USDT"):
+            symbol = f"{symbol}USDT"
+
+        snapshot = self.binance_client.get_mark_price_and_funding(symbol)
+        return {
+            "symbol": payload.get("symbol", symbol),
+            "resolved_symbol": symbol,
+            "mark_price": round(snapshot.mark_price, 8),
+            "funding_rate": round(snapshot.funding_rate, 8),
+            "source": "hyperliquid+coinbase",
+        }
+
+    def get_latency_snapshot(self) -> dict[str, dict[str, float]]:
+        return self.latency_tracker.snapshot()
+
+    def get_recent_audit_entries(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self.trade_audit.tail(limit)
+
+    @staticmethod
+    def _normalise_kalshi_probability(raw_value: Any) -> float:
+        if raw_value in (None, ""):
+            return 0.0
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return 0.0
+        if value <= 0:
+            return 0.0
+        return value / 100.0 if value > 1.0 else value
+
+    def _kalshi_position_price(self, market: dict[str, Any], side: str) -> float:
+        yes_bid = self._normalise_kalshi_probability(market.get("yes_bid_dollars") or market.get("yes_bid"))
+        yes_ask = self._normalise_kalshi_probability(market.get("yes_ask_dollars") or market.get("yes_ask"))
+        no_bid = self._normalise_kalshi_probability(market.get("no_bid_dollars") or market.get("no_bid"))
+        no_ask = self._normalise_kalshi_probability(market.get("no_ask_dollars") or market.get("no_ask"))
+        last_price = self._normalise_kalshi_probability(market.get("last_price_dollars") or market.get("last_price"))
+
+        yes_mid = (yes_bid + yes_ask) / 2 if yes_bid > 0 and yes_ask > 0 else (yes_bid or yes_ask or last_price)
+        no_mid = (no_bid + no_ask) / 2 if no_bid > 0 and no_ask > 0 else (no_bid or no_ask)
+        if no_mid <= 0 and yes_mid > 0:
+            no_mid = max(0.0, min(1.0, 1.0 - yes_mid))
+        if yes_mid <= 0 and no_mid > 0:
+            yes_mid = max(0.0, min(1.0, 1.0 - no_mid))
+
+        side_price = no_mid if side == "no" else yes_mid
+        return max(0.0, min(1.0, side_price))
+
+    def _position_price_max_age_seconds(self, position: Position) -> float:
+        if not self.config.price_staleness.enabled:
+            return 0.0
+        if position.asset_type == "stock":
+            return self.config.price_staleness.stock_max_age_seconds
+        if position.asset_type == "crypto":
+            return self.config.price_staleness.crypto_max_age_seconds
+        if position.asset_type == "prediction":
+            return self.config.price_staleness.prediction_max_age_seconds
+        return 0.0
+
+    def _collect_stale_prices(
+        self,
+        state: PortfolioState,
+        *,
+        as_of: datetime,
+    ) -> tuple[list[dict[str, Any]], int]:
+        if not self.config.price_staleness.enabled:
+            return [], 0
+
+        as_of_ts = as_of.timestamp()
+        stale_entries: list[dict[str, Any]] = []
+        for symbol, position in state.positions.items():
+            max_age = self._position_price_max_age_seconds(position)
+            if max_age <= 0:
+                continue
+
+            last_ts = float(state.last_price_timestamps.get(symbol, 0.0) or 0.0)
+            is_missing = last_ts <= 0.0
+            age_seconds = max(0.0, as_of_ts - last_ts) if not is_missing else None
+            if is_missing or (age_seconds is not None and age_seconds > max_age):
+                stale_entries.append(
+                    {
+                        "symbol": symbol,
+                        "asset_type": position.asset_type,
+                        "strategy": position.strategy,
+                        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+                        "max_age_seconds": round(max_age, 1),
+                        "last_price_at": (
+                            datetime.fromtimestamp(last_ts, self.config.timezone).isoformat()
+                            if not is_missing else None
+                        ),
+                        "stale": True,
+                        "_sort_age": age_seconds if age_seconds is not None else float("inf"),
+                    }
+                )
+
+        stale_entries.sort(key=lambda item: item["_sort_age"], reverse=True)
+        total_count = len(stale_entries)
+        max_items = max(1, self.config.observability.max_stale_symbols_in_summary)
+        return [
+            {key: value for key, value in entry.items() if key != "_sort_age"}
+            for entry in stale_entries[:max_items]
+        ], total_count
 
     def refresh_open_positions(self, state: PortfolioState, *, now: datetime | None = None) -> None:
         stock_symbols = sorted(
@@ -330,9 +571,33 @@ class TradingBotService:
             except Exception as exc:
                 self.logger.warning("Unable to refresh crypto prices: %s", exc)
 
+        kalshi_prediction_prices: dict[str, float] = {}
+        kalshi_prediction_symbols = {
+            symbol: position
+            for symbol, position in state.positions.items()
+            if position.asset_type == "prediction" and position.meta.get("venue") == "kalshi"
+        }
+        if kalshi_prediction_symbols:
+            try:
+                for symbol, position in kalshi_prediction_symbols.items():
+                    ticker = str(position.meta.get("ticker", "")).strip()
+                    side = str(position.meta.get("side", "yes")).strip().lower()
+                    if not ticker:
+                        continue
+                    market = self.kalshi_client.get_market(ticker)
+                    price = self._kalshi_position_price(market, side)
+                    if price > 0:
+                        kalshi_prediction_prices[symbol] = price
+                if kalshi_prediction_prices:
+                    self.broker.mark_positions(state, kalshi_prediction_prices, now=now)
+            except Exception as exc:
+                self.logger.warning("Unable to refresh Kalshi prediction prices: %s", exc)
+
         # Refresh prediction market prices from CLOB
         prediction_symbols = sorted(
-            symbol for symbol, position in state.positions.items() if position.asset_type == "prediction"
+            symbol
+            for symbol, position in state.positions.items()
+            if position.asset_type == "prediction" and position.meta.get("venue") != "kalshi"
         )
         if prediction_symbols:
             try:
@@ -387,6 +652,20 @@ class TradingBotService:
             if state.cash >= self.config.initial_cash and self.config.initial_cash > 0:
                 self.logger.warning("Zeroing cash to prevent phantom balance in live mode.")
                 state.cash = 0.0
+
+    def _sync_kalshi_balance(self, state: PortfolioState) -> None:
+        """Sync live Kalshi buying power into a dedicated cash bucket."""
+        if not self.kalshi_client.can_trade:
+            return
+        try:
+            balance = self.kalshi_client.get_balance()
+            state.cash_reserves[self._KALSHI_CASH_BUCKET] = balance
+            self._kalshi_balance_cache = balance
+            self._kalshi_balance_cache_ts = time.monotonic()
+            self.logger.info("Kalshi balance synced: cash=$%.2f", balance)
+        except Exception as exc:
+            self.logger.warning("Failed to sync Kalshi balance: %s. Using cached balance.", exc)
+            state.cash_reserves.setdefault(self._KALSHI_CASH_BUCKET, 0.0)
 
     def _sync_kalshi_positions(self, state: PortfolioState) -> None:  # noqa: C901
         """Fetch live Kalshi positions and upsert them into PortfolioState.
@@ -463,6 +742,8 @@ class TradingBotService:
                             "ticker": ticker,
                             "side": side.lower(),
                             "source": "kalshi_sync",
+                            "venue": "kalshi",
+                            "cash_bucket": self._KALSHI_CASH_BUCKET,
                         },
                     )
                     synced += 1
@@ -517,6 +798,7 @@ class TradingBotService:
         post_risk: RiskSnapshot,
         modules: dict[str, Any],
     ) -> dict[str, Any]:
+        summary_time = datetime.now(self.config.timezone)
         equity = self.broker.portfolio_equity(state)
         positions = [
             {
@@ -531,6 +813,7 @@ class TradingBotService:
             }
             for position in state.positions.values()
         ]
+        stale_prices, stale_price_count = self._collect_stale_prices(state, as_of=summary_time)
 
         # Fetch Kalshi account balance with TTL cache to avoid network
         # calls on every run() / status() invocation.
@@ -558,12 +841,23 @@ class TradingBotService:
                 "multi_analyst_enabled": self.config.trading_agents.multi_analyst_enabled,
                 "selected_analysts": list(self.config.trading_agents.selected_analysts),
                 "confirmation_mode": self.config.trading_agents.confirmation_mode,
+                "tool_calling_enabled": self.config.trading_agents.tool_calling_enabled,
+                "streaming_enabled": self.config.trading_agents.streaming_enabled,
+                "extended_thinking_enabled": self.config.trading_agents.extended_thinking_enabled,
+                "prompt_guard_enabled": self.config.trading_agents.prompt_injection_protection_enabled,
+                "vision_enabled": self.config.trading_agents.vision_enabled,
+                "registered_tools": self.ai_service.get_registered_tools(),
+                "circuit_breaker": self.ai_service.get_circuit_breaker_status(),
             }
 
         return {
-            "timestamp": datetime.now(self.config.timezone).isoformat(),
+            "timestamp": summary_time.isoformat(),
             "paper_mode": self.config.paper_mode,
             "cash": round(state.cash, 2),
+            "cash_reserves": {
+                bucket: round(balance, 2)
+                for bucket, balance in state.cash_reserves.items()
+            },
             "equity": round(equity, 2),
             "realized_pnl": round(state.realized_pnl, 2),
             "open_positions": positions,
@@ -582,6 +876,9 @@ class TradingBotService:
             "last_polymarket_scan_date": state.last_polymarket_scan_date,
             "last_predictions_scan_date": state.last_predictions_scan_date,
             "modules": modules,
+            "latency_ms": self.latency_tracker.snapshot(),
+            "stale_prices": stale_prices,
+            "stale_price_count": stale_price_count,
             "pre_risk_equity": round(pre_risk.equity, 2),
             "post_risk_equity": round(post_risk.equity, 2),
             "kalshi_balance": kalshi_balance,
@@ -591,8 +888,15 @@ class TradingBotService:
         }
 
     def _run_module(self, name: str, callback: Any) -> dict[str, Any]:
+        started = time.perf_counter()
         try:
-            return callback()
+            result = callback()
         except Exception as exc:
             self.logger.error("%s module failed: %s", name, exc)
-            return {"status": "error", "error": str(exc)}
+            result = {"status": "error", "error": str(exc)}
+
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        self.latency_tracker.record(name, duration_ms)
+        if isinstance(result, dict):
+            result.setdefault("latency_ms", round(duration_ms, 2))
+        return result

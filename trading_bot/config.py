@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,6 +119,69 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class PriceStalenessConfig:
+    enabled: bool = False
+    stock_max_age_seconds: float = 900.0
+    crypto_max_age_seconds: float = 180.0
+    prediction_max_age_seconds: float = 300.0
+    latency_max_age_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
+class ObservabilityConfig:
+    trade_audit_enabled: bool = False
+    module_latency_window: int = 50
+    max_stale_symbols_in_summary: int = 10
+
+
+@dataclass(frozen=True)
+class HttpRetryConfig:
+    enabled: bool = False
+    max_attempts: int = 3
+    base_delay_seconds: float = 0.5
+    max_delay_seconds: float = 4.0
+    backoff_multiplier: float = 2.0
+
+
+@dataclass(frozen=True)
+class ModelPricing:
+    input_cost_per_m: float
+    output_cost_per_m: float
+
+
+def _default_model_pricing() -> dict[str, ModelPricing]:
+    return {
+        "claude-haiku-4-5-20251001": ModelPricing(input_cost_per_m=0.80, output_cost_per_m=4.00),
+        "claude-sonnet-4-6": ModelPricing(input_cost_per_m=3.00, output_cost_per_m=15.00),
+    }
+
+
+def _env_model_pricing(name: str, default: dict[str, ModelPricing]) -> dict[str, ModelPricing]:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return dict(default)
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return dict(default)
+    if not isinstance(payload, dict):
+        return dict(default)
+
+    parsed: dict[str, ModelPricing] = {}
+    for model_name, values in payload.items():
+        if not isinstance(model_name, str) or not isinstance(values, dict):
+            continue
+        try:
+            parsed[model_name.strip()] = ModelPricing(
+                input_cost_per_m=float(values["input_cost_per_m"]),
+                output_cost_per_m=float(values["output_cost_per_m"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return parsed or dict(default)
+
+
+@dataclass(frozen=True)
 class SchedulerConfig:
     crypto_interval_minutes: int = 10
     stock_check_hour: int = 9
@@ -136,7 +200,7 @@ class TradingAgentsConfig:
     confirmation_mode: str = "boost"    # boost=1.5x agree / 0.5x disagree
     cache_ttl_hours: int = 6            # 6h cache avoids re-calling same market
     max_cost_per_run: float = 0.10      # hard cap per single AI call
-    max_cost_per_month: float = 10.00   # hard monthly spend cap
+    max_cost_per_month: float = 25.00   # hard monthly spend cap
     max_debate_rounds: int = 1
     timeout_seconds: int = 30           # short timeout to avoid blocking trades
     # Multi-analyst personas (inspired by virattt/ai-hedge-fund)
@@ -144,6 +208,27 @@ class TradingAgentsConfig:
     selected_analysts: tuple[str, ...] = (
         "value_investor", "contrarian", "sentiment_analyst",
     )
+    prompt_injection_protection_enabled: bool = False
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_cooldown_seconds: int = 300
+    streaming_enabled: bool = False
+    tool_calling_enabled: bool = False
+    extended_thinking_enabled: bool = False
+    thinking_budget_tokens: int = 1024
+    thinking_display: str = "omitted"
+    vision_enabled: bool = False
+    boost_agree_multiplier: float = 1.5
+    boost_disagree_multiplier: float = 0.5
+    boost_min_confidence: float = 0.6
+    require_min_confidence: float = 0.5
+    analyst_buy_threshold: float = 0.2
+    analyst_sell_threshold: float = -0.2
+    default_input_cost_per_m: float = 3.0
+    default_output_cost_per_m: float = 15.0
+    estimated_input_tokens_per_call: int = 1500
+    estimated_output_tokens_per_call: int = 300
+    model_pricing: dict[str, ModelPricing] = field(default_factory=_default_model_pricing)
 
 
 @dataclass(frozen=True)
@@ -222,6 +307,7 @@ class LatencyArbConfig:
     stop_loss_pct: float = 0.15
     min_trade_usd: float = 1.0               # minimum position size in USD
     ai_confirmation_mode: str = "boost"      # boost | require | log_only
+    max_price_age_seconds: float = 15.0      # skip stale Coinbase feed prices
 
 
 @dataclass(frozen=True)
@@ -234,7 +320,11 @@ class AppConfig:
     data_dir: Path
     log_dir: Path
     state_path: Path
+    trade_audit_path: Path
     log_level: str
+    http_retry: HttpRetryConfig
+    price_staleness: PriceStalenessConfig
+    observability: ObservabilityConfig
     risk: RiskConfig
     stock: StockStrategyConfig
     crypto: CryptoStrategyConfig
@@ -257,6 +347,8 @@ class AppConfig:
         log_dir_env = os.getenv("BOT_LOG_DIR", "").strip()
         data_dir = Path(data_dir_env).expanduser() if data_dir_env else storage_root / "data"
         log_dir = Path(log_dir_env).expanduser() if log_dir_env else storage_root / "logs"
+        trade_audit_path_env = os.getenv("TRADE_AUDIT_PATH", "").strip()
+        trade_audit_path = Path(trade_audit_path_env).expanduser() if trade_audit_path_env else data_dir / "trade_audit.jsonl"
         return cls(
             paper_mode=_env_bool("PAPER_MODE", True),
             initial_cash=_env_float("INITIAL_CASH", 100_000.0),
@@ -266,7 +358,27 @@ class AppConfig:
             data_dir=data_dir,
             log_dir=log_dir,
             state_path=data_dir / "state.json",
+            trade_audit_path=trade_audit_path,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            http_retry=HttpRetryConfig(
+                enabled=_env_bool("HTTP_RETRY_ENABLED", False),
+                max_attempts=_env_int("HTTP_RETRY_MAX_ATTEMPTS", 3),
+                base_delay_seconds=_env_float("HTTP_RETRY_BASE_DELAY_SECONDS", 0.5),
+                max_delay_seconds=_env_float("HTTP_RETRY_MAX_DELAY_SECONDS", 4.0),
+                backoff_multiplier=_env_float("HTTP_RETRY_BACKOFF_MULTIPLIER", 2.0),
+            ),
+            price_staleness=PriceStalenessConfig(
+                enabled=_env_bool("PRICE_STALENESS_ENABLED", False),
+                stock_max_age_seconds=_env_float("PRICE_STALENESS_STOCK_MAX_AGE_SECONDS", 900.0),
+                crypto_max_age_seconds=_env_float("PRICE_STALENESS_CRYPTO_MAX_AGE_SECONDS", 180.0),
+                prediction_max_age_seconds=_env_float("PRICE_STALENESS_PREDICTION_MAX_AGE_SECONDS", 300.0),
+                latency_max_age_seconds=_env_float("PRICE_STALENESS_LATENCY_MAX_AGE_SECONDS", 15.0),
+            ),
+            observability=ObservabilityConfig(
+                trade_audit_enabled=_env_bool("OBS_TRADE_AUDIT_ENABLED", False),
+                module_latency_window=_env_int("OBS_MODULE_LATENCY_WINDOW", 50),
+                max_stale_symbols_in_summary=_env_int("OBS_MAX_STALE_SYMBOLS_IN_SUMMARY", 10),
+            ),
             risk=RiskConfig(
                 max_position_fraction=_env_float("MAX_POSITION_FRACTION", 0.02),
                 daily_halt_drawdown=_env_float("DAILY_HALT_DRAWDOWN", 0.05),
@@ -334,7 +446,7 @@ class AppConfig:
                 confirmation_mode=os.getenv("TRADING_AGENTS_CONFIRMATION_MODE", "boost").strip(),
                 cache_ttl_hours=_env_int("TRADING_AGENTS_CACHE_TTL_HOURS", 6),
                 max_cost_per_run=_env_float("TRADING_AGENTS_MAX_COST_PER_RUN", 0.10),
-                max_cost_per_month=_env_float("TRADING_AGENTS_MAX_COST_PER_MONTH", 10.00),
+                max_cost_per_month=_env_float("TRADING_AGENTS_MAX_COST_PER_MONTH", 25.00),
                 max_debate_rounds=_env_int("TRADING_AGENTS_MAX_DEBATE_ROUNDS", 1),
                 timeout_seconds=_env_int("TRADING_AGENTS_TIMEOUT_SECONDS", 30),
                 multi_analyst_enabled=_env_bool("TRADING_AGENTS_MULTI_ANALYST", False),
@@ -344,6 +456,27 @@ class AppConfig:
                         ["value_investor", "contrarian", "sentiment_analyst"],
                     )
                 ),
+                prompt_injection_protection_enabled=_env_bool("TRADING_AGENTS_PROMPT_GUARD_ENABLED", False),
+                circuit_breaker_enabled=_env_bool("TRADING_AGENTS_CIRCUIT_BREAKER_ENABLED", False),
+                circuit_breaker_failure_threshold=_env_int("TRADING_AGENTS_CIRCUIT_BREAKER_FAILURE_THRESHOLD", 3),
+                circuit_breaker_cooldown_seconds=_env_int("TRADING_AGENTS_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 300),
+                streaming_enabled=_env_bool("TRADING_AGENTS_STREAMING_ENABLED", False),
+                tool_calling_enabled=_env_bool("TRADING_AGENTS_TOOL_CALLING_ENABLED", False),
+                extended_thinking_enabled=_env_bool("TRADING_AGENTS_EXTENDED_THINKING_ENABLED", False),
+                thinking_budget_tokens=_env_int("TRADING_AGENTS_THINKING_BUDGET_TOKENS", 1024),
+                thinking_display=os.getenv("TRADING_AGENTS_THINKING_DISPLAY", "omitted").strip().lower(),
+                vision_enabled=_env_bool("TRADING_AGENTS_VISION_ENABLED", False),
+                boost_agree_multiplier=_env_float("TRADING_AGENTS_BOOST_AGREE_MULTIPLIER", 1.5),
+                boost_disagree_multiplier=_env_float("TRADING_AGENTS_BOOST_DISAGREE_MULTIPLIER", 0.5),
+                boost_min_confidence=_env_float("TRADING_AGENTS_BOOST_MIN_CONFIDENCE", 0.6),
+                require_min_confidence=_env_float("TRADING_AGENTS_REQUIRE_MIN_CONFIDENCE", 0.5),
+                analyst_buy_threshold=_env_float("TRADING_AGENTS_ANALYST_BUY_THRESHOLD", 0.2),
+                analyst_sell_threshold=_env_float("TRADING_AGENTS_ANALYST_SELL_THRESHOLD", -0.2),
+                default_input_cost_per_m=_env_float("TRADING_AGENTS_DEFAULT_INPUT_COST_PER_M", 3.0),
+                default_output_cost_per_m=_env_float("TRADING_AGENTS_DEFAULT_OUTPUT_COST_PER_M", 15.0),
+                estimated_input_tokens_per_call=_env_int("TRADING_AGENTS_ESTIMATED_INPUT_TOKENS_PER_CALL", 1500),
+                estimated_output_tokens_per_call=_env_int("TRADING_AGENTS_ESTIMATED_OUTPUT_TOKENS_PER_CALL", 300),
+                model_pricing=_env_model_pricing("TRADING_AGENTS_MODEL_PRICING_JSON", _default_model_pricing()),
             ),
             altcoin_rotation=AltcoinRotationConfig(
                 enabled=_env_bool("ROTATION_ENABLED", True),
@@ -390,6 +523,7 @@ class AppConfig:
                 stop_loss_pct=_env_float("LATENCY_ARB_STOP_LOSS", 0.15),
                 min_trade_usd=_env_float("LATENCY_ARB_MIN_TRADE_USD", 1.0),
                 ai_confirmation_mode=os.getenv("LATENCY_ARB_AI_CONFIRMATION", "boost").strip().lower(),
+                max_price_age_seconds=_env_float("LATENCY_ARB_MAX_PRICE_AGE_SECONDS", 15.0),
             ),
             volatility=VolatilityConfig(
                 enabled=_env_bool("VOL_TARGETING_ENABLED", False),

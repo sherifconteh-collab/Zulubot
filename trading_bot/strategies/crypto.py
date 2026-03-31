@@ -149,7 +149,11 @@ class CryptoSentimentFundingStrategy:
                             price=execution_prices[symbol],
                         )
                         notional, ai_meta = apply_ai_confirmation(
-                            verdict, self.confirmation_mode, notional, self.logger,
+                            verdict,
+                            self.confirmation_mode,
+                            notional,
+                            self.logger,
+                            config=getattr(self.ai_service, "config", None),
                         )
                         if notional <= 0:
                             self.logger.info("AI rejected crypto buy for %s.", symbol)

@@ -20,6 +20,9 @@ from typing import Any
 
 import requests
 
+from trading_bot.clients import request_with_retry
+from trading_bot.config import HttpRetryConfig
+
 try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -41,11 +44,13 @@ class KalshiClient:
         private_key_pem: str = "",
         timeout_seconds: int = 15,
         logger: logging.Logger,
+        retry_config: HttpRetryConfig | None = None,
     ) -> None:
         self.key_id = key_id
         self.private_key = None
         self.timeout = timeout_seconds
         self.logger = logger.getChild("kalshi")
+        self.retry_config = retry_config or HttpRetryConfig()
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
 
@@ -100,7 +105,16 @@ class KalshiClient:
         # Sign with full URL path (e.g., /trade-api/v2/portfolio/balance)
         full_path = f"/trade-api/v2{path}"
         headers = self._auth_headers("GET", full_path) if (auth and self.can_trade) else {}
-        resp = self.session.get(url, headers=headers, params=params, timeout=self.timeout)
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            url,
+            headers=headers,
+            params=params,
+            timeout_seconds=self.timeout,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -111,7 +125,16 @@ class KalshiClient:
         url = f"{self.BASE_URL}{path}"
         full_path = f"/trade-api/v2{path}"
         headers = self._auth_headers("POST", full_path)
-        resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
+        resp = request_with_retry(
+            self.session,
+            "POST",
+            url,
+            headers=headers,
+            json=payload,
+            timeout_seconds=self.timeout,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
         resp.raise_for_status()
         return resp.json()
 

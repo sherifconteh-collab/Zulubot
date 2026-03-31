@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from trading_bot.models import PortfolioState, Position
@@ -21,6 +22,7 @@ class PaperBroker:
         self.logger = logger.getChild("broker")
         self._max_price_history_days = max_price_history_days
         self._on_close: Callable[[PortfolioState, float, float], None] | None = None
+        self._on_trade: Callable[[dict[str, Any]], None] | None = None
 
     def set_on_close(
         self,
@@ -34,6 +36,10 @@ class PaperBroker:
         """
         self._on_close = callback
 
+    def set_on_trade(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Register a callback invoked after each open/close bookkeeping event."""
+        self._on_trade = callback
+
     def mark_positions(
         self,
         state: PortfolioState,
@@ -43,13 +49,12 @@ class PaperBroker:
     ) -> None:
         today = now.date().isoformat() if now is not None else date.today().isoformat()
         record_today = state.last_price_record_date != today
+        price_ts = now.timestamp() if now is not None else time.time()
 
         for symbol, price in prices.items():
             if price <= 0:
                 continue
-            state.last_prices[symbol] = price
-            if symbol in state.positions:
-                state.positions[symbol].current_price = price
+            self._record_price(state, symbol, price, timestamp=price_ts)
             if record_today:
                 VolatilityEngine.record_price(
                     symbol, price, state.price_history, self._max_price_history_days
@@ -59,11 +64,28 @@ class PaperBroker:
             state.last_price_record_date = today
 
     def portfolio_equity(self, state: PortfolioState) -> float:
+        return self.portfolio_equity_for_bucket(state)
+
+    def portfolio_equity_for_bucket(
+        self,
+        state: PortfolioState,
+        *,
+        cash_bucket: str | None = None,
+    ) -> float:
+        if cash_bucket is None:
+            total_cash = state.cash + sum(float(value) for value in state.cash_reserves.values())
+        else:
+            total_cash = self.get_cash_balance(state, cash_bucket=cash_bucket)
         market_value = 0.0
-        for position in state.positions.values():
+        for position in self._iter_bucket_positions(state, cash_bucket=cash_bucket):
             last_price = state.last_prices.get(position.symbol, position.current_price or position.entry_price)
             market_value += position.quantity * last_price
-        return state.cash + market_value
+        return total_cash + market_value
+
+    def get_cash_balance(self, state: PortfolioState, *, cash_bucket: str | None = None) -> float:
+        if cash_bucket is None or cash_bucket == "":
+            return state.cash
+        return float(state.cash_reserves.get(cash_bucket, 0.0))
 
     def open_position(
         self,
@@ -76,6 +98,7 @@ class PaperBroker:
         notional: float,
         opened_at: datetime,
         meta: dict[str, Any] | None = None,
+        cash_bucket: str | None = None,
     ) -> Position | None:
         self._ensure_paper_mode()
         if symbol in state.positions:
@@ -85,7 +108,7 @@ class PaperBroker:
             self.logger.warning("Skipping buy for %s because price or notional is invalid.", symbol)
             return None
 
-        spendable = min(notional, state.cash)
+        spendable = min(notional, self.get_cash_balance(state, cash_bucket=cash_bucket))
         precision = 6 if asset_type == "crypto" else 4
         quantity = self._round_down(spendable / price, precision)
         if quantity <= 0:
@@ -93,7 +116,10 @@ class PaperBroker:
             return None
 
         actual_notional = quantity * price
-        state.cash -= actual_notional
+        self._adjust_cash_balance(state, -actual_notional, cash_bucket=cash_bucket)
+        position_meta = dict(meta or {})
+        if cash_bucket:
+            position_meta.setdefault("cash_bucket", cash_bucket)
         position = Position(
             symbol=symbol,
             asset_type=asset_type,
@@ -102,10 +128,10 @@ class PaperBroker:
             entry_price=price,
             current_price=price,
             opened_at=opened_at.isoformat(),
-            meta=meta or {},
+            meta=position_meta,
         )
         state.positions[symbol] = position
-        state.last_prices[symbol] = price
+        self._record_price(state, symbol, price, timestamp=opened_at.timestamp())
         self.logger.info(
             "OPEN %s asset=%s strategy=%s qty=%.6f price=%.4f notional=%.2f meta=%s",
             symbol,
@@ -116,6 +142,20 @@ class PaperBroker:
             actual_notional,
             json.dumps(meta or {}, sort_keys=True),
         )
+        self._emit_trade_event(
+            {
+                "timestamp": opened_at.isoformat(),
+                "event": "open",
+                "symbol": symbol,
+                "asset_type": asset_type,
+                "strategy": strategy,
+                "quantity": quantity,
+                "price": price,
+                "notional": actual_notional,
+                "cash_bucket": cash_bucket,
+                "meta": position_meta,
+            }
+        )
         return position
 
     def close_position(
@@ -125,6 +165,7 @@ class PaperBroker:
         symbol: str,
         price: float | None = None,
         reason: str,
+        cash_bucket: str | None = None,
     ) -> Position | None:
         self._ensure_paper_mode()
         position = state.positions.get(symbol)
@@ -136,9 +177,10 @@ class PaperBroker:
         entry_price = position.entry_price
         proceeds = position.quantity * close_price
         realized_pnl = (close_price - entry_price) * position.quantity
-        state.cash += proceeds
+        resolved_cash_bucket = cash_bucket if cash_bucket is not None else self._position_cash_bucket(position)
+        self._adjust_cash_balance(state, proceeds, cash_bucket=resolved_cash_bucket)
         state.realized_pnl += realized_pnl
-        state.last_prices[symbol] = close_price
+        self._record_price(state, symbol, close_price)
         del state.positions[symbol]
         self.logger.info(
             "CLOSE %s qty=%.6f price=%.4f proceeds=%.2f realized_pnl=%.2f reason=%s",
@@ -148,6 +190,23 @@ class PaperBroker:
             proceeds,
             realized_pnl,
             reason,
+        )
+        self._emit_trade_event(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "close",
+                "symbol": symbol,
+                "asset_type": position.asset_type,
+                "strategy": position.strategy,
+                "quantity": position.quantity,
+                "price": close_price,
+                "notional": proceeds,
+                "cash_bucket": resolved_cash_bucket,
+                "realized_pnl": realized_pnl,
+                "reason": reason,
+                "entry_price": entry_price,
+                "meta": dict(position.meta),
+            }
         )
         if self._on_close is not None:
             self._on_close(state, entry_price, close_price)
@@ -171,4 +230,56 @@ class PaperBroker:
     def _round_down(value: float, precision: int) -> float:
         factor = 10**precision
         return math.floor(value * factor) / factor
+
+    @staticmethod
+    def _position_cash_bucket(position: Position) -> str | None:
+        raw_value = position.meta.get("cash_bucket")
+        if isinstance(raw_value, str) and raw_value:
+            return raw_value
+        return None
+
+    def _adjust_cash_balance(
+        self,
+        state: PortfolioState,
+        amount: float,
+        *,
+        cash_bucket: str | None = None,
+    ) -> None:
+        if cash_bucket is None or cash_bucket == "":
+            state.cash += amount
+            return
+        current = float(state.cash_reserves.get(cash_bucket, 0.0))
+        state.cash_reserves[cash_bucket] = current + amount
+
+    def _iter_bucket_positions(
+        self,
+        state: PortfolioState,
+        *,
+        cash_bucket: str | None = None,
+    ) -> list[Position]:
+        if cash_bucket is None:
+            return list(state.positions.values())
+        return [
+            position
+            for position in state.positions.values()
+            if self._position_cash_bucket(position) == cash_bucket
+        ]
+
+    @staticmethod
+    def _record_price(
+        state: PortfolioState,
+        symbol: str,
+        price: float,
+        *,
+        timestamp: float | None = None,
+    ) -> None:
+        state.last_prices[symbol] = price
+        state.last_price_timestamps[symbol] = time.time() if timestamp is None else timestamp
+        if symbol in state.positions:
+            state.positions[symbol].current_price = price
+
+    def _emit_trade_event(self, payload: dict[str, Any]) -> None:
+        if self._on_trade is None:
+            return
+        self._on_trade(payload)
 

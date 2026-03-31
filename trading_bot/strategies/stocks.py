@@ -174,7 +174,11 @@ class StockValueStrategy:
                         market_signals=market_signals,
                     )
                     notional, ai_meta = apply_ai_confirmation(
-                        verdict, self.confirmation_mode, notional, self.logger,
+                        verdict,
+                        self.confirmation_mode,
+                        notional,
+                        self.logger,
+                        config=getattr(self.ai_service, "config", None),
                     )
                     if notional <= 0:
                         self.logger.info("AI rejected stock buy for %s.", fundamentals.symbol)

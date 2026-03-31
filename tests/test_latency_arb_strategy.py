@@ -34,10 +34,12 @@ class FakePriceFeed:
         prices: dict[str, float] | None = None,
         momentum: dict[str, float] | None = None,
         ready: bool = True,
+        stale: bool = False,
     ) -> None:
         self._prices = prices or {}
         self._momentum = momentum or {}
         self._ready = ready
+        self._stale = stale
 
     def record_current_prices(self) -> dict[str, float]:
         return self._prices
@@ -51,18 +53,26 @@ class FakePriceFeed:
     def is_ready(self, symbol: str, min_history_seconds: float = 30.0) -> bool:
         return self._ready
 
+    def is_stale(self, symbol: str, max_age_seconds: float) -> bool:
+        return self._stale
+
 
 class FakeKalshiClient:
     """Minimal KalshiClient stub that does nothing live."""
 
     def __init__(self, *, can_trade: bool = False) -> None:
         self.can_trade = can_trade
+        self.orders: list[dict[str, object]] = []
 
     def get_markets(self, **kwargs):  # noqa: ANN001
         return [], None
 
     def get_orderbook(self, ticker: str) -> dict:
         return {}
+
+    def place_order(self, **kwargs):  # noqa: ANN001
+        self.orders.append(kwargs)
+        return {"order": {"order_id": "test-order-id"}}
 
 
 def _make_state(cash: float = 10_000.0) -> PortfolioState:
@@ -98,6 +108,7 @@ def _make_strategy(
     feed: FakePriceFeed | None = None,
     kalshi: FakeKalshiClient | None = None,
     ai_service=None,
+    live_trading_enabled: bool = False,
 ) -> LatencyArbStrategy:
     logger = logging.getLogger("test_latency_arb")
     broker = PaperBroker(True, logger)
@@ -108,6 +119,7 @@ def _make_strategy(
         paper_broker=broker,
         logger=logger,
         ai_service=ai_service,
+        live_trading_enabled=live_trading_enabled,
     )
 
 
@@ -229,6 +241,26 @@ class LatencyArbSignalTests(unittest.TestCase):
         )
 
         self.assertEqual(result["signals_detected"], 0)
+
+    def test_stale_feed_skips_symbol(self) -> None:
+        feed = FakePriceFeed(
+            prices={"BTC-USD": 70_000.0},
+            momentum={"BTC-USD": 1.0},
+            ready=True,
+            stale=True,
+        )
+        strategy = _make_strategy(config=_make_config(symbols=["BTC-USD"]), feed=feed)
+        state = _make_state()
+
+        result = strategy.run_once(
+            state,
+            broker=PaperBroker(True, self.logger),
+            risk_manager=RiskManager(RiskConfig()),
+            now=self.now,
+        )
+
+        self.assertEqual(result["signals_detected"], 0)
+        self.assertEqual(result["stale_symbols"], ["BTC-USD"])
 
     def test_halted_state_skips_entries(self) -> None:
         feed = FakePriceFeed(prices={"BTC-USD": 70_000.0}, momentum={"BTC-USD": 1.0})
@@ -384,6 +416,69 @@ class ExitLogicTests(unittest.TestCase):
 
         self.assertEqual(result["sells"], [])
         self.assertIn(symbol, state.positions)
+
+
+class LiveKalshiAccountTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.logger = logging.getLogger("test_live_kalshi_account")
+        self.now = datetime(2026, 3, 31, 12, 0, tzinfo=ZoneInfo("UTC"))
+        self.broker = PaperBroker(True, self.logger)
+
+    def _open_position(self, state: PortfolioState, symbol: str, price: float) -> None:
+        self.broker.open_position(
+            state,
+            symbol=symbol,
+            asset_type="prediction",
+            strategy="latency_arb",
+            price=price,
+            notional=price * 10,
+            opened_at=self.now,
+            meta={"ticker": symbol.split(":")[1], "side": "yes"},
+        )
+
+    def test_execute_trade_uses_kalshi_cash_bucket(self) -> None:
+        kalshi = FakeKalshiClient(can_trade=True)
+        strategy = _make_strategy(kalshi=kalshi, live_trading_enabled=True)
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        market = {"ticker": "KXBTC-26APR0117", "title": "Will BTC be higher?"}
+
+        entered = strategy._execute_trade(
+            state=state,
+            market=market,
+            spot_symbol="BTC-USD",
+            side="yes",
+            ask_price=0.50,
+            notional=20.0,
+            momentum_pct=0.80,
+            now=self.now,
+        )
+
+        self.assertTrue(entered)
+        self.assertEqual(state.cash, 0.0)
+        self.assertLess(state.cash_reserves["kalshi"], 100.0)
+        self.assertIn("KL:KXBTC-26APR0117:YES", state.positions)
+        self.assertEqual(state.positions["KL:KXBTC-26APR0117:YES"].meta.get("cash_bucket"), "kalshi")
+        self.assertEqual(len(kalshi.orders), 1)
+
+    def test_credentials_alone_do_not_submit_live_order(self) -> None:
+        kalshi = FakeKalshiClient(can_trade=True)
+        strategy = _make_strategy(kalshi=kalshi, live_trading_enabled=False)
+        state = _make_state(100.0)
+        market = {"ticker": "KXBTC-26APR0117", "title": "Will BTC be higher?"}
+
+        entered = strategy._execute_trade(
+            state=state,
+            market=market,
+            spot_symbol="BTC-USD",
+            side="yes",
+            ask_price=0.50,
+            notional=20.0,
+            momentum_pct=0.80,
+            now=self.now,
+        )
+
+        self.assertTrue(entered)
+        self.assertEqual(len(kalshi.orders), 0)
 
     def test_ai_veto_blocks_exit_when_confident(self) -> None:
         """AI returning hold with high confidence should prevent the exit."""

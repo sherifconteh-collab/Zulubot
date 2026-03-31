@@ -48,12 +48,28 @@ def _make_market(
 class FakeKalshiClient:
     """Minimal Kalshi client stub for unit tests."""
 
-    def __init__(self, markets: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        markets: list[dict[str, Any]] | None = None,
+        *,
+        can_trade: bool = False,
+    ) -> None:
         self._markets = markets or []
-        self.can_trade = False
+        self.can_trade = can_trade
+        self.orders: list[dict[str, Any]] = []
 
     def get_markets(self, **kwargs: Any) -> tuple[list[dict[str, Any]], None]:
         return self._markets, None
+
+    def get_market(self, ticker: str) -> dict[str, Any]:
+        for market in self._markets:
+            if market.get("ticker") == ticker:
+                return market
+        raise KeyError(ticker)
+
+    def place_order(self, **kwargs: Any) -> dict[str, Any]:
+        self.orders.append(kwargs)
+        return {"order": kwargs}
 
 
 class CoinbasePredictionStrategyTests(unittest.TestCase):
@@ -76,13 +92,18 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
         )
 
     def _make_strategy(
-        self, markets: list[dict[str, Any]] | None = None
+        self,
+        markets: list[dict[str, Any]] | None = None,
+        *,
+        can_trade: bool = False,
+        live_trading_enabled: bool = False,
     ) -> CoinbasePredictionStrategy:
-        kalshi = FakeKalshiClient(markets)
+        kalshi = FakeKalshiClient(markets, can_trade=can_trade)
         return CoinbasePredictionStrategy(
             config=self.config,
             kalshi_client=kalshi,  # type: ignore[arg-type]
             logger=self.logger,
+            live_trading_enabled=live_trading_enabled,
         )
 
     # ------------------------------------------------------------------
@@ -281,6 +302,94 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
         )
         result = strategy_wider._evaluate_signal(market, mid=0.29, fear_greed_value=None)
         self.assertEqual(result, ("yes", 0.50))
+
+    def test_live_trading_uses_kalshi_cash_bucket(self) -> None:
+        market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=10_000.0)
+        kalshi = FakeKalshiClient([market], can_trade=True)
+        strategy = CoinbasePredictionStrategy(
+            config=self.config,
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+            live_trading_enabled=True,
+        )
+        state = PortfolioState(
+            cash=0.0,
+            cash_reserves={"kalshi": 50.0},
+            daily_baseline_equity=50.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=50.0,
+        )
+
+        result = strategy.run(
+            state,
+            broker=self.paper_broker,
+            risk_manager=self.risk_manager,
+            now=self.now,
+        )
+
+        self.assertEqual(len(result["buys"]), 1)
+        symbol = result["buys"][0]
+        self.assertEqual(state.cash, 0.0)
+        self.assertLess(state.cash_reserves["kalshi"], 50.0)
+        self.assertEqual(state.positions[symbol].meta.get("cash_bucket"), "kalshi")
+        self.assertEqual(state.positions[symbol].meta.get("venue"), "kalshi")
+        self.assertEqual(len(kalshi.orders), 1)
+
+    def test_credentials_do_not_trigger_live_order_in_paper_mode(self) -> None:
+        market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=10_000.0)
+        kalshi = FakeKalshiClient([market], can_trade=True)
+        strategy = CoinbasePredictionStrategy(
+            config=self.config,
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+            live_trading_enabled=False,
+        )
+        state = self._make_state()
+
+        result = strategy.run(
+            state,
+            broker=self.paper_broker,
+            risk_manager=self.risk_manager,
+            now=self.now,
+        )
+
+        self.assertEqual(len(result["buys"]), 1)
+        self.assertEqual(result["can_trade"], False)
+        self.assertEqual(kalshi.orders, [])
+
+    def test_manage_existing_positions_values_no_side_with_no_market_price(self) -> None:
+        market = _make_market(
+            ticker="KXBTC-NO",
+            yes_ask=0.30,
+            yes_bid=0.28,
+            no_ask=0.72,
+            no_bid=0.70,
+            volume=10_000.0,
+        )
+        kalshi = FakeKalshiClient([market])
+        strategy = CoinbasePredictionStrategy(
+            config=self.config,
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        state = self._make_state()
+        symbol = "KX:KXBTC-NO:no"
+        self.paper_broker.open_position(
+            state,
+            symbol=symbol,
+            asset_type="prediction",
+            strategy="coinbase_predictions",
+            price=0.72,
+            notional=7.2,
+            opened_at=self.now,
+            meta={"ticker": "KXBTC-NO", "side": "no"},
+        )
+
+        result = {"sells": []}
+        strategy._manage_existing_positions(state, self.paper_broker, result)
+
+        self.assertIn(symbol, state.positions)
+        self.assertAlmostEqual(state.positions[symbol].current_price, 0.71, places=2)
 
 
 if __name__ == "__main__":

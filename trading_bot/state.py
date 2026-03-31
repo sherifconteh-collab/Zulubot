@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -19,8 +20,11 @@ class StateStore:
             now = datetime.now(self.timezone)
             return PortfolioState(
                 cash=self.initial_cash,
+                cash_reserves={},
+                ai_monthly_usage={},
                 positions={},
                 last_prices={},
+                last_price_timestamps={},
                 daily_baseline_equity=self.initial_cash,
                 daily_baseline_date=now.date().isoformat(),
                 peak_equity=self.initial_cash,
@@ -43,8 +47,17 @@ class StateStore:
         }
         return PortfolioState(
             cash=float(payload["cash"]),
+            cash_reserves={
+                bucket: float(value)
+                for bucket, value in payload.get("cash_reserves", {}).items()
+            },
+            ai_monthly_usage=payload.get("ai_monthly_usage", {}),
             positions=positions,
             last_prices={symbol: float(price) for symbol, price in payload.get("last_prices", {}).items()},
+            last_price_timestamps={
+                symbol: float(ts)
+                for symbol, ts in payload.get("last_price_timestamps", {}).items()
+            },
             daily_baseline_equity=float(payload.get("daily_baseline_equity", self.initial_cash)),
             daily_baseline_date=payload.get("daily_baseline_date", ""),
             peak_equity=float(payload.get("peak_equity", self.initial_cash)),
@@ -67,5 +80,11 @@ class StateStore:
 
     def save(self, state: PortfolioState) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        temp_path = self.state_path.with_name(f"{self.state_path.name}.tmp")
+        payload = json.dumps(state.to_dict(), indent=2, sort_keys=True)
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, self.state_path)
 

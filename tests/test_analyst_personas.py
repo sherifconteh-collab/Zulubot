@@ -186,6 +186,16 @@ class AggregateSignalsTests(unittest.TestCase):
         self.assertEqual(result["action"], "sell")
         self.assertGreater(result["confidence"], 0.5)
 
+    def test_thresholds_can_be_overridden(self) -> None:
+        signals = [
+            AnalystSignal("a", "bullish", 0.3, "Weak buy"),
+            AnalystSignal("b", "neutral", 1.0, "Wait"),
+        ]
+
+        result = aggregate_analyst_signals(signals, buy_threshold=0.25, sell_threshold=-0.25)
+
+        self.assertEqual(result["action"], "hold")
+
 
 # ── Multi-analyst evaluation integration tests ─────────────────────
 
