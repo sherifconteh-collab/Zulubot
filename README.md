@@ -395,12 +395,14 @@ graph LR
 | `/status` | Portfolio dashboard (equity, P&L, Kalshi balance, positions) |
 | `/positions` | Open positions grouped by asset type |
 | `/risk` | Risk metrics (drawdown, kill switch state) |
+| `/latency` | Show recent per-module latency stats |
 | `/history` | Recent trade log |
+| `/audit [count]` | Tail the persistent trade audit log (1-10 entries) |
 | `/crypto` | Force a crypto sentiment cycle |
 | `/rotation` | Force an altcoin rotation cycle |
 | `/predict` | Force a Kalshi prediction scan |
 | `/stocks` | Force a stock screen |
-| `/polymarket` | Force a Kalshi prediction scan (alias) |
+| `/polymarket` | Force a Polymarket scan |
 | `/backtest [range]` | Run a Freqtrade backtest |
 | `/pause` | Pause trading |
 | `/resume` | Resume trading |
@@ -414,6 +416,7 @@ graph LR
 - **No-signal cycles** (no trades, no errors) are suppressed to reduce spam.
 - **Risk events** (kill switch, daily halt) always surface even when there are no trades.
 - **Interactive commands** always return a completion message (including "no trades executed" when applicable).
+- **Trade alerts** and **heartbeat** include stale-price warnings and recent module latency when available.
 - **Heartbeat** shows equity, Kalshi balance, positions grouped by type, AI analyst status, and last scan dates.
 
 ---
@@ -425,15 +428,34 @@ graph LR
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `LATENCY_ARB_ENABLED` | `false` | Enable the strategy |
+| `LATENCY_ARB_SYMBOLS` | `BTC-USD,ETH-USD` | Coinbase spot symbols tracked for momentum |
+| `LATENCY_ARB_MOMENTUM_WINDOW` | `30.0` | Seconds of spot history used for move detection |
 | `LATENCY_ARB_MOMENTUM_THRESHOLD` | `0.30` | Min % spot move to trigger signal |
 | `LATENCY_ARB_MIN_EDGE` | `0.05` | Min probability edge to enter |
 | `LATENCY_ARB_KELLY_FRACTION` | `0.25` | Fraction of full Kelly to bet |
 | `LATENCY_ARB_MAX_POSITION_PCT` | `0.08` | Max 8% of equity per trade |
 | `LATENCY_ARB_MAX_OPEN_CONTRACTS` | `4` | Max simultaneous open positions |
 | `LATENCY_ARB_SCAN_INTERVAL` | `2.0` | Seconds between scans |
+| `LATENCY_ARB_PRICE_HISTORY` | `120.0` | Seconds of tick history kept in memory |
 | `LATENCY_ARB_TAKE_PROFIT` | `0.20` | Exit at +20% price gain |
 | `LATENCY_ARB_STOP_LOSS` | `0.15` | Exit at -15% price loss |
+| `LATENCY_ARB_MIN_TRADE_USD` | `1.0` | Minimum position size |
 | `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode |
+| `LATENCY_ARB_MAX_PRICE_AGE_SECONDS` | `15.0` | Skip stale Coinbase prices before signaling |
+
+### Observability & Freshness
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `PRICE_STALENESS_ENABLED` | `false` | Annotate stale prices in summaries and Telegram alerts |
+| `PRICE_STALENESS_STOCK_MAX_AGE_SECONDS` | `900.0` | Max allowed age for stock marks |
+| `PRICE_STALENESS_CRYPTO_MAX_AGE_SECONDS` | `180.0` | Max allowed age for crypto marks |
+| `PRICE_STALENESS_PREDICTION_MAX_AGE_SECONDS` | `300.0` | Max allowed age for Kalshi/Polymarket marks |
+| `PRICE_STALENESS_LATENCY_MAX_AGE_SECONDS` | `15.0` | Max allowed age for latency-arb feed marks |
+| `OBS_TRADE_AUDIT_ENABLED` | `false` | Persist trade opens/closes to a JSONL audit log |
+| `OBS_MODULE_LATENCY_WINDOW` | `50` | Number of module runs kept for latency stats |
+| `OBS_MAX_STALE_SYMBOLS_IN_SUMMARY` | `10` | Cap stale-symbol list size in status summaries |
+| `TRADE_AUDIT_PATH` | `data/trade_audit.jsonl` | Override the audit log file location |
 
 ### Volatility Targeting
 
@@ -456,19 +478,42 @@ graph LR
 | `TRADING_AGENTS_ENABLED` | `false` | Enable AI analysis across all strategies |
 | `ANTHROPIC_API_KEY` | | Anthropic API key (`sk-ant-...`) |
 | `TRADING_AGENTS_CONFIRMATION_MODE` | `boost` | `boost`, `require`, or `log_only` |
-| `TRADING_AGENTS_MAX_COST_PER_MONTH` | `10.00` | Hard monthly spend cap in USD |
+| `TRADING_AGENTS_MAX_COST_PER_RUN` | `0.10` | Hard cap for a single AI request |
+| `TRADING_AGENTS_MAX_COST_PER_MONTH` | `25.00` | Hard monthly spend cap in USD |
+| `TRADING_AGENTS_CACHE_TTL_HOURS` | `6` | Cache window for repeated market evaluations |
+| `TRADING_AGENTS_TIMEOUT_SECONDS` | `30` | Per-request timeout |
 | `TRADING_AGENTS_MULTI_ANALYST` | `false` | Enable multi-analyst persona mode |
 | `TRADING_AGENTS_ANALYSTS` | `value_investor,contrarian,sentiment_analyst` | Comma-separated persona keys |
+| `TRADING_AGENTS_PROMPT_GUARD_ENABLED` | `false` | Strip and bound untrusted market text before prompting |
+| `TRADING_AGENTS_CIRCUIT_BREAKER_ENABLED` | `false` | Temporarily pause AI calls after repeated failures |
+| `TRADING_AGENTS_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before opening the breaker |
+| `TRADING_AGENTS_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Cooldown before AI calls resume |
+| `TRADING_AGENTS_STREAMING_ENABLED` | `false` | Use Anthropic streaming when the client supports it |
+| `TRADING_AGENTS_TOOL_CALLING_ENABLED` | `false` | Allow registered local tools to participate in analysis |
+| `TRADING_AGENTS_EXTENDED_THINKING_ENABLED` | `false` | Request Anthropic extended thinking blocks |
+| `TRADING_AGENTS_THINKING_BUDGET_TOKENS` | `1024` | Token budget for extended thinking |
+| `TRADING_AGENTS_THINKING_DISPLAY` | `omitted` | Thinking visibility mode sent to Anthropic |
+| `TRADING_AGENTS_VISION_ENABLED` | `false` | Allow image URL inputs during market analysis |
+| `TRADING_AGENTS_BOOST_AGREE_MULTIPLIER` | `1.50` | Position-size multiplier when AI agrees with a buy |
+| `TRADING_AGENTS_BOOST_DISAGREE_MULTIPLIER` | `0.50` | Position-size multiplier when AI rejects a trade in boost mode |
+| `TRADING_AGENTS_BOOST_MIN_CONFIDENCE` | `0.60` | Minimum confidence required before boost-mode size increases |
+| `TRADING_AGENTS_REQUIRE_MIN_CONFIDENCE` | `0.50` | Minimum confidence required before require-mode allows a trade |
+| `TRADING_AGENTS_ANALYST_BUY_THRESHOLD` | `0.20` | Consensus score above which multi-analyst mode emits `buy` |
+| `TRADING_AGENTS_ANALYST_SELL_THRESHOLD` | `-0.20` | Consensus score below which multi-analyst mode emits `sell` |
+| `TRADING_AGENTS_MODEL_PRICING_JSON` | built-in defaults | Override per-model input/output token pricing as JSON |
 
 Available analyst personas: `value_investor`, `growth_investor`, `contrarian`, `technical_analyst`, `sentiment_analyst`, `risk_analyst`
 
 Cost tracking uses **actual token counts** from the Anthropic response for precise monthly budget management.
+
+Streaming, tool use, extended thinking, and vision are all opt-in. They only activate when the installed Anthropic client exposes the corresponding Messages API capability. When vision is enabled, Zulubot can render local candlestick charts as in-memory images for latency-arb analysis if `matplotlib` is installed via [requirements-tradingagents.txt](requirements-tradingagents.txt).
 
 ---
 
 ## Files
 
 - State: `%LOCALAPPDATA%\TradingBot\data\state.json` (Windows), `~/.local/share/TradingBot/data/state.json` (Linux/macOS), or set `BOT_STORAGE_DIR` to override
+- Trade audit: `%LOCALAPPDATA%\TradingBot\data\trade_audit.jsonl` (Windows), `~/.local/share/TradingBot/data/trade_audit.jsonl` (Linux/macOS), or set `TRADE_AUDIT_PATH` to override
 - Logs: `%LOCALAPPDATA%\TradingBot\logs\` (Windows), `~/.local/share/TradingBot/logs/` (Linux/macOS), or set `BOT_LOG_DIR` to override
 
 ## Testing

@@ -121,6 +121,32 @@ class CoinbasePriceFeed:
         span = history[-1][0] - history[0][0]
         return span >= min_history_seconds
 
+    def latest_price_age_seconds(self, symbol: str) -> float:
+        """Return the age in seconds of the most recent recorded tick."""
+        history = self._history.get(symbol)
+        if not history:
+            return float("inf")
+        return max(0.0, time.time() - history[-1][0])
+
+    def is_stale(self, symbol: str, max_age_seconds: float) -> bool:
+        """Return True when the latest price is older than ``max_age_seconds``."""
+        return self.latest_price_age_seconds(symbol) > max_age_seconds
+
+    def get_history(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: float | None = None,
+    ) -> list[tuple[float, float]]:
+        history = self._history.get(symbol)
+        if not history:
+            return []
+        if lookback_seconds is None or lookback_seconds <= 0:
+            return list(history)
+
+        cutoff = time.time() - lookback_seconds
+        return [(ts, price) for ts, price in history if ts >= cutoff]
+
     def history_span_seconds(self, symbol: str) -> float:
         """Return the time span (in seconds) of available history for a symbol."""
         history = self._history.get(symbol)

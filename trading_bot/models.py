@@ -30,8 +30,11 @@ class Position:
 @dataclass
 class PortfolioState:
     cash: float
+    cash_reserves: dict[str, float] = field(default_factory=dict)
+    ai_monthly_usage: dict[str, Any] = field(default_factory=dict)
     positions: dict[str, Position] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
+    last_price_timestamps: dict[str, float] = field(default_factory=dict)
     daily_baseline_equity: float = 0.0
     daily_baseline_date: str = ""
     peak_equity: float = 0.0
@@ -65,8 +68,11 @@ class PortfolioState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "cash": self.cash,
+            "cash_reserves": self.cash_reserves,
+            "ai_monthly_usage": self.ai_monthly_usage,
             "positions": {symbol: position.to_dict() for symbol, position in self.positions.items()},
             "last_prices": self.last_prices,
+            "last_price_timestamps": self.last_price_timestamps,
             "daily_baseline_equity": self.daily_baseline_equity,
             "daily_baseline_date": self.daily_baseline_date,
             "peak_equity": self.peak_equity,

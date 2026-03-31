@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Iterable
 
 import requests
 import yfinance as yf
 
+from trading_bot.config import HttpRetryConfig
 from trading_bot.models import FearGreedReading, FundingSnapshot
 
 
@@ -18,18 +20,95 @@ def _parse_float(value: Any) -> float | None:
         return None
 
 
+_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+_RETRYABLE_EXCEPTIONS = (requests.Timeout, requests.ConnectionError)
+
+
+def request_with_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    timeout_seconds: int,
+    logger: logging.Logger,
+    retry_config: HttpRetryConfig,
+    **kwargs: Any,
+) -> requests.Response:
+    max_attempts = retry_config.max_attempts if retry_config.enabled else 1
+    max_attempts = max(1, max_attempts)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = session.request(method=method, url=url, timeout=timeout_seconds, **kwargs)
+        except _RETRYABLE_EXCEPTIONS as exc:
+            if attempt >= max_attempts:
+                raise
+            delay = min(
+                retry_config.base_delay_seconds * (retry_config.backoff_multiplier ** (attempt - 1)),
+                retry_config.max_delay_seconds,
+            )
+            logger.warning(
+                "%s %s failed (%s) attempt %d/%d. Retrying in %.2fs.",
+                method.upper(),
+                url,
+                exc,
+                attempt,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        if response.status_code in _RETRYABLE_STATUS_CODES and attempt < max_attempts:
+            delay = min(
+                retry_config.base_delay_seconds * (retry_config.backoff_multiplier ** (attempt - 1)),
+                retry_config.max_delay_seconds,
+            )
+            logger.warning(
+                "%s %s returned HTTP %d attempt %d/%d. Retrying in %.2fs.",
+                method.upper(),
+                url,
+                response.status_code,
+                attempt,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        return response
+
+    raise RuntimeError(f"Retry loop exhausted for {method.upper()} {url}")
+
+
 class BaseHttpClient:
-    def __init__(self, *, base_url: str, timeout_seconds: int, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        timeout_seconds: int,
+        logger: logging.Logger,
+        retry_config: HttpRetryConfig | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.logger = logger
+        self.retry_config = retry_config or HttpRetryConfig()
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "codex-trading-bot/1.0"})
 
     def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}/{path.lstrip('/')}"
         self.logger.debug("GET %s params=%s", url, params)
-        response = self.session.get(url, params=params, timeout=self.timeout_seconds)
+        response = request_with_retry(
+            self.session,
+            "GET",
+            url,
+            params=params,
+            timeout_seconds=self.timeout_seconds,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -181,11 +260,18 @@ class FinancialModelingPrepClient:
 
 
 class AlternativeMeClient(BaseHttpClient):
-    def __init__(self, *, timeout_seconds: int, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int,
+        logger: logging.Logger,
+        retry_config: HttpRetryConfig | None = None,
+    ) -> None:
         super().__init__(
             base_url="https://api.alternative.me",
             timeout_seconds=timeout_seconds,
             logger=logger.getChild("alternative_me"),
+            retry_config=retry_config,
         )
 
     def get_fear_and_greed(self) -> FearGreedReading:
@@ -220,10 +306,18 @@ class BinanceFuturesClient:
         "AVAXUSDT": "AVAX-USD", "MATICUSDT": "MATIC-USD",
     }
 
-    def __init__(self, *, timeout_seconds: int, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int,
+        logger: logging.Logger,
+        retry_config: HttpRetryConfig | None = None,
+    ) -> None:
         self.logger = logger.getChild("funding")
         self.timeout = timeout_seconds
+        self.retry_config = retry_config or HttpRetryConfig()
         self._hl_cache: dict[str, dict[str, Any]] | None = None
+        self.session = requests.Session()
 
     def get_mark_price_and_funding(self, symbol: str) -> FundingSnapshot:
         """Get funding rate from Hyperliquid + spot price from Coinbase."""
@@ -244,20 +338,23 @@ class BinanceFuturesClient:
 
     def _get_hyperliquid_funding(self, symbol: str) -> float:
         """Fetch funding rate from Hyperliquid DEX (free, no auth, US-accessible)."""
-        import json as _json, urllib.request
-
         hl_name = self.SYMBOL_TO_HL.get(symbol, symbol.replace("USDT", ""))
 
         # Cache the full response (has all assets)
         if self._hl_cache is None:
             try:
-                req = urllib.request.Request(
+                response = request_with_retry(
+                    self.session,
+                    "POST",
                     "https://api.hyperliquid.xyz/info",
-                    data=_json.dumps({"type": "metaAndAssetCtxs"}).encode(),
+                    timeout_seconds=self.timeout,
+                    logger=self.logger,
+                    retry_config=self.retry_config,
+                    json={"type": "metaAndAssetCtxs"},
                     headers={"Content-Type": "application/json"},
                 )
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    data = _json.loads(resp.read())
+                response.raise_for_status()
+                data = response.json()
                 # Build name → context mapping
                 meta = data[0]["universe"]
                 ctxs = data[1]
@@ -280,13 +377,19 @@ class BinanceFuturesClient:
 
     def _get_coinbase_price(self, symbol: str) -> float:
         """Get spot price from Coinbase public API."""
-        import json as _json, urllib.request
-
         product_id = self.SYMBOL_TO_CB.get(symbol, f"{symbol[:3]}-USD")
         try:
             url = f"https://api.coinbase.com/v2/prices/{product_id}/spot"
-            with urllib.request.urlopen(url, timeout=self.timeout) as resp:
-                data = _json.loads(resp.read())
+            response = request_with_retry(
+                self.session,
+                "GET",
+                url,
+                timeout_seconds=self.timeout,
+                logger=self.logger,
+                retry_config=self.retry_config,
+            )
+            response.raise_for_status()
+            data = response.json()
             return float(data["data"]["amount"])
         except Exception as exc:
             self.logger.error("Coinbase price failed for %s: %s", symbol, exc)
@@ -320,11 +423,13 @@ class CoinbaseClient(BaseHttpClient):
         api_secret: str,
         timeout_seconds: int,
         logger: logging.Logger,
+        retry_config: HttpRetryConfig | None = None,
     ) -> None:
         super().__init__(
             base_url="https://api.coinbase.com",
             timeout_seconds=timeout_seconds,
             logger=logger.getChild("coinbase"),
+            retry_config=retry_config,
         )
         self.api_key = api_key
         self.api_secret = api_secret
