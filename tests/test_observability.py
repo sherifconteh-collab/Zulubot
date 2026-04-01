@@ -188,3 +188,33 @@ class DecisionLogTests(unittest.TestCase):
             self.assertEqual(len(entries), 5)
             symbols = [e["symbol"] for e in entries]
             self.assertEqual(symbols, ["5", "6", "7", "8", "9"])
+
+    def test_hydrates_from_file_on_init(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            # Write some entries using a first instance
+            log1 = DecisionLog(path, logging.getLogger("test"))
+            for i in range(3):
+                log1.record({"strategy": "s", "symbol": str(i), "action": "hold",
+                              "reason": "r", "signals": {}})
+            # Second instance (simulating a restart) should pick up those entries
+            log2 = DecisionLog(path, logging.getLogger("test"))
+            entries = log2.tail(10)
+            self.assertEqual(len(entries), 3)
+            symbols = [e["symbol"] for e in entries]
+            self.assertEqual(symbols, ["0", "1", "2"])
+
+    def test_hydration_respects_memory_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            # Write 10 entries via a first instance
+            log1 = DecisionLog(path, logging.getLogger("test"))
+            for i in range(10):
+                log1.record({"strategy": "s", "symbol": str(i), "action": "hold",
+                              "reason": "r", "signals": {}})
+            # Restart with a smaller memory_limit; should only keep the last N
+            log2 = DecisionLog(path, logging.getLogger("test"), memory_limit=4)
+            entries = log2.tail(10)
+            self.assertEqual(len(entries), 4)
+            symbols = [e["symbol"] for e in entries]
+            self.assertEqual(symbols, ["6", "7", "8", "9"])

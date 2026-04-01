@@ -101,6 +101,29 @@ class DecisionLog:
         self.path = path
         self.logger = logger.getChild("decision_log")
         self._memory: deque[dict[str, Any]] = deque(maxlen=max(1, memory_limit))
+        self._load_from_file()
+
+    def _load_from_file(self) -> None:
+        """Pre-fill the in-memory buffer from the persisted JSONL file on startup."""
+        if not self.path.exists():
+            return
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            self.logger.warning("Failed to read decision log for hydration: %s", exc)
+            return
+
+        limit = self._memory.maxlen or self._MEMORY_LIMIT
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                self._memory.append(payload)
 
     def record(self, entry: dict[str, Any]) -> None:
         """Append a single decision entry (adds timestamp if absent)."""
