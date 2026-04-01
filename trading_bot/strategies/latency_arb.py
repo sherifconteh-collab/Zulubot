@@ -140,6 +140,7 @@ class LatencyArbStrategy:
             "momentum": {},
             "stale_symbols": [],
             "can_trade_live": self.live_trading_enabled,
+            "decisions": [],
         }
 
         if not self.config.enabled:
@@ -159,6 +160,16 @@ class LatencyArbStrategy:
             # Step 3: Check risk gate
             if state.kill_switch_engaged or state.halt_new_trades_for_day:
                 result["status"] = "halted"
+                result["decisions"].append({
+                    "strategy": "latency_arb",
+                    "symbol": "*",
+                    "action": "skip_buy",
+                    "reason": "risk_guardrails",
+                    "signals": {
+                        "kill_switch": state.kill_switch_engaged,
+                        "daily_halt": state.halt_new_trades_for_day,
+                    },
+                })
                 return result
 
             # Step 4: Count open arb positions
@@ -167,6 +178,16 @@ class LatencyArbStrategy:
                 self.logger.debug(
                     "At max open arb contracts (%d). Skipping entry scan.", open_arb
                 )
+                result["decisions"].append({
+                    "strategy": "latency_arb",
+                    "symbol": "*",
+                    "action": "skip_buy",
+                    "reason": "max_contracts_reached",
+                    "signals": {
+                        "open_contracts": open_arb,
+                        "max_contracts": self.config.max_open_contracts,
+                    },
+                })
                 return result
 
             cash_bucket = self._KALSHI_CASH_BUCKET if self.live_trading_enabled else None
@@ -235,6 +256,17 @@ class LatencyArbStrategy:
                 result["momentum"][symbol] = round(momentum_pct, 4)
 
                 if abs(momentum_pct) < effective_threshold:
+                    result["decisions"].append({
+                        "strategy": "latency_arb",
+                        "symbol": symbol,
+                        "action": "hold",
+                        "reason": "momentum_below_threshold",
+                        "signals": {
+                            "momentum_pct": round(momentum_pct, 4),
+                            "threshold_pct": round(effective_threshold, 4),
+                            "regime": current_regime,
+                        },
+                    })
                     continue  # Signal too weak
 
                 result["signals_detected"] += 1
@@ -281,7 +313,23 @@ class LatencyArbStrategy:
                             market_regime=current_regime,
                         )
                         if entered:
-                            result["buys"].append(f"KL:{market.get('ticker', '')}:{side}")
+                            buy_symbol = f"KL:{market.get('ticker', '')}:{side}"
+                            result["buys"].append(buy_symbol)
+                            result["decisions"].append({
+                                "strategy": "latency_arb",
+                                "symbol": buy_symbol,
+                                "action": "buy",
+                                "reason": "momentum_edge_detected",
+                                "signals": {
+                                    "spot_symbol": symbol,
+                                    "side": side,
+                                    "momentum_pct": round(momentum_pct, 4),
+                                    "edge": round(edge, 4),
+                                    "ask_price": round(ask_price, 4),
+                                    "notional": round(notional, 2),
+                                    "regime": current_regime,
+                                },
+                            })
                             open_arb += 1
 
         except Exception as exc:
@@ -654,6 +702,8 @@ class LatencyArbStrategy:
             for sym, pos in state.positions.items()
             if pos.strategy == "latency_arb" and pos.asset_type == "prediction"
         }
+        # Ensure decisions list exists (may be absent when called from tests directly)
+        result.setdefault("decisions", [])
         # Use the cached regime label from the last run_once() if available
         current_regime: str | None = result.get("market_regime")
 
@@ -710,6 +760,18 @@ class LatencyArbStrategy:
                     )
                     if closed:
                         result["sells"].append(symbol)
+                        result["decisions"].append({
+                            "strategy": "latency_arb",
+                            "symbol": symbol,
+                            "action": "sell",
+                            "reason": reason,
+                            "signals": {
+                                "side": side,
+                                "entry_price": round(entry, 4),
+                                "current_price": round(current_price, 4),
+                                "gain_pct": round(gain_pct * 100, 2),
+                            },
+                        })
                         self.logger.info(
                             "CLOSE %s %s @ $%.2f (entry=$%.2f, %s)",
                             symbol, reason, current_price, entry, reason,

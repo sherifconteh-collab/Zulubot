@@ -87,6 +87,7 @@ class PolymarketStrategy:
             "markets_discovered": 0,
             "resolved_closed": [],
             "fear_greed": fear_greed_value,
+            "decisions": [],
         }
 
         try:
@@ -110,7 +111,18 @@ class PolymarketStrategy:
             result["markets_scanned"] = len(markets)
 
             # Step 5: Generate buy signals
-            if not state.kill_switch_engaged and not state.halt_new_trades_for_day:
+            if state.kill_switch_engaged or state.halt_new_trades_for_day:
+                result["decisions"].append({
+                    "strategy": "polymarket_threshold",
+                    "symbol": "*",
+                    "action": "skip_buy",
+                    "reason": "risk_guardrails",
+                    "signals": {
+                        "kill_switch": state.kill_switch_engaged,
+                        "daily_halt": state.halt_new_trades_for_day,
+                    },
+                })
+            else:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
                 )
@@ -195,6 +207,17 @@ class PolymarketStrategy:
                     )
                     if closed:
                         result["sells"].append(symbol)
+                        result["decisions"].append({
+                            "strategy": "polymarket_threshold",
+                            "symbol": symbol,
+                            "action": "sell",
+                            "reason": "take_profit",
+                            "signals": {
+                                "side": side,
+                                "entry_price": round(position.entry_price, 4),
+                                "current_price": round(current_price, 4),
+                            },
+                        })
                         self.logger.info(
                             "Take profit %s: entry=%.4f current=%.4f",
                             symbol, position.entry_price, current_price,
@@ -208,6 +231,17 @@ class PolymarketStrategy:
                     )
                     if closed:
                         result["sells"].append(symbol)
+                        result["decisions"].append({
+                            "strategy": "polymarket_threshold",
+                            "symbol": symbol,
+                            "action": "sell",
+                            "reason": "stop_loss",
+                            "signals": {
+                                "side": side,
+                                "entry_price": round(position.entry_price, 4),
+                                "current_price": round(current_price, 4),
+                            },
+                        })
                         self.logger.info(
                             "Stop loss %s: entry=%.4f current=%.4f",
                             symbol, position.entry_price, current_price,
@@ -290,6 +324,16 @@ class PolymarketStrategy:
                 "At max prediction positions (%d/%d). Skipping new entries.",
                 existing_count, self.config.max_positions,
             )
+            result["decisions"].append({
+                "strategy": "polymarket_threshold",
+                "symbol": "*",
+                "action": "skip_buy",
+                "reason": "max_positions_reached",
+                "signals": {
+                    "open_positions": existing_count,
+                    "max_positions": self.config.max_positions,
+                },
+            })
             return
 
         equity = broker.portfolio_equity(state)
@@ -324,6 +368,13 @@ class PolymarketStrategy:
 
             if notional < 1.0:
                 self.logger.info("Insufficient funds for Polymarket entry (notional=$%.2f).", notional)
+                result["decisions"].append({
+                    "strategy": "polymarket_threshold",
+                    "symbol": pm_symbol,
+                    "action": "skip_buy",
+                    "reason": "insufficient_funds",
+                    "signals": {"notional": round(notional, 2), "side": side, "price": round(price, 4)},
+                })
                 break
 
             position = self.broker.place_limit_buy(
@@ -345,6 +396,19 @@ class PolymarketStrategy:
             if position:
                 symbol = f"PM:{market.condition_id[:8]}:{side}"
                 result["buys"].append(symbol)
+                result["decisions"].append({
+                    "strategy": "polymarket_threshold",
+                    "symbol": symbol,
+                    "action": "buy",
+                    "reason": f"threshold_{side.lower()}",
+                    "signals": {
+                        "side": side,
+                        "price": round(price, 4),
+                        "notional": round(notional, 2),
+                        "fear_greed": fear_greed_value,
+                        "question": market.question[:60],
+                    },
+                })
                 slots_available -= 1
                 self.logger.info(
                     "Entry signal: %s side=%s price=%.4f question='%s'",
