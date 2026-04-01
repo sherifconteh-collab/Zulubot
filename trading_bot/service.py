@@ -19,7 +19,7 @@ from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGamma
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AppConfig
 from trading_bot.models import PortfolioState, Position
-from trading_bot.observability import ModuleLatencyTracker
+from trading_bot.observability import DecisionLog, ModuleLatencyTracker
 from trading_bot.polymarket_broker import PolymarketBroker
 from trading_bot.risk import RiskManager, RiskSnapshot
 from trading_bot.state import StateStore
@@ -53,6 +53,7 @@ class TradingBotService:
             enabled=config.observability.trade_audit_enabled,
         )
         self.broker.set_on_trade(self.trade_audit.record)
+        self.decision_log = DecisionLog(config.data_dir / "decision_log.jsonl", logger)
 
         # Wire broker close callback → risk manager so all close paths update
         # the consecutive-loss counter (strategies, trailing stops, kill switch).
@@ -458,6 +459,9 @@ class TradingBotService:
 
     def get_recent_audit_entries(self, limit: int = 10) -> list[dict[str, Any]]:
         return self.trade_audit.tail(limit)
+
+    def get_recent_decisions(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self.decision_log.tail(limit)
 
     @staticmethod
     def _normalise_kalshi_probability(raw_value: Any) -> float:
@@ -899,4 +903,7 @@ class TradingBotService:
         self.latency_tracker.record(name, duration_ms)
         if isinstance(result, dict):
             result.setdefault("latency_ms", round(duration_ms, 2))
+            decisions = result.get("decisions")
+            if decisions:
+                self.decision_log.record_many(decisions)
         return result

@@ -101,6 +101,7 @@ class CoinbasePredictionStrategy:
             "resolved_closed": [],
             "fear_greed": fear_greed_value,
             "can_trade": self.live_trading_enabled,
+            "decisions": [],
         }
 
         try:
@@ -122,7 +123,18 @@ class CoinbasePredictionStrategy:
             result["markets_scanned"] = len(markets)
 
             # Step 4: Scan for new entry signals
-            if not state.kill_switch_engaged and not state.halt_new_trades_for_day:
+            if state.kill_switch_engaged or state.halt_new_trades_for_day:
+                result["decisions"].append({
+                    "strategy": "coinbase_predictions",
+                    "symbol": "*",
+                    "action": "skip_buy",
+                    "reason": "risk_guardrails",
+                    "signals": {
+                        "kill_switch": state.kill_switch_engaged,
+                        "daily_halt": state.halt_new_trades_for_day,
+                    },
+                })
+            else:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
                 )
@@ -358,6 +370,17 @@ class CoinbasePredictionStrategy:
         )
         if closed is not None:
             result["sells"].append(symbol)
+            result["decisions"].append({
+                "strategy": "coinbase_predictions",
+                "symbol": symbol,
+                "action": "sell",
+                "reason": reason,
+                "signals": {
+                    "side": side,
+                    "entry_price": round(position.entry_price, 4),
+                    "exit_price": round(price, 4),
+                },
+            })
             self.logger.info(
                 "%s %s: side=%s entry=%.4f exit=%.4f",
                 reason, symbol, side, position.entry_price, price,
@@ -388,6 +411,16 @@ class CoinbasePredictionStrategy:
         existing_count = len(self._get_prediction_positions(state))
         if existing_count >= self.config.max_positions:
             self.logger.info("At max prediction positions (%d/%d).", existing_count, self.config.max_positions)
+            result["decisions"].append({
+                "strategy": "coinbase_predictions",
+                "symbol": "*",
+                "action": "skip_buy",
+                "reason": "max_positions_reached",
+                "signals": {
+                    "open_positions": existing_count,
+                    "max_positions": self.config.max_positions,
+                },
+            })
             return
 
         slots_available = self.config.max_positions - existing_count
@@ -459,6 +492,18 @@ class CoinbasePredictionStrategy:
 
             if notional < self.config.min_trade_usd:
                 self.logger.info("Insufficient funds for %s (notional=$%.2f).", ticker, notional)
+                result["decisions"].append({
+                    "strategy": "coinbase_predictions",
+                    "symbol": f"KX:{ticker}:{side}",
+                    "action": "skip_buy",
+                    "reason": "insufficient_funds",
+                    "signals": {
+                        "ticker": ticker,
+                        "side": side,
+                        "notional": round(notional, 2),
+                        "price": round(price, 4),
+                    },
+                })
                 break
 
             quantity = int(notional / price) if price > 0 else 0
@@ -514,6 +559,21 @@ class CoinbasePredictionStrategy:
 
             if position is not None:
                 result["buys"].append(symbol)
+                result["decisions"].append({
+                    "strategy": "coinbase_predictions",
+                    "symbol": symbol,
+                    "action": "buy",
+                    "reason": f"threshold_{side}",
+                    "signals": {
+                        "ticker": ticker,
+                        "side": side,
+                        "price": round(price, 4),
+                        "notional": round(actual_notional, 2),
+                        "category": market.get("_category", "other"),
+                        "fear_greed": fear_greed_value,
+                        "title": market.get("subtitle", market.get("title", ""))[:60],
+                    },
+                })
                 slots_available -= 1
                 self.logger.info(
                     "Prediction entry: %s side=%s price=$%.2f qty=%d notional=$%.2f | %s",
