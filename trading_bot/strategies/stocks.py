@@ -102,6 +102,7 @@ class StockValueStrategy:
         broker.mark_positions(state, quotes)
 
         sells: list[str] = []
+        decisions: list[dict[str, Any]] = []
         for symbol in list(current_stock_positions):
             fundamentals = fundamentals_by_symbol.get(symbol)
             if fundamentals is None or not self._qualifies(fundamentals):
@@ -119,6 +120,19 @@ class StockValueStrategy:
                     reason="fundamental_threshold_breach",
                 )
                 sells.append(symbol)
+                f = fundamentals.to_dict() if fundamentals is not None else {}
+                decisions.append({
+                    "strategy": "value_investing",
+                    "symbol": symbol,
+                    "action": "sell",
+                    "reason": "fundamental_threshold_breach",
+                    "signals": {
+                        "pe_ratio": f.get("pe_ratio"),
+                        "pb_ratio": f.get("pb_ratio"),
+                        "debt_to_equity": f.get("debt_to_equity"),
+                        "vix": vix_value,
+                    },
+                })
 
         buys: list[str] = []
         stock_positions_after_sells = {
@@ -127,17 +141,42 @@ class StockValueStrategy:
         if vix_value > self.config.vix_buy_threshold and risk_manager.can_open_new_position(state):
             for fundamentals in top_targets:
                 if len(stock_positions_after_sells) >= self.config.max_positions:
+                    decisions.append({
+                        "strategy": "value_investing",
+                        "symbol": fundamentals.symbol,
+                        "action": "skip_buy",
+                        "reason": "max_positions_reached",
+                        "signals": {
+                            "open_positions": len(stock_positions_after_sells),
+                            "max_positions": self.config.max_positions,
+                            "vix": vix_value,
+                        },
+                    })
                     break
                 if fundamentals.symbol in stock_positions_after_sells:
                     continue
                 price = quotes.get(fundamentals.symbol)
                 if price is None:
                     self.logger.warning("Skipping stock buy for %s because no quote was returned.", fundamentals.symbol)
+                    decisions.append({
+                        "strategy": "value_investing",
+                        "symbol": fundamentals.symbol,
+                        "action": "skip_buy",
+                        "reason": "no_quote",
+                        "signals": {"vix": vix_value},
+                    })
                     continue
                 equity = broker.portfolio_equity(state)
                 notional = risk_manager.position_notional(state, equity, symbol=fundamentals.symbol)
                 if notional <= 0:
                     self.logger.warning("Skipping stock buy for %s because position size is zero.", fundamentals.symbol)
+                    decisions.append({
+                        "strategy": "value_investing",
+                        "symbol": fundamentals.symbol,
+                        "action": "skip_buy",
+                        "reason": "position_size_zero",
+                        "signals": {"vix": vix_value},
+                    })
                     continue
 
                 # Free market intelligence (options, insider, short interest)
@@ -182,6 +221,18 @@ class StockValueStrategy:
                     )
                     if notional <= 0:
                         self.logger.info("AI rejected stock buy for %s.", fundamentals.symbol)
+                        decisions.append({
+                            "strategy": "value_investing",
+                            "symbol": fundamentals.symbol,
+                            "action": "skip_buy",
+                            "reason": "ai_rejected",
+                            "signals": {
+                                "vix": vix_value,
+                                "pe_ratio": fundamentals.pe_ratio,
+                                "pb_ratio": fundamentals.pb_ratio,
+                                "ai_verdict": ai_meta.get("ai_verdict", "unknown"),
+                            },
+                        })
                         continue
 
                 # Execute buy on Coinbase
@@ -208,6 +259,20 @@ class StockValueStrategy:
                 if position is not None:
                     stock_positions_after_sells.add(fundamentals.symbol)
                     buys.append(fundamentals.symbol)
+                    decisions.append({
+                        "strategy": "value_investing",
+                        "symbol": fundamentals.symbol,
+                        "action": "buy",
+                        "reason": "fundamental_qualifies",
+                        "signals": {
+                            "vix": vix_value,
+                            "pe_ratio": fundamentals.pe_ratio,
+                            "pb_ratio": fundamentals.pb_ratio,
+                            "debt_to_equity": fundamentals.debt_to_equity,
+                            "price": round(price, 4),
+                            "notional": round(notional, 2),
+                        },
+                    })
         else:
             self.logger.info(
                 "Stock buys blocked. vix=%.2f threshold=%.2f daily_halt=%s kill_switch=%s",
@@ -216,6 +281,18 @@ class StockValueStrategy:
                 state.halt_new_trades_for_day,
                 state.kill_switch_engaged,
             )
+            decisions.append({
+                "strategy": "value_investing",
+                "symbol": "*",
+                "action": "skip_buy",
+                "reason": "vix_below_threshold" if vix_value <= self.config.vix_buy_threshold else "risk_guardrails",
+                "signals": {
+                    "vix": vix_value,
+                    "vix_threshold": self.config.vix_buy_threshold,
+                    "daily_halt": state.halt_new_trades_for_day,
+                    "kill_switch": state.kill_switch_engaged,
+                },
+            })
 
         state.last_stock_screen_date = now.date().isoformat()
         preview = [item.to_dict() for item in top_targets[:5]]
@@ -236,6 +313,7 @@ class StockValueStrategy:
             "top_targets": [item.symbol for item in top_targets],
             "buys": buys,
             "sells": sells,
+            "decisions": decisions,
         }
 
     def _should_skip(self, state: PortfolioState, now: datetime) -> bool:

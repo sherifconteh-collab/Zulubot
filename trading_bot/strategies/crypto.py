@@ -92,6 +92,7 @@ class CryptoSentimentFundingStrategy:
 
         buys: list[str] = []
         sells: list[str] = []
+        decisions: list[dict[str, Any]] = []
 
         if fear_greed.value > self.config.sell_fear_threshold:
             for symbol in self.config.symbols:
@@ -114,6 +115,17 @@ class CryptoSentimentFundingStrategy:
                     reason="fear_and_greed_sell_threshold",
                 )
                 sells.append(symbol)
+                decisions.append({
+                    "strategy": "crypto_sentiment_funding",
+                    "symbol": symbol,
+                    "action": "sell",
+                    "reason": "fear_and_greed_sell_threshold",
+                    "signals": {
+                        "fear_greed": fear_greed.value,
+                        "classification": fear_greed.classification,
+                        "threshold": self.config.sell_fear_threshold,
+                    },
+                })
 
         elif fear_greed.value < self.config.buy_fear_threshold:
             if not risk_manager.can_open_new_position(state):
@@ -122,6 +134,18 @@ class CryptoSentimentFundingStrategy:
                     state.halt_new_trades_for_day,
                     state.kill_switch_engaged,
                 )
+                decisions.append({
+                    "strategy": "crypto_sentiment_funding",
+                    "symbol": "*",
+                    "action": "skip_buy",
+                    "reason": "risk_guardrails",
+                    "signals": {
+                        "fear_greed": fear_greed.value,
+                        "classification": fear_greed.classification,
+                        "daily_halt": state.halt_new_trades_for_day,
+                        "kill_switch": state.kill_switch_engaged,
+                    },
+                })
             else:
                 for symbol in self.config.symbols:
                     if symbol in state.positions:
@@ -132,11 +156,32 @@ class CryptoSentimentFundingStrategy:
                         self.logger.info(
                             "Skipping %s: funding_rate=%.6f (non-negative)", symbol, snapshot.funding_rate
                         )
+                        decisions.append({
+                            "strategy": "crypto_sentiment_funding",
+                            "symbol": symbol,
+                            "action": "skip_buy",
+                            "reason": "non_negative_funding_rate",
+                            "signals": {
+                                "fear_greed": fear_greed.value,
+                                "classification": fear_greed.classification,
+                                "funding_rate": round(snapshot.funding_rate, 6),
+                            },
+                        })
                         continue
                     equity = broker.portfolio_equity(state)
                     notional = risk_manager.position_notional(state, equity, symbol=symbol)
                     if notional <= 0:
                         self.logger.warning("Skipping crypto buy for %s because position size is zero.", symbol)
+                        decisions.append({
+                            "strategy": "crypto_sentiment_funding",
+                            "symbol": symbol,
+                            "action": "skip_buy",
+                            "reason": "position_size_zero",
+                            "signals": {
+                                "fear_greed": fear_greed.value,
+                                "funding_rate": round(snapshot.funding_rate, 6),
+                            },
+                        })
                         continue
 
                     # AI confirmation (optional)
@@ -157,6 +202,17 @@ class CryptoSentimentFundingStrategy:
                         )
                         if notional <= 0:
                             self.logger.info("AI rejected crypto buy for %s.", symbol)
+                            decisions.append({
+                                "strategy": "crypto_sentiment_funding",
+                                "symbol": symbol,
+                                "action": "skip_buy",
+                                "reason": "ai_rejected",
+                                "signals": {
+                                    "fear_greed": fear_greed.value,
+                                    "funding_rate": round(snapshot.funding_rate, 6),
+                                    "ai_verdict": ai_meta.get("ai_verdict", "unknown"),
+                                },
+                            })
                             continue
 
                     price = execution_prices[symbol]
@@ -195,6 +251,33 @@ class CryptoSentimentFundingStrategy:
                     )
                     if position is not None:
                         buys.append(symbol)
+                        decisions.append({
+                            "strategy": "crypto_sentiment_funding",
+                            "symbol": symbol,
+                            "action": "buy",
+                            "reason": "fear_and_greed_buy_threshold",
+                            "signals": {
+                                "fear_greed": fear_greed.value,
+                                "classification": fear_greed.classification,
+                                "funding_rate": round(snapshot.funding_rate, 6),
+                                "price": round(price, 4),
+                                "notional": round(notional, 2),
+                            },
+                        })
+
+        else:
+            decisions.append({
+                "strategy": "crypto_sentiment_funding",
+                "symbol": "*",
+                "action": "hold",
+                "reason": "neutral_fear_greed",
+                "signals": {
+                    "fear_greed": fear_greed.value,
+                    "classification": fear_greed.classification,
+                    "buy_threshold": self.config.buy_fear_threshold,
+                    "sell_threshold": self.config.sell_fear_threshold,
+                },
+            })
 
         self.logger.info(
             "Crypto cycle complete. fear_and_greed=%d classification=%s buys=%s sells=%s "
@@ -215,4 +298,5 @@ class CryptoSentimentFundingStrategy:
             "price_sources": price_source,
             "buys": buys,
             "sells": sells,
+            "decisions": decisions,
         }

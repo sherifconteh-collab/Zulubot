@@ -149,6 +149,7 @@ class AltcoinRotationStrategy:
 
         action_taken = "hold"
         swap_meta: dict[str, Any] = {}
+        decisions: list[dict[str, Any]] = []
 
         if swap_result is not None:
             target_coin, ratio_shift = swap_result
@@ -209,23 +210,67 @@ class AltcoinRotationStrategy:
 
             if success:
                 action_taken = "swap"
+                from_coin = current_coin
                 swap_meta = {
-                    "swapped_from": current_coin,
+                    "swapped_from": from_coin,
                     "swapped_to": target_coin,
                     "ratio_shift": round(ratio_shift * 100, 2),  # as percentage
                     "buys": [target_coin],
-                    "sells": [current_coin],
+                    "sells": [from_coin],
                     **ai_swap_meta,
                 }
                 current_coin = target_coin
+                decisions.append({
+                    "strategy": "altcoin_rotation",
+                    "symbol": f"{from_coin}→{target_coin}",
+                    "action": "swap",
+                    "reason": "ratio_shift_above_threshold",
+                    "signals": {
+                        "from": from_coin,
+                        "to": target_coin,
+                        "ratio_shift_pct": round(ratio_shift * 100, 2),
+                        "threshold_pct": round(self.config.fee_pct * self.config.scout_multiplier * 100, 4),
+                    },
+                })
             elif not proceed_with_swap:
                 action_taken = "swap_ai_blocked"
                 swap_meta = {"from": current_coin, "to": target_coin, **ai_swap_meta}
+                decisions.append({
+                    "strategy": "altcoin_rotation",
+                    "symbol": f"{current_coin}→{target_coin}",
+                    "action": "skip_swap",
+                    "reason": "ai_blocked_swap",
+                    "signals": {
+                        "from": current_coin,
+                        "to": target_coin,
+                        "ratio_shift_pct": round(ratio_shift * 100, 2),
+                        "ai_action": ai_swap_meta.get("ai_action", "unknown"),
+                        "ai_confidence": ai_swap_meta.get("ai_confidence"),
+                    },
+                })
             else:
                 action_taken = "swap_failed"
                 swap_meta = {"from": current_coin, "to": target_coin}
+                decisions.append({
+                    "strategy": "altcoin_rotation",
+                    "symbol": f"{current_coin}→{target_coin}",
+                    "action": "skip_swap",
+                    "reason": "swap_execution_failed",
+                    "signals": {"from": current_coin, "to": target_coin},
+                })
         else:
             self.logger.info("No swap opportunity; holding %s.", current_coin)
+            decisions.append({
+                "strategy": "altcoin_rotation",
+                "symbol": current_coin,
+                "action": "hold",
+                "reason": "no_swap_opportunity",
+                "signals": {
+                    "current_coin": current_coin,
+                    "coins_tracked": len(tracked),
+                    "threshold_pct": round(self.config.fee_pct * self.config.scout_multiplier * 100, 4),
+                },
+            })
 
         # 5. Absorb any extra holdings (e.g. from recurring buys).
         absorbed = self._absorb_extras(state, rd, broker, current_coin, tracked, now)
@@ -244,6 +289,7 @@ class AltcoinRotationStrategy:
             "coins_tracked": len(tracked),
             "holdings_synced": len(absorbed),
             "absorbed_coins": absorbed,
+            "decisions": decisions,
             **swap_meta,
         }
         self.logger.info("Rotation cycle complete: %s", summary)

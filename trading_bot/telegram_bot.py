@@ -23,6 +23,33 @@ if TYPE_CHECKING:
 
 # ── Visual helpers ─────────────────────────────────────────────────
 
+_TG_MAX_MSG_LEN = 4096
+
+
+async def _send_html_chunks(update: Update, text: str) -> None:
+    """Send *text* as one or more Telegram messages, each ≤ _TG_MAX_MSG_LEN chars."""
+    if len(text) <= _TG_MAX_MSG_LEN:
+        await update.message.reply_text(text, parse_mode="HTML")  # type: ignore[union-attr]
+        return
+    lines = text.split("\n")
+    chunk_lines: list[str] = []
+    chunk_len = 0
+    for line in lines:
+        extra = len(line) + 1  # +1 for the newline that join() will add
+        if chunk_lines and chunk_len + extra > _TG_MAX_MSG_LEN:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\n".join(chunk_lines), parse_mode="HTML"
+            )
+            chunk_lines = []
+            chunk_len = 0
+        chunk_lines.append(line)
+        chunk_len += extra
+    if chunk_lines:
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(chunk_lines), parse_mode="HTML"
+        )
+
+
 def _pnl_emoji(value: float) -> str:
     if value > 0:
         return "\U0001f7e2"  # green circle
@@ -610,6 +637,7 @@ class TradingTelegramBot:
             "risk": self._cmd_risk,
             "latency": self._cmd_latency,
             "audit": self._cmd_audit,
+            "decisions": self._cmd_decisions,
             "pause": self._cmd_pause,
             "resume": self._cmd_resume,
             "kill": self._cmd_kill,
@@ -645,6 +673,7 @@ class TradingTelegramBot:
             f"  /latency — Module timings\n"
             f"  /history — Recent trades\n"
             f"  /audit [count] — Trade audit tail\n"
+            f"  /decisions [count] — Strategy decision report\n"
             f"\n"
             f"\u26a1 <b>Execute</b>\n"  # ⚡
             f"  /crypto — Force crypto cycle\n"
@@ -952,6 +981,73 @@ class TradingTelegramBot:
             if reason:
                 lines.append(f"  reason={html.escape(str(reason))}")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
+
+    async def _cmd_decisions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+
+        limit = 10
+        if context.args:
+            try:
+                limit = max(1, min(20, int(context.args[0])))
+            except (TypeError, ValueError):
+                limit = 10
+
+        entries = self._service.get_recent_decisions(limit)
+        if not entries:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\U0001f4cb <b>Decision Report</b>\n\nNo decisions recorded yet.\n"
+                "Run a strategy cycle first.",
+                parse_mode="HTML",
+            )
+            return
+
+        # Action → emoji mapping
+        action_icons = {
+            "buy":        "\U0001f7e2",   # 🟢
+            "sell":       "\U0001f534",   # 🔴
+            "swap":       "\U0001f504",   # 🔄
+            "hold":       "\u26aa",       # ⚪
+            "skip_buy":   "\u23f8\ufe0f", # ⏸️
+            "skip_swap":  "\u23f8\ufe0f", # ⏸️
+        }
+
+        lines = [
+            f"\U0001f4cb <b>Decision Report</b> (last {len(entries)})",  # 📋
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        ]
+
+        for entry in entries:
+            action = str(entry.get("action", "?"))
+            icon = action_icons.get(action, "\u2753")
+            symbol = html.escape(str(entry.get("symbol", "?")))
+            strategy = html.escape(str(entry.get("strategy", "?")))
+            reason = html.escape(str(entry.get("reason", "?")))
+            ts_raw = str(entry.get("timestamp", ""))
+            # Shorten timestamp: keep only HH:MM:SS portion
+            ts_short = ts_raw[11:19] if len(ts_raw) >= 19 else ts_raw
+
+            action_label = action.upper().replace("_", " ")
+            lines.append(f"\n{icon} <b>{action_label}</b> <code>{symbol}</code>")
+            if ts_short:
+                lines.append(f"  \U0001f552 {html.escape(ts_short)}")  # 🕒
+            lines.append(f"  \U0001f3af Strategy: {strategy}")
+            lines.append(f"  \U0001f4ac Reason: <i>{reason}</i>")
+
+            signals = entry.get("signals") or {}
+            if signals:
+                sig_parts = []
+                for key, val in signals.items():
+                    if val is None:
+                        continue
+                    sig_parts.append(f"{html.escape(key)}={html.escape(str(val))}")
+                if sig_parts:
+                    lines.append(f"  \U0001f4ca {' | '.join(sig_parts)}")  # 📊
+
+        await _send_html_chunks(update, "\n".join(lines))
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):

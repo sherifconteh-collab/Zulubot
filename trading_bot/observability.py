@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,3 +69,98 @@ class TradeAuditLog:
             if isinstance(payload, dict):
                 entries.append(payload)
         return entries
+
+
+class DecisionLog:
+    """Rolling log of strategy buy/sell/skip decisions.
+
+    Each entry captures *why* the bot acted (or chose not to act) at a
+    given moment, so the user can review recent reasoning via Telegram.
+
+    Entry schema::
+
+        {
+            "timestamp": "2026-04-01T14:30:00+00:00",
+            "strategy":  "crypto_sentiment_funding",
+            "symbol":    "BTC-USDT",          # "*" for strategy-wide entries
+            "action":    "buy" | "sell" | "skip_buy" | "skip_swap" | "hold",
+            "reason":    "<machine-readable key>",
+            "signals":   {"fear_greed": 28, ...}   # key signal values
+        }
+    """
+
+    _MEMORY_LIMIT = 100
+
+    def __init__(
+        self,
+        path: Path,
+        logger: logging.Logger,
+        *,
+        memory_limit: int = _MEMORY_LIMIT,
+    ) -> None:
+        self.path = path
+        self.logger = logger.getChild("decision_log")
+        self._memory: deque[dict[str, Any]] = deque(maxlen=max(1, memory_limit))
+        self._load_from_file()
+
+    def _load_from_file(self) -> None:
+        """Pre-fill the in-memory buffer from the persisted JSONL file on startup."""
+        if not self.path.exists():
+            return
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            self.logger.warning("Failed to read decision log for hydration: %s", exc)
+            return
+
+        limit = self._memory.maxlen or self._MEMORY_LIMIT
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                self._memory.append(payload)
+
+    def record(self, entry: dict[str, Any]) -> None:
+        """Append a single decision entry (adds timestamp if absent)."""
+        if "timestamp" not in entry:
+            entry = {**entry, "timestamp": datetime.now(UTC).isoformat(timespec="seconds")}
+        self._memory.append(entry)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        except Exception as exc:
+            self.logger.warning("Failed to append decision log entry: %s", exc)
+
+    def record_many(self, entries: list[dict[str, Any]]) -> None:
+        """Append a batch of decision entries in a single file write."""
+        if not entries:
+            return
+
+        processed: list[dict[str, Any]] = []
+        for entry in entries:
+            if "timestamp" not in entry:
+                entry = {**entry, "timestamp": datetime.now(UTC).isoformat(timespec="seconds")}
+            processed.append(entry)
+
+        for entry in processed:
+            self._memory.append(entry)
+
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                for entry in processed:
+                    handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        except Exception as exc:
+            self.logger.warning("Failed to append decision log batch: %s", exc)
+
+    def tail(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the most recent *limit* decisions (from in-memory buffer)."""
+        limit = max(1, limit)
+        items = list(self._memory)
+        return items[-limit:]
