@@ -80,10 +80,10 @@ class DecisionLog:
     Entry schema::
 
         {
-            "timestamp": "2026-04-01T14:30:00",
+            "timestamp": "2026-04-01T14:30:00+00:00",
             "strategy":  "crypto_sentiment_funding",
             "symbol":    "BTC-USDT",          # "*" for strategy-wide entries
-            "action":    "buy" | "sell" | "skip_buy" | "skip_sell" | "hold",
+            "action":    "buy" | "sell" | "skip_buy" | "skip_swap" | "hold",
             "reason":    "<machine-readable key>",
             "signals":   {"fear_greed": 28, ...}   # key signal values
         }
@@ -115,9 +115,26 @@ class DecisionLog:
             self.logger.warning("Failed to append decision log entry: %s", exc)
 
     def record_many(self, entries: list[dict[str, Any]]) -> None:
-        """Append a batch of decision entries."""
+        """Append a batch of decision entries in a single file write."""
+        if not entries:
+            return
+
+        processed: list[dict[str, Any]] = []
         for entry in entries:
-            self.record(entry)
+            if "timestamp" not in entry:
+                entry = {**entry, "timestamp": datetime.now(UTC).isoformat(timespec="seconds")}
+            processed.append(entry)
+
+        for entry in processed:
+            self._memory.append(entry)
+
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                for entry in processed:
+                    handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        except Exception as exc:
+            self.logger.warning("Failed to append decision log batch: %s", exc)
 
     def tail(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return the most recent *limit* decisions (from in-memory buffer)."""

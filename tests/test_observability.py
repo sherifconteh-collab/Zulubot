@@ -146,6 +146,25 @@ class DecisionLogTests(unittest.TestCase):
             self.assertEqual(entries[0]["symbol"], "A")
             self.assertEqual(entries[1]["symbol"], "B")
 
+    def test_record_many_writes_all_lines_to_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            log = DecisionLog(path, logging.getLogger("test"))
+            log.record_many([
+                {"strategy": "s", "symbol": str(i), "action": "hold", "reason": "r", "signals": {}}
+                for i in range(5)
+            ])
+            lines = [l for l in path.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 5)
+
+    def test_record_many_empty_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            log = DecisionLog(path, logging.getLogger("test"))
+            log.record_many([])
+            self.assertFalse(path.exists())
+            self.assertEqual(log.tail(10), [])
+
     def test_persists_to_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "subdir" / "decisions.jsonl"

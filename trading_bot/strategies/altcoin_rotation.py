@@ -210,22 +210,23 @@ class AltcoinRotationStrategy:
 
             if success:
                 action_taken = "swap"
+                from_coin = current_coin
                 swap_meta = {
-                    "swapped_from": current_coin,
+                    "swapped_from": from_coin,
                     "swapped_to": target_coin,
                     "ratio_shift": round(ratio_shift * 100, 2),  # as percentage
                     "buys": [target_coin],
-                    "sells": [current_coin],
+                    "sells": [from_coin],
                     **ai_swap_meta,
                 }
                 current_coin = target_coin
                 decisions.append({
                     "strategy": "altcoin_rotation",
-                    "symbol": f"{current_coin}→{target_coin}",
+                    "symbol": f"{from_coin}→{target_coin}",
                     "action": "swap",
                     "reason": "ratio_shift_above_threshold",
                     "signals": {
-                        "from": current_coin,
+                        "from": from_coin,
                         "to": target_coin,
                         "ratio_shift_pct": round(ratio_shift * 100, 2),
                         "threshold_pct": round(self.config.fee_pct * self.config.scout_multiplier * 100, 4),
