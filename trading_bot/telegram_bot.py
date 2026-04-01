@@ -23,6 +23,33 @@ if TYPE_CHECKING:
 
 # ── Visual helpers ─────────────────────────────────────────────────
 
+_TG_MAX_MSG_LEN = 4096
+
+
+async def _send_html_chunks(update: Update, text: str) -> None:
+    """Send *text* as one or more Telegram messages, each ≤ _TG_MAX_MSG_LEN chars."""
+    if len(text) <= _TG_MAX_MSG_LEN:
+        await update.message.reply_text(text, parse_mode="HTML")  # type: ignore[union-attr]
+        return
+    lines = text.split("\n")
+    chunk_lines: list[str] = []
+    chunk_len = 0
+    for line in lines:
+        extra = len(line) + 1  # +1 for the newline that join() will add
+        if chunk_lines and chunk_len + extra > _TG_MAX_MSG_LEN:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\n".join(chunk_lines), parse_mode="HTML"
+            )
+            chunk_lines = []
+            chunk_len = 0
+        chunk_lines.append(line)
+        chunk_len += extra
+    if chunk_lines:
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "\n".join(chunk_lines), parse_mode="HTML"
+        )
+
+
 def _pnl_emoji(value: float) -> str:
     if value > 0:
         return "\U0001f7e2"  # green circle
@@ -1020,7 +1047,7 @@ class TradingTelegramBot:
                 if sig_parts:
                     lines.append(f"  \U0001f4ca {' | '.join(sig_parts)}")  # 📊
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
+        await _send_html_chunks(update, "\n".join(lines))
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
