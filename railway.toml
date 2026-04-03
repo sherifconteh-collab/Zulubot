@@ -15,6 +15,8 @@ sleepApplication = false
 
 # ── Default variable values ───────────────────────────────────────────────────
 # These are picked up as variable defaults in the Railway dashboard.
+# Existing services may require adding newly introduced variables manually in
+# the Railway Variables UI after updating this file.
 # Secrets (API keys, private keys) must be set manually — they are intentionally
 # left blank here and should never be committed to the repository.
 [variables]
@@ -152,6 +154,8 @@ TRADING_AGENTS_ENABLED = "true"
 TRADING_AGENTS_LLM_PROVIDER = "ollama"
 TRADING_AGENTS_QUICK_MODEL = "qwen3:8b"
 TRADING_AGENTS_DEEP_MODEL = "qwen3:8b"
+# Remote Ollama endpoint for Railway. If this variable does not appear in an
+# existing Railway service, add it manually in the service Variables panel.
 OLLAMA_BASE_URL = "https://processor-techniques-traditions-income.trycloudflare.com"
 TRADING_AGENTS_CONFIRMATION_MODE = "boost"
 TRADING_AGENTS_CACHE_TTL_HOURS = "4"
@@ -196,7 +200,7 @@ FREQTRADE_API_SERVER_PORT = "8080"
 # TELEGRAM_BOT_TOKEN
 # TELEGRAM_CHAT_ID
 # ANTHROPIC_API_KEY        (only needed if TRADING_AGENTS_LLM_PROVIDER=anthropic)
-# OLLAMA_BASE_URL           (override here with your Cloudflare Tunnel URL)
+# OLLAMA_BASE_URL is defined above as a regular variable for the Ollama provider.
 # POLYMARKET_API_KEY
 # POLYMARKET_API_SECRET
 # POLYMARKET_API_PASSPHRASE
