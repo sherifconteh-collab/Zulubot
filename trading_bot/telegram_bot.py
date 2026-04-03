@@ -917,7 +917,7 @@ class TradingTelegramBot:
             await update.message.reply_text(  # type: ignore[union-attr]
                 f"\U0001f9e0 <b>AI ANALYSTS</b>\n"
                 f"\u26a0\ufe0f Enabled but unavailable\n"
-                f"Check ANTHROPIC_API_KEY and anthropic package",
+                f"Check LLM provider config (ANTHROPIC_API_KEY or OLLAMA_BASE_URL)",
                 parse_mode="HTML",
             )
 

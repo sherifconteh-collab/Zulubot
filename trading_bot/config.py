@@ -218,6 +218,7 @@ class TradingAgentsConfig:
     thinking_budget_tokens: int = 1024
     thinking_display: str = "omitted"
     vision_enabled: bool = False
+    ollama_base_url: str = "http://localhost:11434"
     boost_agree_multiplier: float = 1.5
     boost_disagree_multiplier: float = 0.5
     boost_min_confidence: float = 0.6
@@ -476,6 +477,7 @@ class AppConfig:
                 default_output_cost_per_m=_env_float("TRADING_AGENTS_DEFAULT_OUTPUT_COST_PER_M", 15.0),
                 estimated_input_tokens_per_call=_env_int("TRADING_AGENTS_ESTIMATED_INPUT_TOKENS_PER_CALL", 1500),
                 estimated_output_tokens_per_call=_env_int("TRADING_AGENTS_ESTIMATED_OUTPUT_TOKENS_PER_CALL", 300),
+                ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip(),
                 model_pricing=_env_model_pricing("TRADING_AGENTS_MODEL_PRICING_JSON", _default_model_pricing()),
             ),
             altcoin_rotation=AltcoinRotationConfig(
