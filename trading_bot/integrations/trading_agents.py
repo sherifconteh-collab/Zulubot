@@ -100,6 +100,52 @@ def _normalise_untrusted_text(value: Any) -> str:
     return text.replace("```", "'''")
 
 
+# ── Ollama adapter ─────────────────────────────────────────────────────────────
+
+class _OllamaResponse:
+    """Mimics Anthropic message response structure for drop-in compatibility."""
+
+    def __init__(self, text: str, input_tokens: int = 0, output_tokens: int = 0) -> None:
+        _Block = type("Block", (), {"text": text, "type": "text"})
+        _Usage = type("Usage", (), {"input_tokens": input_tokens, "output_tokens": output_tokens})
+        self.content = [_Block()]
+        self.usage = _Usage()
+
+
+class _OllamaMessagesAdapter:
+    """Wraps ollama.Client.chat() to match anthropic client.messages.create()."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def create(self, *, model: str, max_tokens: int, messages: list, **kwargs: Any) -> _OllamaResponse:
+        ollama_msgs = []
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                content = " ".join(parts)
+            ollama_msgs.append({"role": msg["role"], "content": content})
+        response = self._client.chat(
+            model=model,
+            messages=ollama_msgs,
+            options={"num_predict": max_tokens},
+        )
+        return _OllamaResponse(
+            text=response.message.content,
+            input_tokens=getattr(response, "prompt_eval_count", 0),
+            output_tokens=getattr(response, "eval_count", 0),
+        )
+
+
+class _OllamaClientAdapter:
+    """Top-level adapter exposing the same surface as anthropic.Anthropic."""
+
+    def __init__(self, base_url: str) -> None:
+        import ollama  # noqa: PLC0415
+        self.messages = _OllamaMessagesAdapter(ollama.Client(host=base_url))
+
+
 class TradingAgentsService:
     """Cost-optimized LLM analysis for all 3 trading modules.
 
@@ -132,31 +178,45 @@ class TradingAgentsService:
         if not config.enabled:
             return
 
-        # Validate API key format before attempting connection
-        if not config.api_key:
-            self.logger.warning("ANTHROPIC_API_KEY not set. AI analysis disabled.")
-            return
-        if not config.api_key.startswith("sk-ant-"):
-            self.logger.warning(
-                "ANTHROPIC_API_KEY looks invalid (expected 'sk-ant-...'). "
-                "AI analysis may fail. Key prefix: %s***",
-                config.api_key[:8],
-            )
+        if config.llm_provider == "ollama":
+            try:
+                self._anthropic_client = _OllamaClientAdapter(config.ollama_base_url)
+                self.logger.info(
+                    "Ollama provider. base_url=%s quick=%s deep=%s",
+                    config.ollama_base_url, config.quick_model, config.deep_model,
+                )
+            except ImportError:
+                self.logger.warning("ollama package not installed. AI analysis disabled.")
+                return
+            except Exception as exc:
+                self.logger.error("Failed to initialize Ollama client: %s", exc)
+                return
+        else:
+            # Validate API key format before attempting connection
+            if not config.api_key:
+                self.logger.warning("ANTHROPIC_API_KEY not set. AI analysis disabled.")
+                return
+            if not config.api_key.startswith("sk-ant-"):
+                self.logger.warning(
+                    "ANTHROPIC_API_KEY looks invalid (expected 'sk-ant-...'). "
+                    "AI analysis may fail. Key prefix: %s***",
+                    config.api_key[:8],
+                )
 
-        # Try to import Anthropic SDK
-        try:
-            import anthropic
-            self._anthropic_client = anthropic.Anthropic(api_key=config.api_key)
-            self.logger.info(
-                "Anthropic SDK loaded. Models: quick=%s deep=%s budget=$%.2f/mo",
-                config.quick_model, config.deep_model, config.max_cost_per_month,
-            )
-        except ImportError:
-            self.logger.warning("anthropic package not installed. AI analysis disabled.")
-            return
-        except Exception as exc:
-            self.logger.error("Failed to initialize Anthropic client: %s", exc)
-            return
+            # Try to import Anthropic SDK
+            try:
+                import anthropic
+                self._anthropic_client = anthropic.Anthropic(api_key=config.api_key)
+                self.logger.info(
+                    "Anthropic SDK loaded. Models: quick=%s deep=%s budget=$%.2f/mo",
+                    config.quick_model, config.deep_model, config.max_cost_per_month,
+                )
+            except ImportError:
+                self.logger.warning("anthropic package not installed. AI analysis disabled.")
+                return
+            except Exception as exc:
+                self.logger.error("Failed to initialize Anthropic client: %s", exc)
+                return
 
         # Try to import TradingAgents framework (optional enhancement)
         try:
@@ -260,6 +320,8 @@ class TradingAgentsService:
         self._tool_registry.clear()
 
     def _supports_streaming(self) -> bool:
+        if self.config.llm_provider == "ollama":
+            return False
         messages_api = getattr(self._anthropic_client, "messages", None)
         stream_method = getattr(messages_api, "stream", None)
         if stream_method is None or not callable(stream_method):
@@ -1195,6 +1257,8 @@ class TradingAgentsService:
         )
 
     def _supports_structured_output(self) -> bool:
+        if self.config.llm_provider == "ollama":
+            return False
         messages_api = getattr(self._anthropic_client, "messages", None)
         parse_method = getattr(messages_api, "parse", None)
         if parse_method is None or not callable(parse_method):
@@ -1509,6 +1573,8 @@ class TradingAgentsService:
 
     def _estimate_cost(self, model: str) -> float:
         """Rough cost estimate per call based on model (before actual tokens are known)."""
+        if self.config.llm_provider == "ollama":
+            return 0.0
         pricing = self.config.model_pricing.get(model)
         input_cost_per_m = pricing.input_cost_per_m if pricing else self.config.default_input_cost_per_m
         output_cost_per_m = pricing.output_cost_per_m if pricing else self.config.default_output_cost_per_m
@@ -1517,7 +1583,9 @@ class TradingAgentsService:
         return in_cost + out_cost
 
     def _actual_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
-        """Compute the real cost from actual Anthropic usage counts."""
+        """Compute the real cost from actual usage counts."""
+        if self.config.llm_provider == "ollama":
+            return 0.0
         pricing = self.config.model_pricing.get(model)
         input_cost_per_m = pricing.input_cost_per_m if pricing else self.config.default_input_cost_per_m
         output_cost_per_m = pricing.output_cost_per_m if pricing else self.config.default_output_cost_per_m
@@ -1527,6 +1595,8 @@ class TradingAgentsService:
 
     def _check_budget(self, estimated_cost: float) -> bool:
         """Check if we can afford this call within per-run and monthly caps."""
+        if self.config.llm_provider == "ollama":
+            return True  # local inference is free
         with self._state_lock:
             self._rotate_month_locked()
 
