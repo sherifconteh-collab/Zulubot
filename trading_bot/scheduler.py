@@ -36,6 +36,7 @@ class SchedulerService:
         self.logger = logger.getChild("scheduler")
         self._shutdown_requested = False
         self._last_crypto_run: datetime | None = None
+        self._last_btc5min_run: datetime | None = None
         self._last_polymarket_run: datetime | None = None
         self._last_rotation_run: datetime | None = None
         self._last_predictions_run: datetime | None = None
@@ -59,9 +60,10 @@ class SchedulerService:
         await self.notifier.notify_startup(self.config.paper_mode, self.config.volatility.enabled)
 
         self.logger.info(
-            "Scheduler started. crypto=%dm rotation=%dm predictions=%dm stock_hour=%d "
+            "Scheduler started. crypto=%dm btc5min=%dm rotation=%dm predictions=%dm stock_hour=%d "
             "heartbeat=%dm poll=%.1fs latency_arb=%s(%.1fs)",
             self.scheduler_config.crypto_interval_minutes,
+            self.scheduler_config.btc5min_interval_minutes,
             self.config.altcoin_rotation.check_interval_minutes,
             self.config.predictions.check_interval_minutes,
             self.scheduler_config.stock_check_hour,
@@ -126,6 +128,11 @@ class SchedulerService:
             await self._run_module("crypto", now)
             self._last_crypto_run = now
 
+        # BTC 5-min spread monitor
+        if self._should_run_btc5min(now):
+            await self._run_module("btc5min", now)
+            self._last_btc5min_run = now
+
         # Altcoin rotation cycle
         if self._should_run_rotation(now):
             await self._run_module("rotation", now)
@@ -189,6 +196,14 @@ class SchedulerService:
             return True
         elapsed = (now - self._last_crypto_run).total_seconds()
         return elapsed >= self.scheduler_config.crypto_interval_minutes * 60
+
+    def _should_run_btc5min(self, now: datetime) -> bool:
+        if not self.config.btc5min.enabled:
+            return False
+        if self._last_btc5min_run is None:
+            return True
+        elapsed = (now - self._last_btc5min_run).total_seconds()
+        return elapsed >= self.scheduler_config.btc5min_interval_minutes * 60
 
     def _should_run_rotation(self, now: datetime) -> bool:
         if not self.config.altcoin_rotation.enabled:

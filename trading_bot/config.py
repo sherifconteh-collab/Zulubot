@@ -182,8 +182,25 @@ def _env_model_pricing(name: str, default: dict[str, ModelPricing]) -> dict[str,
 
 
 @dataclass(frozen=True)
+class BTC5MinConfig:
+    """Configuration for the 5-minute BTC spread monitor (spot vs Kalshi vs Polymarket)."""
+
+    enabled: bool = True
+    btc_symbol: str = "BTCUSDT"
+    # Spread threshold (fraction) above which we act on a venue
+    buy_spread_threshold: float = 0.02      # 2% spread → trade
+    # Only use prediction markets expiring within this many hours
+    max_strike_age_hours: float = 48.0
+    min_kalshi_volume_usd: float = 3_000.0
+    min_poly_volume_usd: float = 50_000.0
+    # Whether to also trade spot BTC when spread is confirmed
+    spot_trading_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class SchedulerConfig:
     crypto_interval_minutes: int = 10
+    btc5min_interval_minutes: int = 5
     stock_check_hour: int = 9
     polymarket_interval_minutes: int = 20
     heartbeat_interval_minutes: int = 60
@@ -340,6 +357,7 @@ class AppConfig:
     freqtrade: FreqtradeConfig
     latency_arb: LatencyArbConfig
     volatility: VolatilityConfig
+    btc5min: BTC5MinConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -415,6 +433,7 @@ class AppConfig:
             ),
             scheduler=SchedulerConfig(
                 crypto_interval_minutes=_env_int("SCHEDULER_CRYPTO_INTERVAL_MINUTES", 10),
+                btc5min_interval_minutes=_env_int("SCHEDULER_BTC5MIN_INTERVAL_MINUTES", 5),
                 stock_check_hour=_env_int("SCHEDULER_STOCK_CHECK_HOUR", 9),
                 polymarket_interval_minutes=_env_int("SCHEDULER_POLYMARKET_INTERVAL_MINUTES", 20),
                 heartbeat_interval_minutes=_env_int("SCHEDULER_HEARTBEAT_INTERVAL_MINUTES", 60),
@@ -537,5 +556,14 @@ class AppConfig:
                 min_allocation=_env_float("VOL_MIN_ALLOCATION", 0.20),
                 no_trade_band=_env_float("VOL_NO_TRADE_BAND", 0.10),
                 max_history_days=_env_int("VOL_MAX_HISTORY_DAYS", 60),
+            ),
+            btc5min=BTC5MinConfig(
+                enabled=_env_bool("BTC5MIN_ENABLED", True),
+                btc_symbol=os.getenv("BTC5MIN_SYMBOL", "BTCUSDT").strip(),
+                buy_spread_threshold=_env_float("BTC5MIN_BUY_SPREAD_THRESHOLD", 0.02),
+                max_strike_age_hours=_env_float("BTC5MIN_MAX_STRIKE_AGE_HOURS", 48.0),
+                min_kalshi_volume_usd=_env_float("BTC5MIN_MIN_KALSHI_VOLUME_USD", 3_000.0),
+                min_poly_volume_usd=_env_float("BTC5MIN_MIN_POLY_VOLUME_USD", 50_000.0),
+                spot_trading_enabled=_env_bool("BTC5MIN_SPOT_TRADING_ENABLED", True),
             ),
         )

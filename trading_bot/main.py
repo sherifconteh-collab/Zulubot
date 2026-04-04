@@ -15,8 +15,8 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         choices=[
             "stocks", "crypto", "polymarket", "rotation", "predictions",
-            "latency_arb", "all", "status",
-            "run-daemon", "backtest", "hyperopt", "download-data",
+            "latency_arb", "btc5min", "all", "status",
+            "run-daemon", "backtest", "hyperopt", "download-data", "btc-terminal",
         ],
         help=(
             "Which bot module to run. 'run-daemon' for autonomous operation. "
@@ -76,6 +76,11 @@ def main() -> int:
 
     if args.command == "run-daemon":
         return _run_daemon(config, service, logger, once=args.once)
+
+    if args.command == "btc-terminal":
+        from trading_bot.btc_terminal import run_terminal
+        asyncio.run(run_terminal(config))
+        return 0
 
     if args.command in ("backtest", "hyperopt", "download-data"):
         return _run_freqtrade(config, args, logger)
