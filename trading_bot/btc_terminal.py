@@ -156,7 +156,7 @@ def _build_positions_panel(state_data: dict[str, Any] | None) -> Panel:
         pnl_style = "green" if pnl >= 0 else "red"
         pnl_str = f"${pnl:+,.2f}"
         table.add_row(
-            sym[:24],
+            sym,
             f"{qty:.6f}",
             f"${entry:,.2f}",
             f"${current:,.2f}",
@@ -264,8 +264,7 @@ async def run_terminal(config: AppConfig) -> None:
         pairs: list[tuple[float, float]] = []
         try:
             markets, _ = kalshi_client.get_markets(series_ticker="KXBTC", status="open", limit=100)
-            from datetime import datetime as _dt
-            now_ts = _dt.now(timezone.utc).timestamp()
+            now_ts = datetime.now(timezone.utc).timestamp()
             max_age = btc_cfg.max_strike_age_hours * 3600
             for m in markets:
                 strike = parse_strike(m.get("title", "") or m.get("subtitle", ""))
@@ -280,14 +279,21 @@ async def run_terminal(config: AppConfig) -> None:
                         if isinstance(end_date, (int, float)):
                             exp_ts = float(end_date)
                         else:
-                            exp_ts = _dt.fromisoformat(end_date.replace("Z", "+00:00")).timestamp()
+                            exp_ts = datetime.fromisoformat(end_date.replace("Z", "+00:00")).timestamp()
                         if exp_ts - now_ts > max_age:
                             continue
                     except Exception:
                         pass
                 yes_bid = float(m.get("yes_bid_dollars") or 0)
                 yes_ask = float(m.get("yes_ask_dollars") or 0)
-                yes_mid = (yes_bid + yes_ask) / 2 if yes_bid or yes_ask else float(m.get("last_price_dollars") or 0.5)
+                last_price = float(m.get("last_price_dollars") or 0)
+                if yes_bid or yes_ask:
+                    yes_mid = (yes_bid + yes_ask) / 2
+                elif last_price:
+                    yes_mid = last_price
+                else:
+                    # No active quotes and no trade history — skip to avoid noise
+                    continue
                 pairs.append((strike, yes_mid))
             kalshi_implied = compute_implied_median(pairs)
         except Exception as exc:
@@ -301,8 +307,7 @@ async def run_terminal(config: AppConfig) -> None:
                 min_volume=btc_cfg.min_poly_volume_usd,
                 limit=50,
             )
-            from datetime import datetime as _dt2
-            now_ts2 = _dt2.now(timezone.utc).timestamp()
+            now_ts2 = datetime.now(timezone.utc).timestamp()
             max_age2 = btc_cfg.max_strike_age_hours * 3600
             for mkt in mkts:
                 strike = parse_strike(mkt.question)
@@ -310,7 +315,7 @@ async def run_terminal(config: AppConfig) -> None:
                     continue
                 if mkt.end_date:
                     try:
-                        exp2 = _dt2.fromisoformat(mkt.end_date.replace("Z", "+00:00")).timestamp()
+                        exp2 = datetime.fromisoformat(mkt.end_date.replace("Z", "+00:00")).timestamp()
                         if exp2 - now_ts2 > max_age2:
                             continue
                     except Exception:

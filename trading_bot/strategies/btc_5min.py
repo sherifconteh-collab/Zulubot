@@ -12,6 +12,7 @@ the strategy trades the mispriced venue (buys NO when implied > spot, YES when i
 
 from __future__ import annotations
 
+import email.utils
 import logging
 import re
 from datetime import datetime, timezone
@@ -165,11 +166,9 @@ class BTC5MinSpreadStrategy:
                     if isinstance(end_date, (int, float)):
                         expires_ts = float(end_date)
                     else:
-                        from datetime import datetime as _dt
-                        import email.utils
                         # Try ISO first, then RFC 2822
                         try:
-                            expires_ts = _dt.fromisoformat(
+                            expires_ts = datetime.fromisoformat(
                                 end_date.replace("Z", "+00:00")
                             ).timestamp()
                         except ValueError:
@@ -181,7 +180,14 @@ class BTC5MinSpreadStrategy:
 
             yes_bid = float(m.get("yes_bid_dollars") or 0)
             yes_ask = float(m.get("yes_ask_dollars") or 0)
-            yes_mid = (yes_bid + yes_ask) / 2 if yes_bid or yes_ask else float(m.get("last_price_dollars") or 0.5)
+            last_price = float(m.get("last_price_dollars") or 0)
+            if yes_bid or yes_ask:
+                yes_mid = (yes_bid + yes_ask) / 2
+            elif last_price:
+                yes_mid = last_price
+            else:
+                # No active quotes and no trade history — skip to avoid noise
+                continue
 
             strike_probs.append((strike, yes_mid))
             parsed.append({
@@ -227,8 +233,7 @@ class BTC5MinSpreadStrategy:
             # Skip far-future markets
             if mkt.end_date:
                 try:
-                    from datetime import datetime as _dt
-                    expires_ts = _dt.fromisoformat(
+                    expires_ts = datetime.fromisoformat(
                         mkt.end_date.replace("Z", "+00:00")
                     ).timestamp()
                     if expires_ts - now_ts > max_age_secs:

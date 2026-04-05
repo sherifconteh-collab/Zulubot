@@ -20,6 +20,7 @@ flowchart TB
         PRED["Kalshi Predictions"]
         POLY["Polymarket"]
         LARB["Latency Arb"]
+        BTC5["BTC 5-Min Spread"]
     end
 
     SVC --> STRAT
@@ -29,6 +30,7 @@ flowchart TB
     STRAT --> PRED
     STRAT --> POLY
     STRAT --> LARB
+    STRAT --> BTC5
 
     subgraph Brokers
         direction LR
@@ -43,6 +45,8 @@ flowchart TB
     PRED --> PB
     POLY --> PMB
     LARB --> PB
+    BTC5 --> CB
+    BTC5 --> PMB
 
     subgraph Data["Market Data"]
         direction LR
@@ -57,6 +61,9 @@ flowchart TB
     PRED --> D_KAL
     LARB --> D_KAL
     POLY --> D_POLY
+    BTC5 --> D_CB
+    BTC5 --> D_KAL
+    BTC5 --> D_POLY
 
     subgraph AI["AI Analyst Team"]
         direction LR
@@ -199,6 +206,17 @@ Trades on Polymarket prediction markets:
 - Scans for markets matching configured tags
 - Evaluates YES/NO pricing against configurable thresholds
 
+### 7. BTC 5-Min Spread Terminal
+Monitors implied BTC prices across three venues every 5 minutes and trades significant mispricings:
+- Fetches the **Coinbase spot** BTC-USD price in real time
+- Computes an **implied median BTC price** from Kalshi KXBTC binary markets via linear interpolation
+- Computes an **implied median BTC price** from Polymarket bitcoin prediction markets
+- When any venue's implied price diverges from spot by more than `BTC5MIN_BUY_SPREAD_THRESHOLD` (default 2%):
+  - **Implied > spot** (venue too bullish) → buys **NO** on that venue; optionally opens a spot BTC long
+  - **Implied < spot** (venue too bearish) → buys **YES** on that venue; optionally closes any open spot BTC long
+- Prediction positions are **automatically closed** when the spread normalizes back within the threshold
+- Launches a live terminal dashboard (`python -m trading_bot btc-terminal`) showing all three prices, spreads, positions, and recent signals refreshing every 30 seconds
+
 ### Volatility Targeting
 
 Position size adjusts automatically so that every trade carries the **same dollar-risk**, regardless of how volatile the underlying market is. The formula is simple:
@@ -334,6 +352,12 @@ python -m trading_bot crypto          # BTC/ETH sentiment
 python -m trading_bot rotation        # altcoin rotation
 python -m trading_bot predictions     # Kalshi prediction markets
 python -m trading_bot latency_arb     # single latency arb scan
+python -m trading_bot btc5min         # single BTC 5-min spread scan
+```
+
+Launch the live BTC spread dashboard (requires `rich>=13.0.0`):
+```bash
+python -m trading_bot btc-terminal
 ```
 
 Show portfolio status (including Kalshi positions and balance):
@@ -346,7 +370,7 @@ Run as a continuous daemon (recommended):
 python -m trading_bot run-daemon
 ```
 
-The scheduler runs crypto every 15 minutes, predictions every 60 minutes, and latency arb every 2 seconds when enabled.
+The scheduler runs crypto every 10 minutes, BTC 5-min spread every 5 minutes, predictions every 30 minutes, polymarket every 20 minutes, and latency arb every 2 seconds when enabled.
 
 ---
 
@@ -367,7 +391,7 @@ graph LR
 
     subgraph "Inbound Commands"
         MON["/status /positions /risk /history"]
-        EXEC["/crypto /stocks /rotation /predict /polymarket /backtest"]
+        EXEC["/crypto /stocks /rotation /predict /polymarket /btc5min /backtest"]
         CTRL["/pause /resume /kill"]
         CFG["/config /ai"]
     end
@@ -403,6 +427,7 @@ graph LR
 | `/predict` | Force a Kalshi prediction scan |
 | `/stocks` | Force a stock screen |
 | `/polymarket` | Force a Polymarket scan |
+| `/btc5min` | BTC 5-min spread signal card (Coinbase vs Kalshi vs Polymarket implied) |
 | `/backtest [range]` | Run a Freqtrade backtest |
 | `/pause` | Pause trading |
 | `/resume` | Resume trading |
@@ -422,6 +447,19 @@ graph LR
 ---
 
 ## Configuration
+
+### BTC 5-Min Spread Strategy
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `BTC5MIN_ENABLED` | `true` | Enable the strategy |
+| `BTC5MIN_INTERVAL_MINUTES` | `5` | How often the scheduler fires this strategy (minutes). Also readable as `SCHEDULER_BTC5MIN_INTERVAL_MINUTES`. |
+| `BTC5MIN_SYMBOL` | `BTCUSDT` | Spot BTC symbol (used for Coinbase price lookup and optional spot position) |
+| `BTC5MIN_BUY_SPREAD_THRESHOLD` | `0.02` | Spread (as a fraction) that triggers a trade; 0.02 = 2% |
+| `BTC5MIN_MAX_STRIKE_AGE_HOURS` | `48.0` | Only include prediction markets expiring within this window |
+| `BTC5MIN_MIN_KALSHI_VOLUME_USD` | `3000.0` | Minimum 24h volume (USD) for a Kalshi market to be included |
+| `BTC5MIN_MIN_POLY_VOLUME_USD` | `50000.0` | Minimum 24h volume (USD) for a Polymarket market to be included |
+| `BTC5MIN_SPOT_TRADING_ENABLED` | `true` | Also open/close a spot BTC position when prediction-market signal fires |
 
 ### Kalshi Latency Arb
 
