@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,9 +37,8 @@ from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGamma
 from trading_bot.config import AppConfig
 from trading_bot.state import StateStore
 from trading_bot.strategies.btc_5min import (
-    BTC5MinSpreadStrategy,
-    _parse_strike,
-    _compute_implied_median,
+    parse_strike,
+    compute_implied_median,
 )
 
 _REFRESH_SECONDS = 30
@@ -263,14 +261,14 @@ async def run_terminal(config: AppConfig) -> None:
             logger.warning("Spot price fetch failed: %s", exc)
 
         # Kalshi implied
+        pairs: list[tuple[float, float]] = []
         try:
             markets, _ = kalshi_client.get_markets(series_ticker="KXBTC", status="open", limit=100)
             from datetime import datetime as _dt
             now_ts = _dt.now(timezone.utc).timestamp()
             max_age = btc_cfg.max_strike_age_hours * 3600
-            pairs: list[tuple[float, float]] = []
             for m in markets:
-                strike = _parse_strike(m.get("title", "") or m.get("subtitle", ""))
+                strike = parse_strike(m.get("title", "") or m.get("subtitle", ""))
                 if strike is None:
                     continue
                 vol = float(m.get("volume_fp") or m.get("volume") or 0)
@@ -291,11 +289,12 @@ async def run_terminal(config: AppConfig) -> None:
                 yes_ask = float(m.get("yes_ask_dollars") or 0)
                 yes_mid = (yes_bid + yes_ask) / 2 if yes_bid or yes_ask else float(m.get("last_price_dollars") or 0.5)
                 pairs.append((strike, yes_mid))
-            kalshi_implied = _compute_implied_median(pairs)
+            kalshi_implied = compute_implied_median(pairs)
         except Exception as exc:
             logger.warning("Kalshi fetch failed: %s", exc)
 
         # Polymarket implied
+        pairs2: list[tuple[float, float]] = []
         try:
             mkts = gamma_client.discover_markets(
                 tags=["bitcoin"],
@@ -305,9 +304,8 @@ async def run_terminal(config: AppConfig) -> None:
             from datetime import datetime as _dt2
             now_ts2 = _dt2.now(timezone.utc).timestamp()
             max_age2 = btc_cfg.max_strike_age_hours * 3600
-            pairs2: list[tuple[float, float]] = []
             for mkt in mkts:
-                strike = _parse_strike(mkt.question)
+                strike = parse_strike(mkt.question)
                 if strike is None:
                     continue
                 if mkt.end_date:
@@ -326,7 +324,7 @@ async def run_terminal(config: AppConfig) -> None:
                     except Exception:
                         pass
                 pairs2.append((strike, yes_mid))
-            poly_implied = _compute_implied_median(pairs2)
+            poly_implied = compute_implied_median(pairs2)
         except Exception as exc:
             logger.warning("Polymarket fetch failed: %s", exc)
 
@@ -342,8 +340,8 @@ async def run_terminal(config: AppConfig) -> None:
             "poly_implied": poly_implied,
             "kalshi_spread_pct": round(kalshi_spread * 100, 3) if kalshi_spread is not None else None,
             "poly_spread_pct": round(poly_spread * 100, 3) if poly_spread is not None else None,
-            "kalshi_markets_used": len(pairs) if "pairs" in dir() else 0,
-            "poly_markets_used": len(pairs2) if "pairs2" in dir() else 0,
+            "kalshi_markets_used": len(pairs),
+            "poly_markets_used": len(pairs2),
             "actions": [],
             "threshold_pct": btc_cfg.buy_spread_threshold * 100,
         }

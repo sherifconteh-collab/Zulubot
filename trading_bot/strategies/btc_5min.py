@@ -6,7 +6,7 @@ Watches BTC price across three venues every 5 minutes:
   3. Polymarket    — implied median BTC price from bitcoin-tagged prediction markets
 
 When a venue's implied price diverges from spot by more than ``buy_spread_threshold``
-the strategy trades the mispriced venue (buys YES when implied > spot, NO when implied
+the strategy trades the mispriced venue (buys NO when implied > spot, YES when implied
 < spot) and optionally takes a spot BTC position in the same direction.
 """
 
@@ -31,7 +31,7 @@ from trading_bot.risk import RiskManager
 _STRIKE_RE = re.compile(r"\$([0-9]+(?:[,_][0-9]{3})*(?:\.[0-9]+)?)\s*([kKmM]?)")
 
 
-def _parse_strike(question: str) -> float | None:
+def parse_strike(question: str) -> float | None:
     """Extract a USD strike price from a prediction market question string."""
     match = _STRIKE_RE.search(question)
     if not match:
@@ -49,7 +49,7 @@ def _parse_strike(question: str) -> float | None:
     return value
 
 
-def _compute_implied_median(
+def compute_implied_median(
     strike_prob_pairs: list[tuple[float, float]],
 ) -> float | None:
     """Interpolate the implied median (P=0.50) BTC price from strike/probability pairs.
@@ -148,7 +148,7 @@ class BTC5MinSpreadStrategy:
 
         for m in markets:
             title = m.get("title", "") or m.get("subtitle", "")
-            strike = _parse_strike(title)
+            strike = parse_strike(title)
             if strike is None:
                 continue
 
@@ -192,7 +192,7 @@ class BTC5MinSpreadStrategy:
                 "volume": volume,
             })
 
-        implied = _compute_implied_median(strike_probs)
+        implied = compute_implied_median(strike_probs)
         self.logger.info(
             "Kalshi KXBTC: %d markets parsed, implied=%.0f",
             len(strike_probs), implied or 0,
@@ -220,7 +220,7 @@ class BTC5MinSpreadStrategy:
         parsed: list[dict[str, Any]] = []
 
         for mkt in markets:
-            strike = _parse_strike(mkt.question)
+            strike = parse_strike(mkt.question)
             if strike is None:
                 continue
 
@@ -255,7 +255,7 @@ class BTC5MinSpreadStrategy:
                 "volume_24h": mkt.volume_24h,
             })
 
-        implied = _compute_implied_median(strike_probs)
+        implied = compute_implied_median(strike_probs)
         self.logger.info(
             "Polymarket BTC: %d markets parsed, implied=%.0f",
             len(strike_probs), implied or 0,
@@ -337,7 +337,7 @@ class BTC5MinSpreadStrategy:
         spread: float,
         now: datetime,
     ) -> list[str]:
-        """Place YES or NO on the highest-volume KXBTC market near the current spot price."""
+        """Place YES or NO on the KXBTC market whose strike is closest to spot price."""
         if not kalshi_markets:
             return []
 
@@ -357,8 +357,13 @@ class BTC5MinSpreadStrategy:
             return []
 
         yes_mid = best["yes_mid"]
+        # price_cents is the cost of the contract side we're buying
         price_cents = max(1, min(99, round((yes_mid if side == "yes" else 1 - yes_mid) * 100)))
         contracts = max(1, int(notional / (price_cents / 100)))
+
+        # KalshiClient.place_order always expects `yes_price` in cents; for NO orders
+        # the YES price is the complement (100 - no_price_cents).
+        yes_price_cents = price_cents if side == "yes" else 100 - price_cents
 
         self.logger.info(
             "Kalshi %s %s: ticker=%s strike=%.0f yes_mid=%.3f price_cents=%d contracts=%d spread=%.2f%%",
@@ -372,7 +377,7 @@ class BTC5MinSpreadStrategy:
                     side=side,
                     action="buy",
                     count=contracts,
-                    yes_price=price_cents,
+                    yes_price=yes_price_cents,
                 )
             except Exception as exc:
                 self.logger.error("Kalshi order failed: %s", exc)
@@ -440,18 +445,43 @@ class BTC5MinSpreadStrategy:
             side.upper(), condition_id[:16], best["strike"], best["yes_mid"], notional, spread * 100,
         )
 
+        price = best["yes_mid"] if side.upper() == "YES" else 1.0 - best["yes_mid"]
+        price = max(0.01, min(0.99, price))
+
         self.polymarket_broker.place_limit_buy(
             state,
             market=market,
             side=side.upper(),
+            price=price,
             notional_usd=notional,
-            risk_manager=risk_manager,
             strategy=self.STRATEGY_NAME,
+            now=now,
             meta={"spread_pct": round(spread * 100, 3), "strike": best["strike"]},
         )
 
         pm_symbol = f"PM:{condition_id[:8]}:{side.upper()}"
         return [pm_symbol]
+
+    def _close_prediction_positions(
+        self,
+        state: PortfolioState,
+        broker: PaperBroker,
+        spot_price: float,
+        reason: str,
+    ) -> list[str]:
+        """Close any open Kalshi/Polymarket positions opened by this strategy."""
+        closed: list[str] = []
+        for sym in list(state.positions.keys()):
+            pos = state.positions.get(sym)
+            if pos is None:
+                continue
+            if pos.strategy != self.STRATEGY_NAME:
+                continue
+            if sym.startswith("KAL:") or sym.startswith("PM:"):
+                broker.close_position(state, symbol=sym, price=spot_price, reason=reason)
+                self.logger.info("Closed prediction position %s (%s)", sym, reason)
+                closed.append(sym)
+        return closed
 
     # ── Main run ──────────────────────────────────────────────────────
 
@@ -489,6 +519,7 @@ class BTC5MinSpreadStrategy:
         actions: list[dict[str, Any]] = []
         opens: list[str] = []
         closes: list[str] = []
+        decisions: list[dict[str, Any]] = []
 
         # ── 3. Act on Kalshi spread ───────────────────────────────────
         if kalshi_spread is not None:
@@ -514,6 +545,14 @@ class BTC5MinSpreadStrategy:
                     "action": "buy_no",
                     "symbols": syms,
                 })
+                for sym in syms:
+                    decisions.append({
+                        "strategy": self.STRATEGY_NAME,
+                        "symbol": sym,
+                        "action": "buy_no",
+                        "reason": "kalshi_bullish_spread",
+                        "signals": {"spread_pct": round(kalshi_spread * 100, 3), "threshold_pct": threshold * 100},
+                    })
 
             elif kalshi_spread < -threshold:
                 # Kalshi is too bearish → buy YES on Kalshi
@@ -536,6 +575,29 @@ class BTC5MinSpreadStrategy:
                     "action": "buy_yes",
                     "symbols": syms,
                 })
+                for sym in syms:
+                    decisions.append({
+                        "strategy": self.STRATEGY_NAME,
+                        "symbol": sym,
+                        "action": "buy_yes",
+                        "reason": "kalshi_bearish_spread",
+                        "signals": {"spread_pct": round(kalshi_spread * 100, 3), "threshold_pct": threshold * 100},
+                    })
+
+            else:
+                # Spread within threshold — flatten any open Kalshi prediction positions
+                flat = self._close_prediction_positions(
+                    state, broker, spot, reason="kalshi_spread_normalized"
+                )
+                closes.extend(flat)
+                for sym in flat:
+                    decisions.append({
+                        "strategy": self.STRATEGY_NAME,
+                        "symbol": sym,
+                        "action": "close",
+                        "reason": "kalshi_spread_normalized",
+                        "signals": {"spread_pct": round(kalshi_spread * 100, 3), "threshold_pct": threshold * 100},
+                    })
 
         # ── 4. Act on Polymarket spread ───────────────────────────────
         if poly_spread is not None:
@@ -559,6 +621,14 @@ class BTC5MinSpreadStrategy:
                     "action": "buy_no",
                     "symbols": syms,
                 })
+                for sym in syms:
+                    decisions.append({
+                        "strategy": self.STRATEGY_NAME,
+                        "symbol": sym,
+                        "action": "buy_no",
+                        "reason": "poly_bullish_spread",
+                        "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
+                    })
 
             elif poly_spread < -threshold:
                 self.logger.info("Polymarket spread %.2f%% → buy YES", poly_spread * 100)
@@ -579,6 +649,29 @@ class BTC5MinSpreadStrategy:
                     "action": "buy_yes",
                     "symbols": syms,
                 })
+                for sym in syms:
+                    decisions.append({
+                        "strategy": self.STRATEGY_NAME,
+                        "symbol": sym,
+                        "action": "buy_yes",
+                        "reason": "poly_bearish_spread",
+                        "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
+                    })
+
+            else:
+                # Spread within threshold — flatten any open Polymarket prediction positions
+                flat = self._close_prediction_positions(
+                    state, broker, spot, reason="poly_spread_normalized"
+                )
+                closes.extend(flat)
+                for sym in flat:
+                    decisions.append({
+                        "strategy": self.STRATEGY_NAME,
+                        "symbol": sym,
+                        "action": "close",
+                        "reason": "poly_spread_normalized",
+                        "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
+                    })
 
         if not actions:
             self.logger.info(
@@ -589,6 +682,17 @@ class BTC5MinSpreadStrategy:
                 f"{poly_implied:.0f}" if poly_implied else "n/a",
                 (poly_spread or 0) * 100,
             )
+            decisions.append({
+                "strategy": self.STRATEGY_NAME,
+                "symbol": self.config.btc_symbol,
+                "action": "hold",
+                "reason": "spread_within_threshold",
+                "signals": {
+                    "kalshi_spread_pct": round(kalshi_spread * 100, 3) if kalshi_spread is not None else None,
+                    "poly_spread_pct": round(poly_spread * 100, 3) if poly_spread is not None else None,
+                    "threshold_pct": threshold * 100,
+                },
+            })
 
         return {
             "status": "completed",
@@ -603,4 +707,5 @@ class BTC5MinSpreadStrategy:
             "opens": opens,
             "closes": closes,
             "threshold_pct": threshold * 100,
+            "decisions": decisions,
         }

@@ -433,7 +433,7 @@ class AppConfig:
             ),
             scheduler=SchedulerConfig(
                 crypto_interval_minutes=_env_int("SCHEDULER_CRYPTO_INTERVAL_MINUTES", 10),
-                btc5min_interval_minutes=_env_int("SCHEDULER_BTC5MIN_INTERVAL_MINUTES", 5),
+                btc5min_interval_minutes=int(os.getenv("BTC5MIN_INTERVAL_MINUTES") or os.getenv("SCHEDULER_BTC5MIN_INTERVAL_MINUTES") or "5"),
                 stock_check_hour=_env_int("SCHEDULER_STOCK_CHECK_HOUR", 9),
                 polymarket_interval_minutes=_env_int("SCHEDULER_POLYMARKET_INTERVAL_MINUTES", 20),
                 heartbeat_interval_minutes=_env_int("SCHEDULER_HEARTBEAT_INTERVAL_MINUTES", 60),
