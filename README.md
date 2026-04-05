@@ -370,7 +370,7 @@ Run as a continuous daemon (recommended):
 python -m trading_bot run-daemon
 ```
 
-The scheduler runs crypto every 10 minutes, BTC 5-min spread every 5 minutes, predictions every 30 minutes, polymarket every 20 minutes, and latency arb every 2 seconds when enabled.
+The scheduler runs crypto every 10 minutes (`SCHEDULER_CRYPTO_INTERVAL_MINUTES`), BTC 5-min spread every 5 minutes (`BTC5MIN_INTERVAL_MINUTES`), predictions every 30 minutes, Polymarket every 20 minutes, and latency arb every 2 seconds when enabled. All intervals are configurable via environment variables.
 
 ---
 
