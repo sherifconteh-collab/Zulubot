@@ -25,6 +25,7 @@ from trading_bot.risk import RiskManager, RiskSnapshot
 from trading_bot.state import StateStore
 from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.strategies.altcoin_rotation import AltcoinRotationStrategy
+from trading_bot.strategies.btc_5min import BTC5MinSpreadStrategy
 from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
 from trading_bot.strategies.latency_arb import LatencyArbStrategy
@@ -198,6 +199,19 @@ class TradingBotService:
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
+        # BTC 5-min spread strategy (spot vs Kalshi vs Polymarket)
+        self.btc5min_strategy = BTC5MinSpreadStrategy(
+            config=config.btc5min,
+            coinbase_client=self.coinbase_client,
+            coinbase_broker=self.coinbase_broker,
+            kalshi_client=self.kalshi_client,
+            gamma_client=self.gamma_client,
+            clob_client=self.clob_client,
+            polymarket_broker=self.polymarket_broker,
+            logger=logger,
+            live_kalshi_trading=not config.paper_mode and self.kalshi_client.can_trade,
+        )
+
         # Kalshi balance cache (avoids network call on every summary)
         self._kalshi_balance_cache: float | None = None
         self._kalshi_balance_cache_ts: float = 0.0
@@ -298,6 +312,16 @@ class TradingBotService:
             module_results["latency_arb"] = self._run_module(
                 "latency_arb",
                 lambda: self.latency_arb_strategy.run_once(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        if command == "btc5min":
+            module_results["btc5min"] = self._run_module(
+                "btc5min",
+                lambda: self.btc5min_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
