@@ -495,11 +495,7 @@ class BTC5MinSpreadStrategy:
                 continue
             if pos.strategy != self.STRATEGY_NAME:
                 continue
-            close_price = (
-                pos.current_price
-                if getattr(pos, "current_price", None) is not None
-                else pos.entry_price
-            )
+            close_price = pos.current_price if pos.current_price else pos.entry_price
             broker.close_position(state, symbol=sym, price=close_price, reason=reason)
             self.logger.info("Closed prediction position %s at %.4f (%s)", sym, close_price, reason)
             closed.append(sym)
