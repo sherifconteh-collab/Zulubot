@@ -333,18 +333,18 @@ async def run_terminal(config: AppConfig) -> None:
         except Exception as exc:
             logger.warning("Polymarket fetch failed: %s", exc)
 
-        # Compute spreads
+        # Compute spreads as percentages (consistent with _spread_color thresholds and format strings)
         if spot and spot > 0:
-            kalshi_spread = ((kalshi_implied - spot) / spot) if kalshi_implied else None
-            poly_spread = ((poly_implied - spot) / spot) if poly_implied else None
+            kalshi_spread = ((kalshi_implied - spot) / spot * 100) if kalshi_implied else None
+            poly_spread = ((poly_implied - spot) / spot * 100) if poly_implied else None
 
         # Summarise as a "result" dict for the signals panel
         last_result = {
             "spot_price": spot,
             "kalshi_implied": kalshi_implied,
             "poly_implied": poly_implied,
-            "kalshi_spread_pct": round(kalshi_spread * 100, 3) if kalshi_spread is not None else None,
-            "poly_spread_pct": round(poly_spread * 100, 3) if poly_spread is not None else None,
+            "kalshi_spread_pct": round(kalshi_spread, 3) if kalshi_spread is not None else None,
+            "poly_spread_pct": round(poly_spread, 3) if poly_spread is not None else None,
             "kalshi_markets_used": len(pairs),
             "poly_markets_used": len(pairs2),
             "actions": [],
@@ -379,10 +379,11 @@ async def run_terminal(config: AppConfig) -> None:
     console.print("[bold cyan]BTC 5-Min Spread Terminal[/bold cyan] — loading…")
 
     with Live(console=console, refresh_per_second=1, screen=True) as live:
+        loop = asyncio.get_running_loop()
         while True:
             try:
-                await asyncio.get_event_loop().run_in_executor(None, _refresh_data)
-                state_data = await asyncio.get_event_loop().run_in_executor(None, _get_state_data)
+                await loop.run_in_executor(None, _refresh_data)
+                state_data = await loop.run_in_executor(None, _get_state_data)
                 layout = _build_layout(
                     spot, kalshi_implied, poly_implied, kalshi_spread, poly_spread,
                     updated_at, last_result, state_data,
