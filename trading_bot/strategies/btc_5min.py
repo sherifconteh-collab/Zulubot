@@ -94,6 +94,7 @@ class BTC5MinSpreadStrategy:
     """
 
     STRATEGY_NAME = "btc_5min"
+    _KALSHI_CASH_BUCKET = "kalshi"
 
     def __init__(
         self,
@@ -356,7 +357,9 @@ class BTC5MinSpreadStrategy:
             self.logger.info("Kalshi %s blocked by risk guardrails.", side.upper())
             return []
 
-        equity = broker.portfolio_equity(state)
+        equity = broker.portfolio_equity_for_bucket(
+            state, cash_bucket=self._KALSHI_CASH_BUCKET if self.live_kalshi_trading else None
+        )
         notional = risk_manager.position_notional(state, equity, symbol=ticker)
         if notional <= 0:
             return []
@@ -388,7 +391,9 @@ class BTC5MinSpreadStrategy:
                 self.logger.error("Kalshi order failed: %s", exc)
                 return []
 
-        # Book it in the paper broker under a synthetic symbol
+        # Book it in the paper broker under a synthetic symbol.
+        # In live mode, use the Kalshi cash bucket so equity/risk accounting
+        # tracks against the dedicated Kalshi buying-power balance.
         kal_symbol = f"KAL:{ticker[:16]}:{side.upper()}"
         broker.open_position(
             state,
@@ -398,6 +403,7 @@ class BTC5MinSpreadStrategy:
             price=price_cents / 100,
             notional=notional,
             opened_at=now,
+            cash_bucket=self._KALSHI_CASH_BUCKET if self.live_kalshi_trading else None,
             meta={
                 "ticker": ticker,
                 "side": side,
@@ -471,21 +477,32 @@ class BTC5MinSpreadStrategy:
         self,
         state: PortfolioState,
         broker: PaperBroker,
-        spot_price: float,
+        prefix: str,
         reason: str,
     ) -> list[str]:
-        """Close any open Kalshi/Polymarket positions opened by this strategy."""
+        """Close open prediction positions whose symbol starts with *prefix*.
+
+        Positions are closed at their own current_price (or entry_price if no
+        mark is available), so P&L is computed in probability units (0–1) — not
+        in spot-BTC dollars, which would produce wildly incorrect proceeds.
+        """
         closed: list[str] = []
         for sym in list(state.positions.keys()):
+            if not sym.startswith(prefix):
+                continue
             pos = state.positions.get(sym)
             if pos is None:
                 continue
             if pos.strategy != self.STRATEGY_NAME:
                 continue
-            if sym.startswith("KAL:") or sym.startswith("PM:"):
-                broker.close_position(state, symbol=sym, price=spot_price, reason=reason)
-                self.logger.info("Closed prediction position %s (%s)", sym, reason)
-                closed.append(sym)
+            close_price = (
+                pos.current_price
+                if getattr(pos, "current_price", None) is not None
+                else pos.entry_price
+            )
+            broker.close_position(state, symbol=sym, price=close_price, reason=reason)
+            self.logger.info("Closed prediction position %s at %.4f (%s)", sym, close_price, reason)
+            closed.append(sym)
         return closed
 
     # ── Main run ──────────────────────────────────────────────────────
@@ -592,7 +609,7 @@ class BTC5MinSpreadStrategy:
             else:
                 # Spread within threshold — flatten any open Kalshi prediction positions
                 flat = self._close_prediction_positions(
-                    state, broker, spot, reason="kalshi_spread_normalized"
+                    state, broker, prefix="KAL:", reason="kalshi_spread_normalized"
                 )
                 closes.extend(flat)
                 for sym in flat:
@@ -666,7 +683,7 @@ class BTC5MinSpreadStrategy:
             else:
                 # Spread within threshold — flatten any open Polymarket prediction positions
                 flat = self._close_prediction_positions(
-                    state, broker, spot, reason="poly_spread_normalized"
+                    state, broker, prefix="PM:", reason="poly_spread_normalized"
                 )
                 closes.extend(flat)
                 for sym in flat:
