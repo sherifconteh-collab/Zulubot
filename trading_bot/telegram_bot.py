@@ -648,6 +648,7 @@ class TradingTelegramBot:
             "backtest": self._cmd_backtest,
             "ai": self._cmd_ai,
             "history": self._cmd_history,
+            "btc5min": self._cmd_btc5min,
             "help": self._cmd_help,
             "start": self._cmd_help,
         }
@@ -677,6 +678,7 @@ class TradingTelegramBot:
             f"\n"
             f"\u26a1 <b>Execute</b>\n"  # ⚡
             f"  /crypto — Force crypto cycle\n"
+            f"  /btc5min — BTC spread scan (Kalshi vs Polymarket vs spot)\n"
             f"  /rotation — Force altcoin rotation\n"
             f"  /predict — Force prediction scan\n"
             f"  /stocks — Force stock screen\n"
@@ -745,6 +747,50 @@ class TradingTelegramBot:
             result = self._service.run("polymarket")
             result["force_send"] = True
             await self.send_trade_alert(result)
+        except Exception as exc:
+            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_btc5min(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        await update.message.reply_text("\U000020bf Running BTC 5-min spread scan...")  # type: ignore[union-attr]
+        try:
+            result = self._service.run("btc5min")
+            btc = result.get("btc5min", {})
+            spot = btc.get("spot_price")
+            k_imp = btc.get("kalshi_implied")
+            p_imp = btc.get("poly_implied")
+            k_sp = btc.get("kalshi_spread_pct")
+            p_sp = btc.get("poly_spread_pct")
+            actions = btc.get("actions", [])
+
+            lines = ["\U000020bf <b>BTC 5-Min Spread</b>"]
+            if spot:
+                lines.append(f"Spot:             <code>${spot:,.0f}</code>")
+            if k_imp:
+                sp_str = f"{k_sp:+.3f}%" if k_sp is not None else ""
+                lines.append(f"Kalshi implied:   <code>${k_imp:,.0f}</code>  {sp_str}")
+            if p_imp:
+                sp_str = f"{p_sp:+.3f}%" if p_sp is not None else ""
+                lines.append(f"Polymarket:       <code>${p_imp:,.0f}</code>  {sp_str}")
+
+            if actions:
+                lines.append("")
+                for act in actions:
+                    venue = act.get("venue", "").upper()
+                    action = act.get("action", "").upper()
+                    sp = act.get("spread_pct", 0.0)
+                    lines.append(f"\u26a1 [{venue}] {action}  spread={sp:+.3f}%")
+            else:
+                threshold = btc.get("threshold_pct", 2.0)
+                lines.append(f"\nHOLD — spreads within \u00b1{threshold:.1f}% threshold")
+
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "\n".join(lines), parse_mode="HTML"
+            )
         except Exception as exc:
             await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
 
