@@ -109,6 +109,8 @@ class SchedulerService:
 
     async def _tick(self) -> None:
         now = datetime.now(self.config.timezone)
+        module_results: list[dict[str, Any]] = []
+        trade_notification_sent = False
 
         # Check if paused via Telegram
         if self.telegram.paused:
@@ -120,68 +122,146 @@ class SchedulerService:
 
         # Latency arb cycle (highest priority — runs every scan_interval_seconds)
         if self._should_run_latency_arb(now):
-            await self._run_module("latency_arb", now)
+            result = await self._run_module("latency_arb", now)
+            if result is not None:
+                module_results.append(result)
             self._last_latency_arb_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
 
         # Crypto cycle
         if self._should_run_crypto(now):
-            await self._run_module("crypto", now)
+            result = await self._run_module("crypto", now)
+            if result is not None:
+                module_results.append(result)
             self._last_crypto_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
 
         # BTC 5-min spread monitor
         if self._should_run_btc5min(now):
-            await self._run_module("btc5min", now)
+            result = await self._run_module("btc5min", now)
+            if result is not None:
+                module_results.append(result)
             self._last_btc5min_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
 
         # Altcoin rotation cycle
         if self._should_run_rotation(now):
-            await self._run_module("rotation", now)
+            result = await self._run_module("rotation", now)
+            if result is not None:
+                module_results.append(result)
             self._last_rotation_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
 
         # Predictions cycle
         if self._should_run_predictions(now):
-            await self._run_module("predictions", now)
+            result = await self._run_module("predictions", now)
+            if result is not None:
+                module_results.append(result)
             self._last_predictions_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
 
         # Polymarket cycle
         if self._should_run_polymarket(now):
-            await self._run_module("polymarket", now)
+            result = await self._run_module("polymarket", now)
+            if result is not None:
+                module_results.append(result)
             self._last_polymarket_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
 
         # Stock cycle (only at configured hour, once per day)
         if self._should_run_stocks(now):
-            await self._run_module("stocks", now)
+            result = await self._run_module("stocks", now)
+            if result is not None:
+                module_results.append(result)
             self._last_stock_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
+
+        if module_results:
+            await self._finalize_trade_notifications(module_results)
+            trade_notification_sent = True
 
         # Heartbeat
         if self._should_heartbeat(now):
-            try:
-                status = self.service.status()
-                await self.notifier.notify_heartbeat(status)
-                risk = status.get("risk", {})
-                if risk.get("daily_halt_active") or risk.get("kill_switch_active"):
-                    await self.notifier.notify_risk(risk)
-            except Exception as exc:
-                self.logger.error("Heartbeat failed: %s", exc)
+            if not trade_notification_sent:
+                try:
+                    status = self.service.status()
+                    await self.notifier.notify_heartbeat(status)
+                    risk = status.get("risk", {})
+                    if risk.get("daily_halt_active") or risk.get("kill_switch_active"):
+                        await self.notifier.notify_risk(risk)
+                except Exception as exc:
+                    self.logger.error("Heartbeat failed: %s", exc)
             self._last_heartbeat = now
 
-    async def _run_module(self, command: str, now: datetime) -> None:
+    async def _run_module(self, command: str, now: datetime) -> dict[str, Any] | None:
         try:
             self.logger.info("Running %s cycle at %s", command, now.isoformat())
             result = self.service.run(command)
-            await self.notifier.notify_trade(result)
-
-            # Check for risk alerts after trade
-            risk = result.get("risk", {})
-            if risk.get("kill_switch_active"):
-                await self.notifier.notify_risk(risk)
-                self.telegram._paused = True
-                await self.notifier.notify_error("Kill switch triggered. Bot paused.")
+            return result
 
         except Exception as exc:
             error_msg = f"{command} module failed: {exc}\n{traceback.format_exc()}"
             self.logger.error(error_msg)
             await self.notifier.notify_error(f"{command} failed: {exc}")
+            return None
+
+    async def _finalize_trade_notifications(self, results: list[dict[str, Any]]) -> None:
+        combined = self._combine_results(results)
+        await self.notifier.notify_trade(combined)
+
+        risk = combined.get("risk", {})
+        if risk.get("daily_halt_active") or risk.get("kill_switch_active"):
+            await self.notifier.notify_risk(risk)
+
+    async def _handle_kill_switch(self, result: dict[str, Any]) -> None:
+        risk = result.get("risk", {})
+        if risk.get("kill_switch_active"):
+            self.telegram._paused = True
+            await self.notifier.notify_error("Kill switch triggered. Bot paused.")
+
+    @staticmethod
+    def _combine_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+        if not results:
+            return {}
+
+        combined = dict(results[-1])
+        modules: dict[str, Any] = {}
+        for result in results:
+            modules.update(result.get("modules", {}))
+
+        combined["modules"] = modules
+        combined["timestamp"] = results[-1].get("timestamp")
+        combined["pre_risk_equity"] = results[0].get("pre_risk_equity", combined.get("pre_risk_equity"))
+        combined["post_risk_equity"] = results[-1].get("post_risk_equity", combined.get("post_risk_equity"))
+        return combined
 
     def _should_run_latency_arb(self, now: datetime) -> bool:
         if not self.config.latency_arb.enabled:

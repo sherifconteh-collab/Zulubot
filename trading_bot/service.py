@@ -217,6 +217,14 @@ class TradingBotService:
         self._kalshi_balance_cache_ts: float = 0.0
         self._kalshi_balance_cache_ttl: float = 120.0  # 2-minute TTL
 
+    def _skipped_module(self, reason: str) -> dict[str, Any]:
+        return {
+            "status": "skipped",
+            "reason": reason,
+            "opens": [],
+            "closes": [],
+        }
+
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
@@ -247,16 +255,20 @@ class TradingBotService:
             }
 
         if command in {"stocks", "all"}:
-            module_results["stocks"] = self._run_module(
-                "stocks",
-                lambda: self.stock_strategy.run(
-                    state,
-                    broker=self.broker,
-                    risk_manager=self.risk_manager,
-                    now=now,
-                    force=force,
-                ),
-            )
+            if self.config.paper_mode:
+                module_results["stocks"] = self._run_module(
+                    "stocks",
+                    lambda: self.stock_strategy.run(
+                        state,
+                        broker=self.broker,
+                        risk_manager=self.risk_manager,
+                        now=now,
+                        force=force,
+                    ),
+                )
+            else:
+                self.logger.warning("Stocks module skipped in live mode: live stock execution is not implemented.")
+                module_results["stocks"] = self._skipped_module("live_stock_execution_unavailable")
         if command in {"crypto", "all"}:
             module_results["crypto"] = self._run_module(
                 "crypto",
@@ -288,26 +300,29 @@ class TradingBotService:
                 ),
             )
         if command in {"polymarket", "all"}:
-            # Get Fear & Greed for cross-module sentiment signal
-            fg_value = None
-            if command == "all" and "crypto" in module_results:
-                fg_value = module_results["crypto"].get("fear_and_greed")
-            elif command == "polymarket":
-                try:
-                    fg_reading = self.alternative_client.get_fear_and_greed()
-                    fg_value = fg_reading.value
-                except Exception:
-                    pass
-            module_results["polymarket"] = self._run_module(
-                "polymarket",
-                lambda: self.polymarket_strategy.run(
-                    state,
-                    broker=self.broker,
-                    risk_manager=self.risk_manager,
-                    now=now,
-                    fear_greed_value=fg_value,
-                ),
-            )
+            if self.config.paper_mode:
+                fg_value = None
+                if command == "all" and "crypto" in module_results:
+                    fg_value = module_results["crypto"].get("fear_and_greed")
+                elif command == "polymarket":
+                    try:
+                        fg_reading = self.alternative_client.get_fear_and_greed()
+                        fg_value = fg_reading.value
+                    except Exception:
+                        pass
+                module_results["polymarket"] = self._run_module(
+                    "polymarket",
+                    lambda: self.polymarket_strategy.run(
+                        state,
+                        broker=self.broker,
+                        risk_manager=self.risk_manager,
+                        now=now,
+                        fear_greed_value=fg_value,
+                    ),
+                )
+            else:
+                self.logger.warning("Polymarket module skipped in live mode: live Polymarket execution is not implemented.")
+                module_results["polymarket"] = self._skipped_module("polymarket_live_execution_unavailable")
         if command in {"latency_arb", "all"}:
             module_results["latency_arb"] = self._run_module(
                 "latency_arb",
@@ -351,6 +366,80 @@ class TradingBotService:
         self._persist_ai_budget(state)
         self.state_store.save(state)
         return self._build_summary(state, pre_risk=risk, post_risk=risk, modules={})
+
+    def engage_kill_switch(self, *, reason: str = "manual_kill_switch") -> dict[str, Any]:
+        now = datetime.now(self.config.timezone)
+        state = self.state_store.load()
+        self._hydrate_ai_budget(state)
+        if not self.config.paper_mode:
+            self._sync_coinbase_balance(state)
+            self._sync_kalshi_balance(state)
+            self._sync_kalshi_positions(state)
+        self.refresh_open_positions(state, now=now)
+
+        pre_risk = self._evaluate_risk(state, now)
+        state.kill_switch_engaged = True
+        liquidation = self._liquidate_all_positions(state, reason=reason)
+        post_risk = self._evaluate_risk(state, now)
+        self._persist_ai_budget(state)
+        self.state_store.save(state)
+
+        summary = self._build_summary(
+            state,
+            pre_risk=pre_risk,
+            post_risk=post_risk,
+            modules={
+                "kill_switch": {
+                    "status": "engaged",
+                    "closed": liquidation["closed"],
+                    "failed": liquidation["failed"],
+                    "reason": reason,
+                }
+            },
+        )
+        self.logger.warning("Kill switch engaged manually. closed=%s failed=%s", liquidation["closed"], liquidation["failed"])
+        return summary
+
+    def clear_kill_switch(self) -> dict[str, Any]:
+        now = datetime.now(self.config.timezone)
+        state = self.state_store.load()
+        self._hydrate_ai_budget(state)
+        if not self.config.paper_mode:
+            self._sync_coinbase_balance(state)
+            self._sync_kalshi_balance(state)
+            self._sync_kalshi_positions(state)
+        self.refresh_open_positions(state, now=now)
+
+        equity = self.broker.portfolio_equity(state)
+        total_drawdown = 0.0
+        if state.peak_equity > 0 and equity < state.peak_equity:
+            total_drawdown = (state.peak_equity - equity) / state.peak_equity
+
+        if total_drawdown >= self.config.risk.kill_switch_drawdown:
+            raise RuntimeError(
+                f"Kill switch cannot be cleared while total drawdown is {total_drawdown * 100:.2f}% "
+                f"and threshold is {self.config.risk.kill_switch_drawdown * 100:.2f}%"
+            )
+
+        pre_risk = self._evaluate_risk(state, now)
+        state.kill_switch_engaged = False
+        post_risk = self._evaluate_risk(state, now)
+        self._persist_ai_budget(state)
+        self.state_store.save(state)
+
+        summary = self._build_summary(
+            state,
+            pre_risk=pre_risk,
+            post_risk=post_risk,
+            modules={
+                "kill_switch": {
+                    "status": "cleared",
+                    "reason": "manual_resume",
+                }
+            },
+        )
+        self.logger.info("Kill switch cleared manually at drawdown=%.2f%%", total_drawdown * 100)
+        return summary
 
     def _hydrate_ai_budget(self, state: PortfolioState) -> None:
         if self.ai_service is None:
@@ -809,7 +898,9 @@ class TradingBotService:
                 snapshot.equity,
                 snapshot.total_drawdown * 100,
             )
-            self.broker.close_all(state, reason="kill_switch")
+            liquidation = self._liquidate_all_positions(state, reason="kill_switch")
+            if liquidation["failed"]:
+                self.logger.error("Kill switch close failures: %s", liquidation["failed"])
         elif snapshot.daily_halt_active:
             self.logger.warning(
                 "Daily halt active at equity=%.2f daily_drawdown=%.2f%%.",
@@ -817,6 +908,55 @@ class TradingBotService:
                 snapshot.daily_drawdown * 100,
             )
         return snapshot
+
+    def _liquidate_all_positions(self, state: PortfolioState, *, reason: str) -> dict[str, list[str]]:
+        closed: list[str] = []
+        failed: list[str] = []
+
+        for symbol in list(state.positions.keys()):
+            position = state.positions.get(symbol)
+            if position is None:
+                continue
+
+            close_price = state.last_prices.get(symbol, position.current_price or position.entry_price)
+            live_close_ok = True
+
+            if not self.config.paper_mode:
+                if position.asset_type == "crypto":
+                    live_close_ok = self.coinbase_broker.place_market_sell_by_product(
+                        product_id=position.symbol,
+                        quantity=position.quantity,
+                        reason=reason,
+                    )
+                elif position.asset_type == "prediction" and symbol.startswith("KX:"):
+                    ticker = str(position.meta.get("ticker", ""))
+                    side = str(position.meta.get("side", "yes")).lower()
+                    contracts = max(1, int(position.quantity))
+                    if self.kalshi_client.can_trade and ticker:
+                        try:
+                            self.kalshi_client.place_order(
+                                ticker=ticker,
+                                side=side,
+                                action="sell",
+                                count=contracts,
+                            )
+                        except Exception as exc:
+                            self.logger.error("Kalshi kill-switch sell failed for %s: %s", symbol, exc)
+                            live_close_ok = False
+                    else:
+                        live_close_ok = False
+                elif position.asset_type == "prediction":
+                    self.logger.warning("Skipping unsupported live prediction close for %s during %s", symbol, reason)
+                    live_close_ok = False
+
+            if not live_close_ok:
+                failed.append(symbol)
+                continue
+
+            self.broker.close_position(state, symbol=symbol, price=close_price, reason=reason)
+            closed.append(symbol)
+
+        return {"closed": closed, "failed": failed}
 
     def _build_summary(
         self,

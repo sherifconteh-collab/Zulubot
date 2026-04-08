@@ -1213,11 +1213,28 @@ class TradingTelegramBot:
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
             return
-        self._paused = False
-        await update.message.reply_text(  # type: ignore[union-attr]
-            f"\u25b6\ufe0f <b>Bot RESUMED</b>\n\nAutomated trading is active.",
-            parse_mode="HTML",
-        )
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            state = self._service.state_store.load()
+            cleared_kill_switch = False
+            if state.kill_switch_engaged:
+                self._service.clear_kill_switch()
+                cleared_kill_switch = True
+            self._paused = False
+            message = "\u25b6\ufe0f <b>Bot RESUMED</b>\n\nAutomated trading is active."
+            if cleared_kill_switch:
+                message = (
+                    "\u25b6\ufe0f <b>Bot RESUMED</b>\n\n"
+                    "Kill switch cleared and automated trading is active."
+                )
+            await update.message.reply_text(message, parse_mode="HTML")  # type: ignore[union-attr]
+        except Exception as exc:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"\u26a0\ufe0f Resume blocked: {exc}",
+                parse_mode="HTML",
+            )
 
     async def _cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -1230,13 +1247,14 @@ class TradingTelegramBot:
             parse_mode="HTML",
         )
         try:
-            state = self._service.state_store.load()
-            state.kill_switch_engaged = True
-            self._service.broker.close_all(state, reason="manual_kill_switch")
-            self._service.state_store.save(state)
+            summary = self._service.engage_kill_switch(reason="manual_kill_switch")
             self._paused = True
-            status = self._service.status()
-            await self.send_heartbeat(status)
+            await self.send_heartbeat(summary)
+            failed = summary.get("modules", {}).get("kill_switch", {}).get("failed", [])
+            if failed:
+                await self.send_message(
+                    f"\u26a0\ufe0f Kill switch engaged, but some live positions could not be closed automatically: {', '.join(failed)}"
+                )
             await self.send_message(
                 f"\U0001f6d1 Kill switch engaged. All positions closed. Bot paused."
             )
