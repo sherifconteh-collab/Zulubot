@@ -427,6 +427,13 @@ class BTC5MinSpreadStrategy:
         now: datetime,
     ) -> list[str]:
         """Place YES or NO on the Polymarket market closest to spot price."""
+        if not self.polymarket_broker.paper_mode:
+            self.logger.warning(
+                "Polymarket live execution is not implemented; skipping %s signal to avoid unhedged exposure.",
+                side.upper(),
+            )
+            return []
+
         if not poly_markets:
             return []
 
@@ -439,7 +446,6 @@ class BTC5MinSpreadStrategy:
             self.logger.info("Polymarket %s blocked by risk guardrails.", side.upper())
             return []
 
-        # Fetch the full PolymarketMarket object needed by the broker
         try:
             market = self.gamma_client.get_market(condition_id)
         except Exception as exc:
@@ -483,7 +489,7 @@ class BTC5MinSpreadStrategy:
         """Close open prediction positions whose symbol starts with *prefix*.
 
         Positions are closed at their own current_price (or entry_price if no
-        mark is available), so P&L is computed in probability units (0–1) — not
+        mark is available), so P&L is computed in probability units (0-1) - not
         in spot-BTC dollars, which would produce wildly incorrect proceeds.
         """
         closed: list[str] = []
@@ -501,8 +507,6 @@ class BTC5MinSpreadStrategy:
             closed.append(sym)
         return closed
 
-    # ── Main run ──────────────────────────────────────────────────────
-
     def run(
         self,
         state: PortfolioState,
@@ -514,16 +518,13 @@ class BTC5MinSpreadStrategy:
         if not self.config.enabled:
             return {"status": "disabled"}
 
-        # ── 1. Fetch all three prices ─────────────────────────────────
         spot = self._get_spot_price()
         kalshi_implied, kalshi_markets = self._get_kalshi_implied()
         poly_implied, poly_markets = self._get_polymarket_implied()
 
-        # Mark existing spot position with current price
         if spot is not None:
             broker.mark_positions(state, {self.config.btc_symbol: spot})
 
-        # ── 2. Compute spreads ────────────────────────────────────────
         kalshi_spread: float | None = None
         poly_spread: float | None = None
 
@@ -539,17 +540,14 @@ class BTC5MinSpreadStrategy:
         closes: list[str] = []
         decisions: list[dict[str, Any]] = []
 
-        # ── 3. Act on Kalshi spread ───────────────────────────────────
         if kalshi_spread is not None:
             if kalshi_spread > threshold:
-                # Kalshi is too bullish → sell YES (buy NO) on Kalshi
-                self.logger.info("Kalshi spread +%.2f%% → buy NO", kalshi_spread * 100)
+                self.logger.info("Kalshi spread +%.2f%% -> buy NO", kalshi_spread * 100)
                 syms = self._trade_kalshi(
                     state, broker, risk_manager, kalshi_markets,
                     side="no", spot_price=spot, spread=kalshi_spread, now=now,
                 )
                 opens.extend(syms)
-                # Also buy spot BTC (price will catch up to implied)
                 if self.config.spot_trading_enabled:
                     bought = self._open_spot_position(
                         state, broker, risk_manager, spot, now,
@@ -573,14 +571,12 @@ class BTC5MinSpreadStrategy:
                     })
 
             elif kalshi_spread < -threshold:
-                # Kalshi is too bearish → buy YES on Kalshi
-                self.logger.info("Kalshi spread %.2f%% → buy YES", kalshi_spread * 100)
+                self.logger.info("Kalshi spread %.2f%% -> buy YES", kalshi_spread * 100)
                 syms = self._trade_kalshi(
                     state, broker, risk_manager, kalshi_markets,
                     side="yes", spot_price=spot, spread=kalshi_spread, now=now,
                 )
                 opens.extend(syms)
-                # Sell any open spot BTC position
                 if self.config.spot_trading_enabled:
                     closed = self._close_spot_position(
                         state, broker, spot, reason="kalshi_bearish_spread"
@@ -603,7 +599,6 @@ class BTC5MinSpreadStrategy:
                     })
 
             else:
-                # Spread within threshold — flatten any open Kalshi prediction positions
                 flat = self._close_prediction_positions(
                     state, broker, prefix="KAL:", reason="kalshi_spread_normalized"
                 )
@@ -617,67 +612,83 @@ class BTC5MinSpreadStrategy:
                         "signals": {"spread_pct": round(kalshi_spread * 100, 3), "threshold_pct": threshold * 100},
                     })
 
-        # ── 4. Act on Polymarket spread ───────────────────────────────
         if poly_spread is not None:
             if poly_spread > threshold:
-                self.logger.info("Polymarket spread +%.2f%% → buy NO", poly_spread * 100)
+                self.logger.info("Polymarket spread +%.2f%% -> buy NO", poly_spread * 100)
                 syms = self._trade_polymarket(
                     state, broker, risk_manager, poly_markets,
                     side="no", spot_price=spot, spread=poly_spread, now=now,
                 )
-                opens.extend(syms)
-                if self.config.spot_trading_enabled and self.config.btc_symbol not in state.positions:
-                    bought = self._open_spot_position(
-                        state, broker, risk_manager, spot, now,
-                        meta={"signal": "poly_spread", "spread_pct": round(poly_spread * 100, 3)},
-                    )
-                    if bought:
-                        opens.append(self.config.btc_symbol)
-                actions.append({
-                    "venue": "polymarket",
-                    "spread_pct": round(poly_spread * 100, 3),
-                    "action": "buy_no",
-                    "symbols": syms,
-                })
-                for sym in syms:
+                if syms:
+                    opens.extend(syms)
+                    if self.config.spot_trading_enabled and self.config.btc_symbol not in state.positions:
+                        bought = self._open_spot_position(
+                            state, broker, risk_manager, spot, now,
+                            meta={"signal": "poly_spread", "spread_pct": round(poly_spread * 100, 3)},
+                        )
+                        if bought:
+                            opens.append(self.config.btc_symbol)
+                    actions.append({
+                        "venue": "polymarket",
+                        "spread_pct": round(poly_spread * 100, 3),
+                        "action": "buy_no",
+                        "symbols": syms,
+                    })
+                    for sym in syms:
+                        decisions.append({
+                            "strategy": self.STRATEGY_NAME,
+                            "symbol": sym,
+                            "action": "buy_no",
+                            "reason": "poly_bullish_spread",
+                            "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
+                        })
+                else:
                     decisions.append({
                         "strategy": self.STRATEGY_NAME,
-                        "symbol": sym,
-                        "action": "buy_no",
-                        "reason": "poly_bullish_spread",
+                        "symbol": self.config.btc_symbol,
+                        "action": "skip",
+                        "reason": "polymarket_live_execution_unavailable",
                         "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
                     })
 
             elif poly_spread < -threshold:
-                self.logger.info("Polymarket spread %.2f%% → buy YES", poly_spread * 100)
+                self.logger.info("Polymarket spread %.2f%% -> buy YES", poly_spread * 100)
                 syms = self._trade_polymarket(
                     state, broker, risk_manager, poly_markets,
                     side="yes", spot_price=spot, spread=poly_spread, now=now,
                 )
-                opens.extend(syms)
-                if self.config.spot_trading_enabled:
-                    closed = self._close_spot_position(
-                        state, broker, spot, reason="poly_bearish_spread"
-                    )
-                    if closed:
-                        closes.append(self.config.btc_symbol)
-                actions.append({
-                    "venue": "polymarket",
-                    "spread_pct": round(poly_spread * 100, 3),
-                    "action": "buy_yes",
-                    "symbols": syms,
-                })
-                for sym in syms:
+                if syms:
+                    opens.extend(syms)
+                    if self.config.spot_trading_enabled:
+                        closed = self._close_spot_position(
+                            state, broker, spot, reason="poly_bearish_spread"
+                        )
+                        if closed:
+                            closes.append(self.config.btc_symbol)
+                    actions.append({
+                        "venue": "polymarket",
+                        "spread_pct": round(poly_spread * 100, 3),
+                        "action": "buy_yes",
+                        "symbols": syms,
+                    })
+                    for sym in syms:
+                        decisions.append({
+                            "strategy": self.STRATEGY_NAME,
+                            "symbol": sym,
+                            "action": "buy_yes",
+                            "reason": "poly_bearish_spread",
+                            "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
+                        })
+                else:
                     decisions.append({
                         "strategy": self.STRATEGY_NAME,
-                        "symbol": sym,
-                        "action": "buy_yes",
-                        "reason": "poly_bearish_spread",
+                        "symbol": self.config.btc_symbol,
+                        "action": "skip",
+                        "reason": "polymarket_live_execution_unavailable",
                         "signals": {"spread_pct": round(poly_spread * 100, 3), "threshold_pct": threshold * 100},
                     })
 
             else:
-                # Spread within threshold — flatten any open Polymarket prediction positions
                 flat = self._close_prediction_positions(
                     state, broker, prefix="PM:", reason="poly_spread_normalized"
                 )
@@ -693,7 +704,7 @@ class BTC5MinSpreadStrategy:
 
         if not actions:
             self.logger.info(
-                "BTC5min HOLD — spot=%.0f kalshi_implied=%s (%.2f%%) poly_implied=%s (%.2f%%)",
+                "BTC5min HOLD - spot=%.0f kalshi_implied=%s (%.2f%%) poly_implied=%s (%.2f%%)",
                 spot or 0,
                 f"{kalshi_implied:.0f}" if kalshi_implied else "n/a",
                 (kalshi_spread or 0) * 100,

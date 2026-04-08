@@ -42,17 +42,7 @@ class NotificationDispatcher:
     async def notify_startup(self, paper_mode: bool, vol_targeting_enabled: bool) -> None:
         msg = f"Trading bot started. Paper mode: {paper_mode}"
         self.logger.info(msg)
-        if self.telegram and self.telegram.is_configured:
-            if not vol_targeting_enabled:
-                msg += (
-                    "\n\n⚠️ <b>Volatility targeting is OFF.</b> "
-                    "Set <code>VOL_TARGETING_ENABLED=true</code> to enable "
-                    "risk-adjusted position sizing."
-                )
-            await self.telegram.send_message(msg)
 
     async def notify_shutdown(self) -> None:
         msg = "Trading bot shutting down."
         self.logger.info(msg)
-        if self.telegram and self.telegram.is_configured:
-            await self.telegram.send_message(msg)

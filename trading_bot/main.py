@@ -6,6 +6,7 @@ import json
 
 from trading_bot.config import AppConfig
 from trading_bot.logging_utils import setup_logging
+from trading_bot.runtime_lock import BotRuntimeLockError, acquire_bot_lock
 from trading_bot.service import TradingBotService
 
 
@@ -79,8 +80,14 @@ def main() -> int:
 
     if args.command == "btc-terminal":
         from trading_bot.btc_terminal import run_terminal
-        asyncio.run(run_terminal(config))
-        return 0
+        try:
+            with acquire_bot_lock(config.data_dir, "btc-terminal"):
+                asyncio.run(run_terminal(config, logger, service))
+            return 0
+        except BotRuntimeLockError as exc:
+            logger.error("%s", exc)
+            print(f"ERROR: {exc}")
+            return 1
 
     if args.command in ("backtest", "hyperopt", "download-data"):
         return _run_freqtrade(config, args, logger)
@@ -110,8 +117,14 @@ def _run_daemon(config: AppConfig, service: TradingBotService, logger, once: boo
         return 0
 
     logger.info("Starting trading bot daemon...")
-    asyncio.run(scheduler.run_forever())
-    return 0
+    try:
+        with acquire_bot_lock(config.data_dir, "run-daemon"):
+            asyncio.run(scheduler.run_forever())
+        return 0
+    except BotRuntimeLockError as exc:
+        logger.error("%s", exc)
+        print(f"ERROR: {exc}")
+        return 1
 
 
 def _run_freqtrade(config: AppConfig, args: argparse.Namespace, logger) -> int:
