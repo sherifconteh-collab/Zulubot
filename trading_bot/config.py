@@ -293,8 +293,8 @@ class PredictionConfig:
     enabled: bool = False                # OFF by default
     kalshi_key_id: str = ""              # Kalshi API key ID
     kalshi_private_key: str = ""         # Kalshi RSA private key PEM
-    buy_yes_threshold: float = 0.35      # Buy YES below this price
-    buy_no_threshold: float = 0.65       # Buy NO above this price
+    buy_yes_threshold: float = 0.45      # Buy YES below this price (wider = more aggressive)
+    buy_no_threshold: float = 0.55       # Buy NO above this price (wider = more aggressive)
     take_profit_threshold: float = 0.50  # Take profit at 0.50
     stop_loss_pct: float = 0.15          # Stop loss at 15% move against
     max_positions: int = 8
@@ -304,6 +304,11 @@ class PredictionConfig:
     max_spread_usd: float = 0.20         # Maximum bid/ask spread allowed per side
     market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather"])
     capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
+    # Opt-in extra gate for crypto-category markets: require an extreme Fear &
+    # Greed reading to align with the price threshold. Default False so crypto
+    # predictions trade on price thresholds alone — previously this gate kept
+    # the Kalshi strategy idle outside of extreme sentiment regimes.
+    require_crypto_fear_greed: bool = False
 
 
 @dataclass(frozen=True)
@@ -427,6 +432,7 @@ class AppConfig:
                 buy_fear_threshold=_env_int("CRYPTO_BUY_FEAR_THRESHOLD", 35),
                 sell_fear_threshold=_env_int("CRYPTO_SELL_FEAR_THRESHOLD", 75),
                 use_coinbase_pricing=_env_bool("CRYPTO_USE_COINBASE_PRICING", True),
+                require_negative_funding=_env_bool("CRYPTO_REQUIRE_NEGATIVE_FUNDING", False),
             ),
             coinbase=CoinbaseConfig(
                 api_key=os.getenv("COINBASE_API_KEY", "").strip(),
@@ -518,8 +524,8 @@ class AppConfig:
                 enabled=_env_bool("PREDICTION_ENABLED", False),
                 kalshi_key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
                 kalshi_private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
-                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.35),
-                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.65),
+                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.45),
+                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.55),
                 take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
                 stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
                 max_positions=_env_int("PREDICTION_MAX_POSITIONS", 8),
@@ -529,6 +535,7 @@ class AppConfig:
                 max_spread_usd=_env_float("PREDICTION_MAX_SPREAD_USD", 0.20),
                 market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather"]),
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
+                require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),

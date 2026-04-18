@@ -236,8 +236,9 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_evaluate_signal_rejects_wide_yes_spread(self) -> None:
-        """_evaluate_signal() returns None when YES bid-ask spread > 15 cents."""
-        market = _make_market(yes_ask=0.50, yes_bid=0.30)  # spread = 0.20 > 0.15
+        """_evaluate_signal() returns None when YES bid-ask spread exceeds threshold."""
+        # YES spread = 0.21, above the default max_spread_usd of 0.20
+        market = _make_market(yes_ask=0.50, yes_bid=0.29)
         strategy = self._make_strategy()
         result = strategy._evaluate_signal(market, mid=market["_mid"], fear_greed_value=None)
         self.assertIsNone(result)
@@ -286,14 +287,24 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
 
     def test_evaluate_signal_respects_configured_spread_threshold(self) -> None:
         """max_spread_usd from config should control the liquidity guard."""
+        # Spread of 0.18 on each side
         market = _make_market(yes_ask=0.50, yes_bid=0.32, no_ask=0.68, no_bid=0.50)
-        default_strategy = self._make_strategy()
-        self.assertIsNone(default_strategy._evaluate_signal(market, mid=0.41, fear_greed_value=None))
+        config_tight = PredictionConfig(
+            enabled=True,
+            market_categories=["crypto"],
+            max_spread_usd=0.15,  # tighter than the 0.18 spread → reject
+        )
+        strategy_tight = CoinbasePredictionStrategy(
+            config=config_tight,
+            kalshi_client=FakeKalshiClient([]),  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        self.assertIsNone(strategy_tight._evaluate_signal(market, mid=0.29, fear_greed_value=None))
 
         config_wider = PredictionConfig(
             enabled=True,
             market_categories=["crypto"],
-            max_spread_usd=0.20,
+            max_spread_usd=0.20,  # wider than the 0.18 spread → accept
         )
         strategy_wider = CoinbasePredictionStrategy(
             config=config_wider,
@@ -302,6 +313,42 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
         )
         result = strategy_wider._evaluate_signal(market, mid=0.29, fear_greed_value=None)
         self.assertEqual(result, ("yes", 0.50))
+
+    def test_crypto_signal_ignores_fear_greed_by_default(self) -> None:
+        """By default, crypto-category markets trade on the price threshold alone.
+
+        Previously a hidden extra gate required extreme Fear & Greed
+        (<=30 YES / >=70 NO), which kept the Kalshi strategy idle in neutral
+        sentiment regimes. The gate is now opt-in via
+        PredictionConfig.require_crypto_fear_greed.
+        """
+        market = _make_market(yes_ask=0.30, yes_bid=0.28, volume=10_000)
+        strategy = self._make_strategy()
+        # Neutral Fear & Greed (50): default strategy should still fire YES.
+        result = strategy._evaluate_signal(market, mid=0.29, fear_greed_value=50)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "yes")
+
+    def test_crypto_signal_respects_opt_in_fear_greed_gate(self) -> None:
+        """With require_crypto_fear_greed=True, neutral F&G should veto the signal."""
+        market = _make_market(yes_ask=0.30, yes_bid=0.28, volume=10_000)
+        config = PredictionConfig(
+            enabled=True,
+            market_categories=["crypto"],
+            require_crypto_fear_greed=True,
+        )
+        strategy = CoinbasePredictionStrategy(
+            config=config,
+            kalshi_client=FakeKalshiClient([]),  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        # Neutral F&G veto.
+        self.assertIsNone(strategy._evaluate_signal(market, mid=0.29, fear_greed_value=50))
+        # Extreme fear lets the YES signal through.
+        self.assertEqual(
+            strategy._evaluate_signal(market, mid=0.29, fear_greed_value=20),
+            ("yes", 0.30),
+        )
 
     def test_live_trading_uses_kalshi_cash_bucket(self) -> None:
         market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=10_000.0)

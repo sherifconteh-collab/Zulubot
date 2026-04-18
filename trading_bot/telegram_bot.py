@@ -335,295 +335,167 @@ class TradingTelegramBot:
         self._append_generic_ai_context(lines, module_data)
 
     async def send_trade_alert(self, result: dict[str, Any]) -> None:
+        """Minimal trade alert. Only sent when there are real trades, errors,
+        or an active risk event. Format: plain, scannable, no emoji clutter.
+        """
         module_results = result.get("modules", {})
+        risk = result.get("risk", {})
         paper = result.get("paper_mode", True)
-        mode_tag = "\U0001f4dd PAPER" if paper else "\U0001f4b0 LIVE"  # 📝 or 💰
+        force_send = bool(result.get("force_send"))
 
-        lines = [
-            f"\U0001f916 <b>ZULUBOT TRADE CYCLE</b>  {mode_tag}",  # 🤖
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-        ]
-
+        # Gather trades and errors up front so we can decide whether to send
+        # anything at all.
+        trade_lines: list[str] = []
+        error_lines: list[str] = []
         has_trades = False
         for module_name, module_data in module_results.items():
             if not isinstance(module_data, dict):
                 continue
-            status = module_data.get("status", "unknown")
-            buys = module_data.get("buys", [])
-            sells = module_data.get("sells", [])
-            error = module_data.get("error")
-
-            icon = self._module_icon(module_name)
-
-            if error:
-                lines.append(f"\n{icon} <b>{module_name.upper()}</b>  \u26a0\ufe0f <i>{status}</i>")
-                lines.append(f"   \u2514 Error: {html.escape(_clip_text(error, 100))}")
-                continue
-
+            buys = module_data.get("buys") or []
+            sells = module_data.get("sells") or []
+            err = module_data.get("error")
             if buys or sells:
                 has_trades = True
-                lines.append(f"\n{icon} <b>{module_name.upper()}</b>  {self._module_status_text(status, has_trades=True)}")
                 for sym in buys:
-                    lines.append(f"   \U0001f7e2 BUY  <code>{html.escape(str(sym))}</code>")
+                    trade_lines.append(f"BUY  {html.escape(str(sym))}  [{module_name}]")
                 for sym in sells:
-                    lines.append(f"   \U0001f534 SELL <code>{html.escape(str(sym))}</code>")
+                    trade_lines.append(f"SELL {html.escape(str(sym))}  [{module_name}]")
                 self.record_trade({
                     "time": result.get("timestamp", ""),
                     "module": module_name,
                     "buys": buys,
                     "sells": sells,
                 })
-            else:
-                lines.append(f"\n{icon} <b>{module_name.upper()}</b>  {self._module_status_text(status, has_trades=False)}")
+            if err:
+                error_lines.append(
+                    f"{module_name}: {html.escape(_clip_text(err, 140))}"
+                )
 
-            self._append_module_context(lines, module_name, module_data)
+        kill = bool(risk.get("kill_switch_active"))
+        halt = bool(risk.get("daily_halt_active"))
+        has_risk_event = kill or halt
 
-        # ── Portfolio Summary ──
-        equity = result.get("equity", 0)
-        cash = result.get("cash", 0)
-        pnl = result.get("realized_pnl", 0)
-        positions = result.get("open_positions", [])
-        kalshi_bal = result.get("kalshi_balance")
+        # Silence: no trades, no errors, no risk → don't message at all
+        # (unless a command explicitly forced it via force_send).
+        if not has_trades and not error_lines and not has_risk_event and not force_send:
+            return
 
-        lines.append(f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-        lines.append(f"\U0001f4b0 <b>PORTFOLIO</b>")  # 💰
-        lines.append(f"  Equity:    <b>{_format_currency(equity)}</b>")
-        lines.append(f"  Cash:      {_format_currency(cash)}")
-        if kalshi_bal is not None:
-            lines.append(f"  \U0001f3b2 Kalshi:  {_format_currency(kalshi_bal)}")  # 🎲
-        lines.append(f"  {_pnl_emoji(pnl)} P&L:     {'+' if pnl >= 0 else ''}{_format_currency(pnl)}")
-        lines.append(f"  Positions: {len(positions)}")
+        mode_tag = "PAPER" if paper else "LIVE"
+        header = f"<b>Trade cycle</b> — {mode_tag}"
 
-        # ── AI Analyst Summary ──
-        ai_info = result.get("ai_info")
-        if ai_info:
-            mode = ai_info.get("confirmation_mode", "?")
-            multi = ai_info.get("multi_analyst_enabled", False)
-            analysts = ai_info.get("selected_analysts", [])
-            remaining = ai_info.get("budget_remaining_usd", 0)
-            monthly = ai_info.get("monthly_cost_usd", 0)
-            breaker = ai_info.get("circuit_breaker", {})
-            features = self._ai_feature_summary(ai_info)
-            registered_tools = ai_info.get("registered_tools", [])
-            if multi and analysts:
-                analyst_str = ", ".join(analysts)
-                lines.append(f"\n\U0001f9e0 <b>AI ANALYSTS</b>: {analyst_str}")  # 🧠
-            else:
-                lines.append(f"\n\U0001f9e0 <b>AI</b>: {html.escape(str(mode))} mode")
-            lines.append(f"   \u2514 spent=${float(monthly):.4f} | left=${float(remaining):.2f}")
-            lines.append(f"   \u2514 Features: {html.escape(features)}")
-            if registered_tools:
-                lines.append(f"   \u2514 Tools: {html.escape(', '.join(str(tool) for tool in registered_tools))}")
-            if breaker:
-                state = str(breaker.get("state", "unknown")).upper()
-                if state not in {"CLOSED", "DISABLED"}:
-                    remaining_open = float(breaker.get("remaining_open_seconds", 0.0) or 0.0)
-                    lines.append(f"   \u2514 Circuit: {html.escape(state)} ({remaining_open:.0f}s cooldown)")
+        lines: list[str] = [header]
 
-        # Risk status
-        risk = result.get("risk", {})
-        if risk.get("kill_switch_active"):
-            lines.append(f"\n\U0001f6a8 <b>KILL SWITCH ACTIVE</b> \U0001f6a8")  # 🚨
-        elif risk.get("daily_halt_active"):
-            lines.append(f"\n\u26a0\ufe0f <b>DAILY HALT ACTIVE</b>")  # ⚠️
+        if trade_lines:
+            lines.append("")
+            lines.extend(trade_lines)
 
-        stale_price_count = result.get("stale_price_count", 0)
-        if stale_price_count:
-            lines.append(f"\n\u26a0\ufe0f <b>STALE PRICES</b>: {stale_price_count}")
-            for item in result.get("stale_prices", [])[:3]:
-                symbol = item.get("symbol", "?")
-                age = item.get("age_seconds")
-                age_text = "unknown age" if age is None else f"{age:.0f}s old"
-                lines.append(f"   \u2514 <code>{symbol}</code> {age_text}")
+        if error_lines:
+            lines.append("")
+            lines.append("<b>Errors</b>")
+            for e in error_lines:
+                lines.append(e)
 
-        latency_snapshot = result.get("latency_ms", {})
-        if latency_snapshot:
-            lines.append(f"\n\u23f1\ufe0f <b>LATENCY</b>")
-            for name, stats in list(latency_snapshot.items())[:4]:
-                lines.append(f"   \u2514 {name}: {stats.get('last_ms', 0):.2f}ms")
+        # Minimal portfolio footer (single line).
+        equity = result.get("equity")
+        pnl = result.get("realized_pnl")
+        if equity is not None:
+            pnl_str = ""
+            if pnl is not None:
+                pnl_str = f"  P&L {'+' if pnl >= 0 else ''}{_format_currency(pnl)}"
+            lines.append("")
+            lines.append(f"Equity {_format_currency(equity)}{pnl_str}")
 
-        # Only send if there were actual trades, errors, or active risk events.
-        has_errors = any(
-            isinstance(v, dict) and v.get("error")
-            for v in module_results.values()
-        )
-        has_risk_event = bool(risk.get("kill_switch_active") or risk.get("daily_halt_active"))
-        force_send = bool(result.get("force_send"))
+        if kill:
+            lines.append("")
+            lines.append("<b>KILL SWITCH ACTIVE</b>")
+        elif halt:
+            lines.append("")
+            lines.append("<b>Daily halt active</b>")
 
-        if not has_trades and not has_errors and not has_risk_event:
-            if not force_send:
-                return
-            lines.append("\nCycle complete: no trades executed this run, but the decision context above shows what the bot evaluated.")
+        if force_send and not has_trades and not error_lines and not has_risk_event:
+            lines.append("")
+            lines.append("No trades this cycle.")
 
         await self.send_message("\n".join(lines))
 
     async def send_heartbeat(self, status: dict[str, Any]) -> None:
+        """Compact heartbeat / status response. Plain text, no dividers,
+        no AI/latency/scan-date blocks. Serves scheduled heartbeats (opt-in)
+        and on-demand /status.
+        """
         equity = status.get("equity", 0)
         cash = status.get("cash", 0)
         pnl = status.get("realized_pnl", 0)
-        positions = status.get("open_positions", [])
-        risk = status.get("risk", {})
+        positions = status.get("open_positions", []) or []
+        risk = status.get("risk", {}) or {}
         kalshi_bal = status.get("kalshi_balance")
-        ai_info = status.get("ai_info")
-        stale_price_count = status.get("stale_price_count", 0)
-        stale_prices = status.get("stale_prices", [])
-        latency_snapshot = status.get("latency_ms", {})
-
-        dd_daily = risk.get("daily_drawdown_pct", 0)
-        dd_total = risk.get("total_drawdown_pct", 0)
-        peak = risk.get("peak_equity", 0)
 
         lines = [
-            f"\U0001f916 <b>ZULUBOT HEARTBEAT</b>",  # 🤖
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-            "",
-            f"\U0001f4b0 <b>PORTFOLIO</b>",  # 💰
-            f"  Equity:  <b>{_format_currency(equity)}</b>",
-            f"  Cash:    {_format_currency(cash)}",
+            "<b>Status</b>",
+            f"Equity {_format_currency(equity)}  "
+            f"P&L {'+' if pnl >= 0 else ''}{_format_currency(pnl)}",
+            f"Cash {_format_currency(cash)}"
+            + (
+                f"  Kalshi {_format_currency(kalshi_bal)}"
+                if kalshi_bal is not None else ""
+            ),
         ]
 
-        # Kalshi balance
-        if kalshi_bal is not None:
-            lines.append(f"  \U0001f3b2 Kalshi: {_format_currency(kalshi_bal)}")  # 🎲
+        dd_daily = risk.get("daily_drawdown_pct", 0) or 0
+        dd_total = risk.get("total_drawdown_pct", 0) or 0
+        if dd_daily or dd_total:
+            lines.append(f"DD: day {dd_daily:.1f}%  total {dd_total:.1f}%")
 
-        lines.extend([
-            f"  {_pnl_emoji(pnl)} P&L:   {'+' if pnl >= 0 else ''}{_format_currency(pnl)}",
-            f"  \U0001f3c6 Peak:  {_format_currency(peak)}",  # 🏆
-        ])
-
-        # Drawdown visual bar
-        if dd_daily != 0 or dd_total != 0:
-            lines.append("")
-            lines.append(f"\U0001f6e1 <b>RISK</b>")  # 🛡
-            dd_bar = _progress_bar(abs(dd_daily) / 5.0)  # 5% = full bar
-            lines.append(f"  Daily DD:  {dd_bar} {dd_daily:.1f}%")
-            total_bar = _progress_bar(abs(dd_total) / 15.0)  # 15% = full bar
-            lines.append(f"  Total DD:  {total_bar} {dd_total:.1f}%")
-
-        # Positions grouped by type
         if positions:
-            # Group positions by asset type
-            by_type: dict[str, list[dict[str, Any]]] = {}
-            for pos in positions:
-                atype = pos.get("asset_type", "other")
-                by_type.setdefault(atype, []).append(pos)
-
-            type_labels = {
-                "stock": ("\U0001f4c8", "STOCKS"),
-                "crypto": ("\U0001f4b1", "CRYPTO"),
-                "prediction": ("\U0001f3b2", "PREDICTIONS"),
-            }
-
-            for atype, type_positions in by_type.items():
-                icon, label = type_labels.get(atype, ("\u2699\ufe0f", atype.upper()))
-                type_pnl = sum(p.get("unrealized_pnl", 0) for p in type_positions)
-                lines.append(f"\n{icon} <b>{label}</b> ({len(type_positions)}) "
-                             f"{_pnl_emoji(type_pnl)} {'+' if type_pnl >= 0 else ''}{_format_currency(type_pnl)}")
-
-                for pos in type_positions:
-                    sym = pos.get("symbol", "?")
-                    pnl_pos = pos.get("unrealized_pnl", 0)
-                    mv = pos.get("market_value", 0)
-                    entry = pos.get("entry_price", 0)
-                    current = pos.get("current_price", 0)
-                    pct_change = ((current - entry) / entry * 100) if entry > 0 else 0
-
-                    lines.append(
-                        f"  {_pnl_arrow(pnl_pos)} <b>{sym}</b>  "
-                        f"{_format_currency(mv)} "
-                        f"({'+' if pct_change >= 0 else ''}{pct_change:.1f}%) "
-                        f"P&L: {'+' if pnl_pos >= 0 else ''}{_format_currency(pnl_pos)}"
-                    )
-        else:
-            lines.append(f"\n\U0001f4e6 No open positions")
-
-        # AI Analysts section
-        if ai_info:
-            multi = ai_info.get("multi_analyst_enabled", False)
-            analysts = ai_info.get("selected_analysts", [])
-            remaining = ai_info.get("budget_remaining_usd", 0)
-            mode = ai_info.get("confirmation_mode", "?")
-            monthly = ai_info.get("monthly_cost_usd", 0)
-            breaker = ai_info.get("circuit_breaker", {})
-            features = self._ai_feature_summary(ai_info)
-            registered_tools = ai_info.get("registered_tools", [])
+            # Simple one-line-per-position list (no asset-type grouping, no
+            # entry/current/qty detail — the user can request /positions).
             lines.append("")
-            if multi and analysts:
-                lines.append(f"\U0001f9e0 <b>AI ANALYSTS</b> ({mode})")  # 🧠
-                for a in analysts:
-                    lines.append(f"  \u2022 {a}")
-                lines.append(f"  \U0001f4b3 ${monthly:.4f} spent | ${remaining:.2f} left")
-            else:
-                lines.append(f"\U0001f9e0 <b>AI</b>: {mode} | ${remaining:.2f} left")
-                lines.append(f"  \U0001f4b3 ${monthly:.4f} spent this month")
-            lines.append(f"  Features: {html.escape(features)}")
-            if registered_tools:
-                lines.append(f"  Tools: {html.escape(', '.join(str(tool) for tool in registered_tools))}")
-            if breaker and breaker.get("state") not in {None, "closed", "disabled"}:
-                remaining_open = float(breaker.get("remaining_open_seconds", 0.0) or 0.0)
+            lines.append(f"<b>Positions</b> ({len(positions)})")
+            for pos in positions[:10]:
+                sym = pos.get("symbol", "?")
+                pnl_pos = pos.get("unrealized_pnl", 0) or 0
+                entry = pos.get("entry_price") or 0
+                current = pos.get("current_price") or 0
+                pct = ((current - entry) / entry * 100) if entry else 0
                 lines.append(
-                    f"  Circuit: {html.escape(str(breaker.get('state')).upper())} "
-                    f"({remaining_open:.0f}s cooldown)"
+                    f"{html.escape(str(sym))}  "
+                    f"{'+' if pct >= 0 else ''}{pct:.1f}%  "
+                    f"{'+' if pnl_pos >= 0 else ''}{_format_currency(pnl_pos)}"
                 )
-
-        # Risk switches
-        lines.append("")
-        lines.append(f"{_risk_status_icon(risk.get('daily_halt_active', False))} Daily Halt")
-        lines.append(f"{_risk_status_icon(risk.get('kill_switch_active', False))} Kill Switch")
-
-        if stale_price_count:
+            if len(positions) > 10:
+                lines.append(f"… +{len(positions) - 10} more (see /positions)")
+        else:
             lines.append("")
-            lines.append(f"\u26a0\ufe0f <b>Stale Prices</b>: {stale_price_count}")
-            for item in stale_prices[:3]:
-                symbol = item.get("symbol", "?")
-                age = item.get("age_seconds")
-                age_text = "unknown age" if age is None else f"{age:.0f}s"
-                lines.append(f"  <code>{symbol}</code> {age_text}")
+            lines.append("No open positions.")
 
-        if latency_snapshot:
+        if risk.get("kill_switch_active"):
             lines.append("")
-            lines.append("\u23f1\ufe0f <b>Latency</b>")
-            for name, stats in list(latency_snapshot.items())[:4]:
-                lines.append(f"  {name}: {stats.get('last_ms', 0):.2f}ms")
-
-        # Module scan dates
-        stock_date = status.get("last_stock_screen_date") or "never"
-        kalshi_date = status.get("last_predictions_scan_date") or "never"
-        poly_date = status.get("last_polymarket_scan_date") or "never"
-        lines.append(f"\n\U0001f4c5 Last Scans")  # 📅
-        lines.append(f"  Stocks: {stock_date}")
-        lines.append(f"  \U0001f3b2 Kalshi: {kalshi_date}")  # 🎲
-        lines.append(f"  \U0001f52e Polymarket: {poly_date}")  # 🔮
+            lines.append("<b>KILL SWITCH ACTIVE</b>")
+        elif risk.get("daily_halt_active"):
+            lines.append("")
+            lines.append("<b>Daily halt active</b>")
 
         if self._paused:
-            lines.append(f"\n\u23f8\ufe0f <b>BOT PAUSED</b> \u2014 monitoring only")
+            lines.append("")
+            lines.append("Paused — monitoring only.")
 
         await self.send_message("\n".join(lines))
 
     async def send_risk_alert(self, snapshot: dict[str, Any]) -> None:
-        lines = [
-            f"\U0001f6a8\U0001f6a8\U0001f6a8 <b>RISK ALERT</b> \U0001f6a8\U0001f6a8\U0001f6a8",  # 🚨
-            "",
-        ]
         if snapshot.get("kill_switch_active"):
-            lines.append(f"\U0001f6d1 <b>KILL SWITCH ENGAGED</b>")  # 🛑
-            lines.append("All positions have been closed!")
-        if snapshot.get("daily_halt_active"):
-            dd = snapshot.get("daily_drawdown_pct", 0)
-            lines.append(f"\u26a0\ufe0f <b>DAILY HALT</b> — Drawdown: {dd:.1f}%")
-            lines.append("No new trades until tomorrow.")
-
-        lines.append("")
-        lines.append(f"\U0001f4b0 Equity: {_format_currency(snapshot.get('equity', 0))}")
-        lines.append(f"\U0001f3c6 Peak: {_format_currency(snapshot.get('peak_equity', 0))}")
-        await self.send_message("\n".join(lines))
+            dd = snapshot.get("total_drawdown_pct", 0) or 0
+            await self.send_message(
+                f"<b>Kill switch</b> engaged. Total DD {dd:.1f}%. "
+                f"All positions closed."
+            )
+        elif snapshot.get("daily_halt_active"):
+            dd = snapshot.get("daily_drawdown_pct", 0) or 0
+            await self.send_message(
+                f"<b>Daily halt</b> — drawdown {dd:.1f}%. No new trades today."
+            )
 
     async def send_error(self, error_msg: str) -> None:
-        await self.send_message(
-            f"\u26a0\ufe0f <b>ERROR</b>\n"  # ⚠️
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-            f"{error_msg}"
-        )
+        await self.send_message(f"<b>Error</b>: {html.escape(_clip_text(error_msg, 300))}")
 
     # ── Inbound command handlers ───────────────────────────────────
 
@@ -664,35 +536,26 @@ class TradingTelegramBot:
         if not self._check_auth(update):
             return
         await update.message.reply_text(  # type: ignore[union-attr]
-            f"\U0001f916 <b>Zulu Trading Bot</b>\n"  # 🤖
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-            f"\n"
-            f"\U0001f4ca <b>Monitor</b>\n"  # 📊
-            f"  /status — Portfolio dashboard\n"
-            f"  /positions — Open positions\n"
-            f"  /risk — Risk metrics\n"
-            f"  /latency — Module timings\n"
-            f"  /history — Recent trades\n"
-            f"  /audit [count] — Trade audit tail\n"
-            f"  /decisions [count] — Strategy decision report\n"
-            f"\n"
-            f"\u26a1 <b>Execute</b>\n"  # ⚡
-            f"  /crypto — Force crypto cycle\n"
-            f"  /btc5min — BTC spread scan (Kalshi vs Polymarket vs spot)\n"
-            f"  /rotation — Force altcoin rotation\n"
-            f"  /predict — Force prediction scan\n"
-            f"  /stocks — Force stock screen\n"
-            f"  /polymarket — Force Polymarket scan\n"
-            f"  /backtest [range] — Run backtest\n"
-            f"\n"
-            f"\U0001f6e0 <b>Control</b>\n"  # 🛠
-            f"  /pause — Pause trading\n"
-            f"  /resume — Resume trading\n"
-            f"  /kill — Emergency stop\n"
-            f"\n"
-            f"\u2699\ufe0f <b>Settings</b>\n"  # ⚙️
-            f"  /config — Show configuration\n"
-            f"  /ai — AI cost & budget\n",
+            "<b>Zulubot</b>\n"
+            "\n"
+            "<b>Monitor</b>\n"
+            "/status — portfolio + positions\n"
+            "/positions — open positions (detailed)\n"
+            "/risk — risk metrics\n"
+            "/history — recent trades\n"
+            "/audit [N] — trade audit tail\n"
+            "/decisions [N] — strategy decisions\n"
+            "/latency — module timings\n"
+            "\n"
+            "<b>Run</b>\n"
+            "/crypto /stocks /rotation /predict /polymarket /btc5min\n"
+            "/backtest [range]\n"
+            "\n"
+            "<b>Control</b>\n"
+            "/pause /resume /kill\n"
+            "\n"
+            "<b>Settings</b>\n"
+            "/config /ai",
             parse_mode="HTML",
         )
 
@@ -706,7 +569,7 @@ class TradingTelegramBot:
             status = self._service.status()
             await self.send_heartbeat(status)
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_crypto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -714,13 +577,12 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f4b1 Running crypto cycle...")  # type: ignore[union-attr]
         try:
             result = self._service.run("crypto")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_stocks(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -728,13 +590,12 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f4c8 Running stock screen (forced)...")  # type: ignore[union-attr]
         try:
             result = self._service.run("stocks", force=True)
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_polymarket(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -742,13 +603,12 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f52e Running Polymarket scan...")  # type: ignore[union-attr]
         try:
             result = self._service.run("polymarket")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_btc5min(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -756,7 +616,6 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U000020bf Running BTC 5-min spread scan...")  # type: ignore[union-attr]
         try:
             result = self._service.run("btc5min")
             btc = result.get("btc5min", {})
@@ -767,32 +626,32 @@ class TradingTelegramBot:
             p_sp = btc.get("poly_spread_pct")
             actions = btc.get("actions", [])
 
-            lines = ["\U000020bf <b>BTC 5-Min Spread</b>"]
+            lines = ["<b>BTC 5-min spread</b>"]
             if spot:
-                lines.append(f"Spot:             <code>${spot:,.0f}</code>")
+                lines.append(f"Spot        ${spot:,.0f}")
             if k_imp:
-                sp_str = f"{k_sp:+.3f}%" if k_sp is not None else ""
-                lines.append(f"Kalshi implied:   <code>${k_imp:,.0f}</code>  {sp_str}")
+                sp_str = f"  ({k_sp:+.3f}%)" if k_sp is not None else ""
+                lines.append(f"Kalshi      ${k_imp:,.0f}{sp_str}")
             if p_imp:
-                sp_str = f"{p_sp:+.3f}%" if p_sp is not None else ""
-                lines.append(f"Polymarket:       <code>${p_imp:,.0f}</code>  {sp_str}")
+                sp_str = f"  ({p_sp:+.3f}%)" if p_sp is not None else ""
+                lines.append(f"Polymarket  ${p_imp:,.0f}{sp_str}")
 
             if actions:
                 lines.append("")
                 for act in actions:
-                    venue = act.get("venue", "").upper()
-                    action = act.get("action", "").upper()
+                    venue = str(act.get("venue", "")).upper()
+                    action = str(act.get("action", "")).upper()
                     sp = act.get("spread_pct", 0.0)
-                    lines.append(f"\u26a1 [{venue}] {action}  spread={sp:+.3f}%")
+                    lines.append(f"{action} [{venue}]  spread {sp:+.3f}%")
             else:
                 threshold = btc.get("threshold_pct", 2.0)
-                lines.append(f"\nHOLD — spreads within \u00b1{threshold:.1f}% threshold")
+                lines.append(f"\nHold — spreads within ±{threshold:.1f}%.")
 
             await update.message.reply_text(  # type: ignore[union-attr]
                 "\n".join(lines), parse_mode="HTML"
             )
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_rotation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -800,13 +659,12 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f504 Running altcoin rotation cycle...")  # type: ignore[union-attr]
         try:
             result = self._service.run("rotation")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_predictions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -814,13 +672,12 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text("\U0001f3b0 Running prediction markets scan...")  # type: ignore[union-attr]
         try:
             result = self._service.run("predictions")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -829,42 +686,38 @@ class TradingTelegramBot:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
 
-        timerange = None
-        if context.args:
-            timerange = context.args[0]
-
+        timerange = context.args[0] if context.args else None
         await update.message.reply_text(  # type: ignore[union-attr]
-            f"\U0001f9ea Running backtest{' (' + timerange + ')' if timerange else ''}..."  # 🧪
-            f"\nThis may take a few minutes."
+            f"Running backtest{' (' + timerange + ')' if timerange else ''}…"
         )
         try:
             from trading_bot.integrations.freqtrade_adapter import FreqtradeAdapter
             adapter = FreqtradeAdapter(self._service.config)
             if not adapter.is_available:
                 await update.message.reply_text(  # type: ignore[union-attr]
-                    "\u26a0\ufe0f Freqtrade not available.\n"
-                    "Install: pip install -r requirements-freqtrade.txt\n"
+                    "Freqtrade not available. "
+                    "Install: pip install -r requirements-freqtrade.txt. "
                     "Enable: FREQTRADE_ENABLED=true in .env"
                 )
                 return
             result = adapter.run_backtest(timerange=timerange)
-            lines = ["\U0001f9ea <b>Backtest Results</b>"]
+            lines = ["<b>Backtest</b>"]
             if "strategy" in result:
-                lines.append(f"\U0001f3af Strategy: {result['strategy']}")
+                lines.append(f"Strategy   {result['strategy']}")
             if "total_trades" in result:
-                lines.append(f"\U0001f4ca Trades: {result['total_trades']}")
+                lines.append(f"Trades     {result['total_trades']}")
             if "profit_total_pct" in result:
                 pct = result["profit_total_pct"]
-                lines.append(f"{_pnl_emoji(pct)} Profit: {'+' if pct >= 0 else ''}{pct:.2f}%")
+                lines.append(f"Profit     {'+' if pct >= 0 else ''}{pct:.2f}%")
             if "max_drawdown_pct" in result:
-                lines.append(f"\U0001f4c9 Max DD: {result['max_drawdown_pct']:.2f}%")
+                lines.append(f"Max DD     {result['max_drawdown_pct']:.2f}%")
             if "sharpe_ratio" in result:
-                lines.append(f"\U0001f4cf Sharpe: {result['sharpe_ratio']:.2f}")
+                lines.append(f"Sharpe     {result['sharpe_ratio']:.2f}")
             if "win_rate" in result:
-                lines.append(f"\U0001f3c6 Win Rate: {result['win_rate']:.1%}")
+                lines.append(f"Win rate   {result['win_rate']:.1%}")
             await self.send_message("\n".join(lines))
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Backtest error: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Backtest error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_ai(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -875,97 +728,38 @@ class TradingTelegramBot:
         cfg = self._service.config
         if not cfg.trading_agents.enabled:
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"\U0001f9e0 <b>AI ANALYSTS</b>\n"  # 🧠
-                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                f"\u23f8\ufe0f Status: DISABLED\n"
-                f"\nEnable: TRADING_AGENTS_ENABLED=true",
+                "<b>AI</b>: disabled. Enable via TRADING_AGENTS_ENABLED=true.",
                 parse_mode="HTML",
             )
             return
 
         ai = getattr(self._service, "ai_service", None)
-        if ai is not None and hasattr(ai, "get_monthly_cost"):
-            monthly = ai.get_monthly_cost()
-            remaining = ai.get_budget_remaining()
-            cap = cfg.trading_agents.max_cost_per_month
-            usage_pct = monthly / cap if cap > 0 else 0
-            usage_bar = _progress_bar(usage_pct)
-            breaker = ai.get_circuit_breaker_status() if hasattr(ai, "get_circuit_breaker_status") else None
-            registered_tools = ai.get_registered_tools() if hasattr(ai, "get_registered_tools") else []
-
-            multi = cfg.trading_agents.multi_analyst_enabled
-            analysts = list(cfg.trading_agents.selected_analysts)
-
-            lines = [
-                f"\U0001f9e0 <b>AI ANALYSTS</b>",  # 🧠
-                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                f"\u2705 Status: ACTIVE",
-                f"\U0001f3af Mode: {cfg.trading_agents.confirmation_mode}",
-                f"",
-            ]
-
-            # Multi-analyst team display
-            if multi:
-                lines.append(f"\U0001f465 <b>Analyst Team</b> (multi-perspective)")  # 👥
-                try:
-                    from trading_bot.integrations.analyst_personas import get_analyst
-                    for key in analysts:
-                        persona = get_analyst(key)
-                        if persona:
-                            lines.append(f"  \u2022 <b>{html.escape(persona.display_name)}</b>")
-                            lines.append(f"    <i>{html.escape(persona.description)}</i>")
-                        else:
-                            lines.append(f"  \u2022 {html.escape(key)}")
-                except ImportError:
-                    for key in analysts:
-                        lines.append(f"  \u2022 {html.escape(key)}")
-                lines.append(f"")
-                lines.append(f"\U0001f504 Signals aggregated via weighted voting")
-            else:
-                lines.append(f"\U0001f464 <b>Single Agent</b> (Haiku \u2192 Sonnet)")  # 👤
-
-            lines.extend([
-                f"",
-                f"\U0001f4b3 <b>Budget</b>",
-                f"  Spent:     ${monthly:.4f}",
-                f"  Remaining: ${remaining:.2f}",
-                f"  {usage_bar} {usage_pct:.0%} of ${cap:.2f}/mo",
-                f"  Hard stop: {'YES' if remaining <= 0 else 'NO'}",
-                f"",
-                f"\U0001f916 <b>Models</b>",
-                f"  Quick: {cfg.trading_agents.quick_model}",
-                f"  Deep:  {cfg.trading_agents.deep_model}",
-                f"  Cache: {cfg.trading_agents.cache_ttl_hours}h TTL",
-                f"",
-                f"\U0001f6e0 <b>Features</b>",
-                f"  Streaming: {_on_off(cfg.trading_agents.streaming_enabled)}",
-                f"  Tools: {_on_off(cfg.trading_agents.tool_calling_enabled)}",
-                f"  Vision: {_on_off(cfg.trading_agents.vision_enabled)}",
-                f"  Thinking: {_on_off(cfg.trading_agents.extended_thinking_enabled)}",
-                f"  Prompt guard: {_on_off(cfg.trading_agents.prompt_injection_protection_enabled)}",
-            ])
-            if cfg.trading_agents.extended_thinking_enabled:
-                lines.append(
-                    f"  Thinking budget: {cfg.trading_agents.thinking_budget_tokens} tokens "
-                    f"({cfg.trading_agents.thinking_display})"
-                )
-            if registered_tools:
-                lines.append(f"  Registered: {', '.join(registered_tools)}")
-            if breaker:
-                circuit_state = str(breaker.get('state', 'unknown')).upper()
-                cooldown = float(breaker.get('remaining_open_seconds', 0.0) or 0.0)
-                lines.append(
-                    f"  Circuit: {circuit_state} | failures={breaker.get('failure_count', 0)}"
-                    f" | cooldown={cooldown:.0f}s"
-                )
-            await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
-        else:
+        if ai is None or not hasattr(ai, "get_monthly_cost"):
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"\U0001f9e0 <b>AI ANALYSTS</b>\n"
-                f"\u26a0\ufe0f Enabled but unavailable\n"
-                f"Check LLM provider config (ANTHROPIC_API_KEY or OLLAMA_BASE_URL)",
+                "<b>AI</b>: enabled but unavailable. "
+                "Check ANTHROPIC_API_KEY / OLLAMA_BASE_URL.",
                 parse_mode="HTML",
             )
+            return
+
+        monthly = ai.get_monthly_cost()
+        remaining = ai.get_budget_remaining()
+        cap = cfg.trading_agents.max_cost_per_month
+        usage_pct = (monthly / cap * 100) if cap > 0 else 0
+        multi = cfg.trading_agents.multi_analyst_enabled
+        analysts = list(cfg.trading_agents.selected_analysts)
+
+        lines = [
+            "<b>AI</b>",
+            f"Mode       {cfg.trading_agents.confirmation_mode}",
+            f"Quick      {cfg.trading_agents.quick_model}",
+            f"Deep       {cfg.trading_agents.deep_model}",
+            f"Spent      ${monthly:.4f} ({usage_pct:.0f}% of ${cap:.2f}/mo)",
+            f"Remaining  ${remaining:.2f}",
+        ]
+        if multi and analysts:
+            lines.append("Analysts   " + ", ".join(analysts))
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
     async def _cmd_latency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -979,16 +773,14 @@ class TradingTelegramBot:
             await update.message.reply_text("No latency samples recorded yet.")  # type: ignore[union-attr]
             return
 
-        lines = [
-            "\u23f1\ufe0f <b>Module Latency</b>",
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-        ]
+        lines = ["<b>Latency</b>"]
         for name, stats in latency.items():
             lines.append(
-                f"{html.escape(name)}: last={stats.get('last_ms', 0):.2f}ms | "
-                f"avg={stats.get('avg_ms', 0):.2f}ms | "
-                f"max={stats.get('max_ms', 0):.2f}ms | "
-                f"samples={int(stats.get('count', 0))}"
+                f"{html.escape(name)}  "
+                f"last {stats.get('last_ms', 0):.1f}ms  "
+                f"avg {stats.get('avg_ms', 0):.1f}ms  "
+                f"max {stats.get('max_ms', 0):.1f}ms  "
+                f"n={int(stats.get('count', 0))}"
             )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
@@ -1011,21 +803,18 @@ class TradingTelegramBot:
             await update.message.reply_text("No trade audit entries available.")  # type: ignore[union-attr]
             return
 
-        lines = [
-            "\U0001f4dc <b>Trade Audit</b>",
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-        ]
+        lines = ["<b>Trade audit</b>"]
         for entry in entries:
             lines.append(
-                f"{html.escape(str(entry.get('timestamp', 'n/a')))} | "
-                f"{html.escape(str(entry.get('event', '?')).upper())} | "
-                f"<code>{html.escape(str(entry.get('symbol', '?')))}</code> | "
-                f"price={float(entry.get('price', 0.0)):.4f} | "
-                f"qty={float(entry.get('quantity', 0.0)):.4f}"
+                f"{html.escape(str(entry.get('timestamp', 'n/a')))}  "
+                f"{html.escape(str(entry.get('event', '?')).upper())}  "
+                f"{html.escape(str(entry.get('symbol', '?')))}  "
+                f"@{float(entry.get('price', 0.0)):.4f} "
+                f"x{float(entry.get('quantity', 0.0)):.4f}"
             )
             reason = entry.get("reason")
             if reason:
-                lines.append(f"  reason={html.escape(str(reason))}")
+                lines.append(f"  reason: {html.escape(str(reason))}")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
     async def _cmd_decisions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1045,43 +834,24 @@ class TradingTelegramBot:
         entries = self._service.get_recent_decisions(limit)
         if not entries:
             await update.message.reply_text(  # type: ignore[union-attr]
-                "\U0001f4cb <b>Decision Report</b>\n\nNo decisions recorded yet.\n"
-                "Run a strategy cycle first.",
-                parse_mode="HTML",
+                "No decisions recorded yet. Run a strategy cycle first.",
             )
             return
 
-        # Action → emoji mapping
-        action_icons = {
-            "buy":        "\U0001f7e2",   # 🟢
-            "sell":       "\U0001f534",   # 🔴
-            "swap":       "\U0001f504",   # 🔄
-            "hold":       "\u26aa",       # ⚪
-            "skip_buy":   "\u23f8\ufe0f", # ⏸️
-            "skip_swap":  "\u23f8\ufe0f", # ⏸️
-        }
-
-        lines = [
-            f"\U0001f4cb <b>Decision Report</b> (last {len(entries)})",  # 📋
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-        ]
-
+        lines = [f"<b>Decisions</b> (last {len(entries)})"]
         for entry in entries:
             action = str(entry.get("action", "?"))
-            icon = action_icons.get(action, "\u2753")
             symbol = html.escape(str(entry.get("symbol", "?")))
             strategy = html.escape(str(entry.get("strategy", "?")))
             reason = html.escape(str(entry.get("reason", "?")))
             ts_raw = str(entry.get("timestamp", ""))
-            # Shorten timestamp: keep only HH:MM:SS portion
             ts_short = ts_raw[11:19] if len(ts_raw) >= 19 else ts_raw
 
-            action_label = action.upper().replace("_", " ")
-            lines.append(f"\n{icon} <b>{action_label}</b> <code>{symbol}</code>")
-            if ts_short:
-                lines.append(f"  \U0001f552 {html.escape(ts_short)}")  # 🕒
-            lines.append(f"  \U0001f3af Strategy: {strategy}")
-            lines.append(f"  \U0001f4ac Reason: <i>{reason}</i>")
+            prefix = f"{ts_short}  " if ts_short else ""
+            lines.append(
+                f"\n{prefix}<b>{html.escape(action.upper())}</b> {symbol}  [{strategy}]"
+            )
+            lines.append(f"  {reason}")
 
             signals = entry.get("signals") or {}
             if signals:
@@ -1089,9 +859,9 @@ class TradingTelegramBot:
                 for key, val in signals.items():
                     if val is None:
                         continue
-                    sig_parts.append(f"{html.escape(key)}={html.escape(str(val))}")
+                    sig_parts.append(f"{html.escape(str(key))}={html.escape(str(val))}")
                 if sig_parts:
-                    lines.append(f"  \U0001f4ca {' | '.join(sig_parts)}")  # 📊
+                    lines.append(f"  {' | '.join(sig_parts)}")
 
         await _send_html_chunks(update, "\n".join(lines))
 
@@ -1102,68 +872,48 @@ class TradingTelegramBot:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
         status = self._service.status()
-        positions = status.get("open_positions", [])
+        positions = status.get("open_positions", []) or []
         kalshi_bal = status.get("kalshi_balance")
 
         if not positions:
-            no_pos_lines = [f"\U0001f4e6 <b>Positions</b>\n\nNo open positions."]
+            msg = "<b>Positions</b>\nNone open."
             if kalshi_bal is not None:
-                no_pos_lines.append(f"\n\U0001f3b2 Kalshi Balance: {_format_currency(kalshi_bal)}")
-            await update.message.reply_text(  # type: ignore[union-attr]
-                "\n".join(no_pos_lines),
-                parse_mode="HTML",
-            )
+                msg += f"\nKalshi {_format_currency(kalshi_bal)}"
+            await update.message.reply_text(msg, parse_mode="HTML")  # type: ignore[union-attr]
             return
 
-        lines = [
-            f"\U0001f4e6 <b>OPEN POSITIONS ({len(positions)})</b>",  # 📦
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-        ]
-
-        # Group positions by asset type
+        # Group by asset type for readability
         by_type: dict[str, list[dict[str, Any]]] = {}
         for pos in positions:
-            atype = pos.get("asset_type", "other")
-            by_type.setdefault(atype, []).append(pos)
+            by_type.setdefault(pos.get("asset_type", "other"), []).append(pos)
 
-        type_labels = {
-            "stock": ("\U0001f4c8", "STOCKS"),
-            "crypto": ("\U0001f4b1", "CRYPTO"),
-            "prediction": ("\U0001f3b2", "PREDICTIONS"),
-        }
-
+        lines = [f"<b>Positions</b> ({len(positions)})"]
         for atype, type_positions in by_type.items():
-            icon, label = type_labels.get(atype, ("\u2699\ufe0f", atype.upper()))
-            type_pnl = sum(p.get("unrealized_pnl", 0) for p in type_positions)
-            type_value = sum(p.get("market_value", 0) for p in type_positions)
+            type_pnl = sum(p.get("unrealized_pnl", 0) or 0 for p in type_positions)
+            type_value = sum(p.get("market_value", 0) or 0 for p in type_positions)
             lines.append(
-                f"\n{icon} <b>{label}</b> ({len(type_positions)}) \u2014 "
-                f"{_format_currency(type_value)} "
-                f"{_pnl_emoji(type_pnl)} {'+' if type_pnl >= 0 else ''}{_format_currency(type_pnl)}"
+                f"\n<b>{atype.upper()}</b> ({len(type_positions)}) — "
+                f"{_format_currency(type_value)}  "
+                f"P&L {'+' if type_pnl >= 0 else ''}{_format_currency(type_pnl)}"
             )
-
             for pos in type_positions:
-                sym = pos["symbol"]
-                qty = pos["quantity"]
-                entry = pos["entry_price"]
-                current = pos["current_price"]
-                pnl_val = pos["unrealized_pnl"]
-                mv = pos["market_value"]
-                pct = ((current - entry) / entry * 100) if entry > 0 else 0
-
+                sym = pos.get("symbol", "?")
+                qty = pos.get("quantity", 0) or 0
+                entry = pos.get("entry_price", 0) or 0
+                current = pos.get("current_price", 0) or 0
+                pnl_val = pos.get("unrealized_pnl", 0) or 0
+                mv = pos.get("market_value", 0) or 0
+                pct = ((current - entry) / entry * 100) if entry else 0
                 lines.append(
-                    f"\n  {_pnl_arrow(pnl_val)} <b>{sym}</b>\n"
-                    f"     Entry:   ${entry:,.4f}\n"
-                    f"     Current: ${current:,.4f}\n"
-                    f"     Qty:     {qty:.6f}\n"
-                    f"     Value:   {_format_currency(mv)}\n"
-                    f"     {_pnl_emoji(pnl_val)} P&L: {'+' if pnl_val >= 0 else ''}{_format_currency(pnl_val)} "
-                    f"({'+' if pct >= 0 else ''}{pct:.1f}%)"
+                    f"{html.escape(str(sym))}  "
+                    f"qty {qty:.6f}  @ ${entry:,.4f} → ${current:,.4f}  "
+                    f"({'+' if pct >= 0 else ''}{pct:.1f}%)  "
+                    f"value {_format_currency(mv)}  "
+                    f"P&L {'+' if pnl_val >= 0 else ''}{_format_currency(pnl_val)}"
                 )
 
-        # Kalshi balance at the bottom
         if kalshi_bal is not None:
-            lines.append(f"\n\U0001f3b2 <b>Kalshi Balance:</b> {_format_currency(kalshi_bal)}")
+            lines.append(f"\nKalshi {_format_currency(kalshi_bal)}")
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
@@ -1174,28 +924,19 @@ class TradingTelegramBot:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
         status = self._service.status()
-        risk = status.get("risk", {})
+        risk = status.get("risk", {}) or {}
 
-        dd_daily = risk.get("daily_drawdown_pct", 0)
-        dd_total = risk.get("total_drawdown_pct", 0)
+        dd_daily = risk.get("daily_drawdown_pct", 0) or 0
+        dd_total = risk.get("total_drawdown_pct", 0) or 0
 
         lines = [
-            f"\U0001f6e1 <b>Risk Dashboard</b>",  # 🛡
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-            f"",
-            f"\U0001f4c9 Daily Drawdown",
-            f"  {_progress_bar(abs(dd_daily) / 5.0)} {dd_daily:.2f}% / 5.0%",
-            f"",
-            f"\U0001f4c9 Total Drawdown",
-            f"  {_progress_bar(abs(dd_total) / 15.0)} {dd_total:.2f}% / 15.0%",
-            f"",
-            f"\U0001f3c6 Peak Equity: {_format_currency(risk.get('peak_equity', 0))}",
-            f"\U0001f4ca Daily Baseline: {_format_currency(risk.get('daily_baseline_equity', 0))}",
-            f"",
-            f"{_risk_status_icon(risk.get('daily_halt_active', False))} Daily Halt: "
-            f"{'ACTIVE' if risk.get('daily_halt_active') else 'OK'}",
-            f"{_risk_status_icon(risk.get('kill_switch_active', False))} Kill Switch: "
-            f"{'ENGAGED' if risk.get('kill_switch_active') else 'OK'}",
+            "<b>Risk</b>",
+            f"Daily DD    {dd_daily:.2f}% / 5.0%",
+            f"Total DD    {dd_total:.2f}% / 15.0%",
+            f"Peak        {_format_currency(risk.get('peak_equity', 0))}",
+            f"Baseline    {_format_currency(risk.get('daily_baseline_equity', 0))}",
+            f"Daily halt  {'ACTIVE' if risk.get('daily_halt_active') else 'ok'}",
+            f"Kill switch {'ENGAGED' if risk.get('kill_switch_active') else 'ok'}",
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
@@ -1204,10 +945,7 @@ class TradingTelegramBot:
             return
         self._paused = True
         await update.message.reply_text(  # type: ignore[union-attr]
-            f"\u23f8\ufe0f <b>Bot PAUSED</b>\n\n"
-            f"Monitoring continues but no trades will execute.\n"
-            f"Use /resume to restart trading.",
-            parse_mode="HTML",
+            "Paused. No trades will execute. /resume to restart.",
         )
 
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1223,18 +961,12 @@ class TradingTelegramBot:
                 self._service.clear_kill_switch()
                 cleared_kill_switch = True
             self._paused = False
-            message = "\u25b6\ufe0f <b>Bot RESUMED</b>\n\nAutomated trading is active."
+            msg = "Resumed. Trading active."
             if cleared_kill_switch:
-                message = (
-                    "\u25b6\ufe0f <b>Bot RESUMED</b>\n\n"
-                    "Kill switch cleared and automated trading is active."
-                )
-            await update.message.reply_text(message, parse_mode="HTML")  # type: ignore[union-attr]
+                msg = "Resumed. Kill switch cleared. Trading active."
+            await update.message.reply_text(msg)  # type: ignore[union-attr]
         except Exception as exc:
-            await update.message.reply_text(  # type: ignore[union-attr]
-                f"\u26a0\ufe0f Resume blocked: {exc}",
-                parse_mode="HTML",
-            )
+            await update.message.reply_text(f"Resume blocked: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -1242,24 +974,16 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
-        await update.message.reply_text(  # type: ignore[union-attr]
-            f"\U0001f6a8 <b>KILL SWITCH</b>: Closing all positions...",
-            parse_mode="HTML",
-        )
         try:
             summary = self._service.engage_kill_switch(reason="manual_kill_switch")
             self._paused = True
-            await self.send_heartbeat(summary)
             failed = summary.get("modules", {}).get("kill_switch", {}).get("failed", [])
+            msg = "Kill switch engaged. All positions closed. Bot paused."
             if failed:
-                await self.send_message(
-                    f"\u26a0\ufe0f Kill switch engaged, but some live positions could not be closed automatically: {', '.join(failed)}"
-                )
-            await self.send_message(
-                f"\U0001f6d1 Kill switch engaged. All positions closed. Bot paused."
-            )
+                msg += f"\nCould not auto-close: {', '.join(failed)}"
+            await update.message.reply_text(msg)  # type: ignore[union-attr]
         except Exception as exc:
-            await update.message.reply_text(f"\u26a0\ufe0f Error during kill: {exc}")  # type: ignore[union-attr]
+            await update.message.reply_text(f"Kill error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -1268,62 +992,42 @@ class TradingTelegramBot:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
         cfg = self._service.config
-        paper_icon = "\U0001f4dd" if cfg.paper_mode else "\U0001f4b0"
-
-        # AI section with multi-analyst support
-        ai_lines = [f"\U0001f9e0 <b>AI Analysts</b>: {'ON' if cfg.trading_agents.enabled else 'OFF'}"]
-        if cfg.trading_agents.enabled:
-            ai_lines.append(f"  Mode: {cfg.trading_agents.confirmation_mode}")
-            if cfg.trading_agents.multi_analyst_enabled:
-                analysts = ", ".join(cfg.trading_agents.selected_analysts)
-                ai_lines.append(f"  \U0001f465 Multi-analyst: {analysts}")
-            else:
-                ai_lines.append(f"  \U0001f464 Single agent (Haiku \u2192 Sonnet)")
 
         lines = [
-            f"\u2699\ufe0f <b>ZULUBOT CONFIG</b>",  # ⚙️
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-            f"",
-            f"{paper_icon} Mode: {'PAPER' if cfg.paper_mode else 'LIVE'}",
-            f"\U0001f4b5 Cash: {_format_currency(cfg.initial_cash)}",
-            f"\u23f8\ufe0f Paused: {'Yes' if self._paused else 'No'}",
-            f"",
-            f"\U0001f6e1 <b>Risk Limits</b>",
-            f"  Position: {cfg.risk.max_position_fraction*100:.1f}%",
-            f"  Daily Halt: {cfg.risk.daily_halt_drawdown*100:.1f}%",
-            f"  Kill Switch: {cfg.risk.kill_switch_drawdown*100:.1f}%",
-            f"",
-            f"\U0001f4b1 <b>Crypto</b>",
-            f"  {', '.join(cfg.crypto.symbols)}",
-            f"  Buy: F&G < {cfg.crypto.buy_fear_threshold}",
-            f"  Sell: F&G > {cfg.crypto.sell_fear_threshold}",
-            f"",
-            f"\U0001f4c8 <b>Stocks</b>",
-            f"  P/E < {cfg.stock.max_pe_ratio} | P/B < {cfg.stock.max_pb_ratio}",
-            f"  D/E < {cfg.stock.max_debt_to_equity} | VIX > {cfg.stock.vix_buy_threshold}",
-            f"",
-            f"\U0001f504 <b>Altcoin Rotation</b>",
-            f"  {'ON' if cfg.altcoin_rotation.enabled else 'OFF'} | "
-            f"Fee: {cfg.altcoin_rotation.fee_pct*100:.1f}% \u00d7 {cfg.altcoin_rotation.scout_multiplier}x",
-            f"  Check: {cfg.altcoin_rotation.check_interval_minutes}m | "
-            f"Min: ${cfg.altcoin_rotation.min_trade_usd}",
-            f"",
-            f"\U0001f3b2 <b>Kalshi Predictions</b>",
-            f"  {'ON' if cfg.predictions.enabled else 'OFF'} | "
-            f"YES < {cfg.predictions.buy_yes_threshold} | NO > {cfg.predictions.buy_no_threshold}",
-            f"",
-            f"\U0001f52e <b>Polymarket</b>",
-            f"  {'ON' if cfg.polymarket_strategy.enabled else 'OFF'} | "
-            f"Tags: {', '.join(cfg.polymarket_strategy.market_tags)}",
-            f"",
-            f"\u23f0 <b>Schedule</b>",
-            f"  Crypto: {cfg.scheduler.crypto_interval_minutes}m | "
-            f"Rotation: {cfg.altcoin_rotation.check_interval_minutes}m",
-            f"  Stocks: {cfg.scheduler.stock_check_hour}:00 | "
-            f"Heartbeat: {cfg.scheduler.heartbeat_interval_minutes}m",
-            f"",
+            "<b>Config</b>",
+            f"Mode         {'PAPER' if cfg.paper_mode else 'LIVE'}",
+            f"Cash         {_format_currency(cfg.initial_cash)}",
+            f"Paused       {'yes' if self._paused else 'no'}",
+            "",
+            "<b>Risk</b>",
+            f"Position    {cfg.risk.max_position_fraction*100:.1f}%",
+            f"Daily halt  {cfg.risk.daily_halt_drawdown*100:.1f}%",
+            f"Kill        {cfg.risk.kill_switch_drawdown*100:.1f}%",
+            "",
+            "<b>Strategies</b>",
+            f"Crypto      {', '.join(cfg.crypto.symbols)}  "
+            f"buy<{cfg.crypto.buy_fear_threshold} sell>{cfg.crypto.sell_fear_threshold}"
+            + ("  funding-gate" if cfg.crypto.require_negative_funding else ""),
+            f"Stocks      P/E<{cfg.stock.max_pe_ratio} P/B<{cfg.stock.max_pb_ratio} "
+            f"D/E<{cfg.stock.max_debt_to_equity} VIX>{cfg.stock.vix_buy_threshold}",
+            f"Rotation    {'on' if cfg.altcoin_rotation.enabled else 'off'}  "
+            f"fee {cfg.altcoin_rotation.fee_pct*100:.1f}% x{cfg.altcoin_rotation.scout_multiplier}",
+            f"Kalshi      {'on' if cfg.predictions.enabled else 'off'}  "
+            f"YES<{cfg.predictions.buy_yes_threshold} NO>{cfg.predictions.buy_no_threshold}"
+            + ("  fng-gate" if cfg.predictions.require_crypto_fear_greed else ""),
+            f"Polymarket  {'on' if cfg.polymarket_strategy.enabled else 'off'}",
+            "",
+            "<b>Schedule</b>",
+            f"Crypto      {cfg.scheduler.crypto_interval_minutes}m",
+            f"Rotation    {cfg.altcoin_rotation.check_interval_minutes}m",
+            f"Stocks      {cfg.scheduler.stock_check_hour}:00 daily",
+            f"Heartbeat   "
+            + (f"{cfg.scheduler.heartbeat_interval_minutes}m"
+               if cfg.scheduler.heartbeat_enabled else "off"),
+            "",
+            f"<b>AI</b>: {'on' if cfg.trading_agents.enabled else 'off'}"
+            + (f" ({cfg.trading_agents.confirmation_mode})" if cfg.trading_agents.enabled else ""),
         ]
-        lines.extend(ai_lines)
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1331,31 +1035,21 @@ class TradingTelegramBot:
             return
         if not self._trade_history:
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"\U0001f4dc <b>Trade History</b>\n\nNo recent trades.",
+                "<b>Trade history</b>\nNo recent trades.",
                 parse_mode="HTML",
             )
             return
-        lines = [
-            f"\U0001f4dc <b>Recent Trades</b>",  # 📜
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-        ]
+        lines = ["<b>Recent trades</b>"]
         for trade in self._trade_history[-10:]:
             t = trade.get("time", "?")[:16]
             m = trade.get("module", "?")
             buys = trade.get("buys", [])
             sells = trade.get("sells", [])
-
-            icons = {
-                "crypto": "\U0001f4b1", "stocks": "\U0001f4c8", "polymarket": "\U0001f52e",
-                "rotation": "\U0001f504", "predictions": "\U0001f3b0",
-            }
-            icon = icons.get(m, "\u2699\ufe0f")
-
-            parts = []
+            parts: list[str] = []
             for s in buys:
-                parts.append(f"\U0001f7e2 {s}")
+                parts.append(f"BUY {html.escape(str(s))}")
             for s in sells:
-                parts.append(f"\U0001f534 {s}")
-            lines.append(f"\n{icon} <b>{t}</b>\n   {' | '.join(parts)}")
+                parts.append(f"SELL {html.escape(str(s))}")
+            lines.append(f"{t}  [{m}]  {' | '.join(parts)}")
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]

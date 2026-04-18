@@ -611,8 +611,15 @@ class CoinbasePredictionStrategy:
         if (no_ask - no_bid) > spread_threshold:
             return None
 
-        # Crypto markets: require Fear & Greed confirmation
-        if category == "crypto" and fear_greed_value is not None:
+        # Crypto markets: optionally require Fear & Greed confirmation
+        # (opt-in via config.require_crypto_fear_greed). By default crypto
+        # predictions trade on the price threshold alone, matching all other
+        # categories, so the bot can actually put Kalshi cash to work.
+        if (
+            self.config.require_crypto_fear_greed
+            and category == "crypto"
+            and fear_greed_value is not None
+        ):
             if mid < self.config.buy_yes_threshold:
                 if fear_greed_value <= 30:
                     return ("yes", yes_ask if yes_ask > 0 else mid)
@@ -621,8 +628,8 @@ class CoinbasePredictionStrategy:
                     return ("no", no_ask if no_ask > 0 else (1.0 - mid))
             return None
 
-        # Pure threshold signals for non-crypto categories (finance/economics/politics/weather/other),
-        # and for crypto when Fear & Greed data is unavailable.
+        # Threshold signals — used for all categories by default, and for
+        # crypto when the extra Fear & Greed gate is not enabled.
         if mid < self.config.buy_yes_threshold:
             return ("yes", yes_ask if yes_ask > 0 else mid)
         elif mid > self.config.buy_no_threshold:
