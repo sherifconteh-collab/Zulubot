@@ -152,6 +152,7 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
             confirmation_mode=config.trading_agents.confirmation_mode,
+            learning_config=config.learning,
         )
 
         # Polymarket clients and strategy (conditional on enabled)
@@ -201,6 +202,7 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+            learning_config=config.learning,
         )
 
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
