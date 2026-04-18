@@ -76,6 +76,11 @@ class StateStore:
             },
             consecutive_losses=int(payload.get("consecutive_losses", 0)),
             cooldown_remaining=int(payload.get("cooldown_remaining", 0)),
+            performance_memory={
+                str(sym): dict(rec)
+                for sym, rec in (payload.get("performance_memory") or {}).items()
+                if isinstance(rec, dict)
+            },
         )
 
     def save(self, state: PortfolioState) -> None:
