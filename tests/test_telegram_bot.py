@@ -15,68 +15,20 @@ class TradingTelegramBotTests(unittest.IsolatedAsyncioTestCase):
         self.bot = TradingTelegramBot(config, self.logger)
         self.bot.send_message = AsyncMock()  # type: ignore[method-assign]
 
-    async def test_trade_alert_includes_smart_module_context(self) -> None:
+    async def test_trade_alert_minimal_format_when_trades_present(self) -> None:
+        """Trade alert should be concise: header, one line per trade,
+        one-line portfolio footer. No emoji clutter, no AI/latency/scan blocks."""
         result = {
             "paper_mode": False,
-            "force_send": True,
+            "force_send": False,
             "timestamp": "2026-03-31T12:00:00+00:00",
             "modules": {
-                "predictions": {
-                    "status": "ok",
-                    "buys": [],
-                    "sells": [],
-                    "markets_scanned": 18,
-                    "markets_discovered": 24,
-                    "can_trade": True,
-                },
-                "rotation": {
-                    "status": "completed",
-                    "buys": [],
-                    "sells": [],
-                    "action": "swap_ai_blocked",
-                    "current_coin": "BTC",
-                    "from": "BTC",
-                    "to": "ETH",
-                    "coins_tracked": 12,
-                    "holdings_synced": 1,
-                    "ai_action": "skip",
-                    "ai_confidence": 0.82,
-                    "ai_reasoning": "Momentum is stretched and fees are not justified yet.",
-                },
-                "latency_arb": {
-                    "status": "ok",
-                    "buys": [],
-                    "sells": [],
-                    "signals_detected": 2,
-                    "markets_scanned": 11,
-                    "market_regime": "volatile",
-                    "stale_symbols": ["BTC-USD"],
-                    "can_trade_live": True,
-                },
+                "crypto": {"status": "ok", "buys": ["BTCUSDT"], "sells": []},
             },
             "equity": 101_000.0,
             "cash": 1_500.0,
             "realized_pnl": 1_000.0,
             "open_positions": [],
-            "kalshi_balance": 250.0,
-            "ai_info": {
-                "confirmation_mode": "boost",
-                "multi_analyst_enabled": True,
-                "selected_analysts": ["macro", "risk"],
-                "budget_remaining_usd": 24.12,
-                "monthly_cost_usd": 0.88,
-                "streaming_enabled": True,
-                "tool_calling_enabled": True,
-                "vision_enabled": True,
-                "extended_thinking_enabled": True,
-                "prompt_guard_enabled": True,
-                "registered_tools": ["get_current_price", "get_funding_rate"],
-                "circuit_breaker": {
-                    "state": "open",
-                    "failure_count": 3,
-                    "remaining_open_seconds": 42.0,
-                },
-            },
             "risk": {},
         }
 
@@ -84,20 +36,117 @@ class TradingTelegramBotTests(unittest.IsolatedAsyncioTestCase):
 
         self.bot.send_message.assert_awaited_once()
         message = self.bot.send_message.await_args.args[0]
-        self.assertIn("Markets: 18/24 scanned", message)
-        self.assertIn("Execution: live-enabled", message)
-        self.assertIn("AI vetoed swap", message)
-        self.assertIn("Signals: 2", message)
-        self.assertIn("Stale feeds: BTC-USD", message)
-        self.assertIn("Features: streaming, tools, vision, thinking, prompt-guard", message)
-        self.assertIn("Circuit: OPEN (42s cooldown)", message)
+        # Core content present
+        self.assertIn("Trade cycle", message)
+        self.assertIn("LIVE", message)
+        self.assertIn("BUY  BTCUSDT", message)
+        self.assertIn("[crypto]", message)
+        self.assertIn("Equity", message)
+        # Minimal format: no decorative dividers or heavy emoji blocks
+        self.assertNotIn("\u2500" * 10, message)  # no ─────── dividers
+        self.assertNotIn("AI ANALYSTS", message)
+        self.assertNotIn("LATENCY", message)
+        self.assertNotIn("PORTFOLIO", message)
 
-    async def test_heartbeat_includes_feature_and_circuit_summary(self) -> None:
+    async def test_trade_alert_silent_when_nothing_happened(self) -> None:
+        """No trades, no errors, no risk event → no Telegram message at all.
+        This is the core anti-spam behaviour for scheduled cycles."""
+        result = {
+            "paper_mode": True,
+            "force_send": False,
+            "modules": {
+                "crypto": {"status": "ok", "buys": [], "sells": []},
+                "predictions": {"status": "completed", "buys": [], "sells": []},
+            },
+            "equity": 100_000.0,
+            "cash": 100_000.0,
+            "realized_pnl": 0.0,
+            "open_positions": [],
+            "risk": {},
+        }
+
+        await self.bot.send_trade_alert(result)
+
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_trade_alert_force_send_emits_even_without_trades(self) -> None:
+        """force_send=True (used by /crypto, /predict etc. commands) must
+        always produce a message so the user sees the command was handled."""
+        result = {
+            "paper_mode": True,
+            "force_send": True,
+            "modules": {
+                "crypto": {"status": "ok", "buys": [], "sells": []},
+            },
+            "equity": 100_000.0,
+            "cash": 100_000.0,
+            "realized_pnl": 0.0,
+            "open_positions": [],
+            "risk": {},
+        }
+
+        await self.bot.send_trade_alert(result)
+
+        self.bot.send_message.assert_awaited_once()
+        message = self.bot.send_message.await_args.args[0]
+        self.assertIn("No trades this cycle.", message)
+
+    async def test_trade_alert_surfaces_module_errors(self) -> None:
+        result = {
+            "paper_mode": True,
+            "force_send": False,
+            "modules": {
+                "predictions": {"status": "error", "buys": [], "sells": [], "error": "API timeout"},
+            },
+            "equity": 100_000.0,
+            "cash": 100_000.0,
+            "realized_pnl": 0.0,
+            "open_positions": [],
+            "risk": {},
+        }
+
+        await self.bot.send_trade_alert(result)
+
+        self.bot.send_message.assert_awaited_once()
+        message = self.bot.send_message.await_args.args[0]
+        self.assertIn("Errors", message)
+        self.assertIn("predictions", message)
+        self.assertIn("API timeout", message)
+
+    async def test_trade_alert_surfaces_kill_switch(self) -> None:
+        result = {
+            "paper_mode": False,
+            "force_send": False,
+            "modules": {"crypto": {"status": "halted", "buys": [], "sells": []}},
+            "equity": 95_000.0,
+            "cash": 50_000.0,
+            "realized_pnl": -5_000.0,
+            "open_positions": [],
+            "risk": {"kill_switch_active": True, "daily_halt_active": False},
+        }
+
+        await self.bot.send_trade_alert(result)
+
+        self.bot.send_message.assert_awaited_once()
+        message = self.bot.send_message.await_args.args[0]
+        self.assertIn("KILL SWITCH ACTIVE", message)
+
+    async def test_heartbeat_compact_format(self) -> None:
         status = {
             "equity": 99_500.0,
             "cash": 2_000.0,
             "realized_pnl": -500.0,
-            "open_positions": [],
+            "open_positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "asset_type": "crypto",
+                    "entry_price": 100.0,
+                    "current_price": 110.0,
+                    "unrealized_pnl": 10.0,
+                    "market_value": 110.0,
+                    "quantity": 1.0,
+                },
+            ],
             "risk": {
                 "daily_drawdown_pct": -1.2,
                 "total_drawdown_pct": -2.5,
@@ -106,41 +155,45 @@ class TradingTelegramBotTests(unittest.IsolatedAsyncioTestCase):
                 "kill_switch_active": False,
             },
             "kalshi_balance": 125.0,
-            "ai_info": {
-                "confirmation_mode": "boost",
-                "multi_analyst_enabled": False,
-                "selected_analysts": [],
-                "budget_remaining_usd": 21.50,
-                "monthly_cost_usd": 3.50,
-                "streaming_enabled": True,
-                "tool_calling_enabled": True,
-                "vision_enabled": False,
-                "extended_thinking_enabled": True,
-                "prompt_guard_enabled": True,
-                "registered_tools": ["get_current_price"],
-                "circuit_breaker": {
-                    "state": "half_open",
-                    "failure_count": 2,
-                    "remaining_open_seconds": 9.0,
-                },
-            },
-            "stale_price_count": 1,
-            "stale_prices": [{"symbol": "ETH-USD", "age_seconds": 91.0}],
-            "latency_ms": {"crypto": {"last_ms": 12.5}},
-            "last_stock_screen_date": "2026-03-30",
-            "last_predictions_scan_date": "2026-03-31",
-            "last_polymarket_scan_date": "2026-03-31",
         }
 
         await self.bot.send_heartbeat(status)
 
         self.bot.send_message.assert_awaited_once()
         message = self.bot.send_message.await_args.args[0]
-        self.assertIn("Features: streaming, tools, thinking, prompt-guard", message)
-        self.assertIn("Tools: get_current_price", message)
-        self.assertIn("Circuit: HALF_OPEN (9s cooldown)", message)
-        self.assertIn("Stale Prices", message)
-        self.assertIn("ETH-USD", message)
+        # Core content present
+        self.assertIn("Status", message)
+        self.assertIn("Equity", message)
+        self.assertIn("Kalshi", message)
+        self.assertIn("BTCUSDT", message)
+        # No dropped blocks
+        self.assertNotIn("AI ANALYSTS", message)
+        self.assertNotIn("Last Scans", message)
+        self.assertNotIn("Latency", message)
+        # No decorative dividers
+        self.assertNotIn("\u2500" * 10, message)
+
+    async def test_risk_alert_minimal_single_line(self) -> None:
+        await self.bot.send_risk_alert({
+            "kill_switch_active": True,
+            "daily_halt_active": False,
+            "total_drawdown_pct": -15.0,
+        })
+        self.bot.send_message.assert_awaited_once()
+        message = self.bot.send_message.await_args.args[0]
+        self.assertIn("Kill switch", message)
+        self.assertIn("All positions closed", message)
+        # Old format had a big emoji banner — make sure it's gone.
+        self.assertNotIn("RISK ALERT", message)
+
+    async def test_error_minimal_single_line(self) -> None:
+        await self.bot.send_error("connection refused")
+        self.bot.send_message.assert_awaited_once()
+        message = self.bot.send_message.await_args.args[0]
+        self.assertIn("Error", message)
+        self.assertIn("connection refused", message)
+        # No dividers.
+        self.assertNotIn("\u2500" * 10, message)
 
 
 if __name__ == "__main__":

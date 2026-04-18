@@ -38,6 +38,7 @@ class StockValueStrategy:
     DEBT_TO_EQUITY_KEYS = ["debtToEquityTTM", "debtEquityRatioTTM", "debtToEquity", "debtEquityRatio"]
     PFCF_KEYS = ["pfcfRatioTTM", "pfcfRatio", "priceToFreeCashFlowsRatioTTM", "priceToFreeCashFlowsRatio"]
     POSITIVE_FCF_KEYS = ["freeCashFlowYieldTTM", "freeCashFlowPerShareTTM", "freeCashFlow", "freeCashFlowTTM"]
+    ROE_KEYS = ["roeTTM", "returnOnEquityTTM", "roe", "returnOnEquity"]
 
     def __init__(
         self,
@@ -106,6 +107,44 @@ class StockValueStrategy:
         for symbol in list(current_stock_positions):
             fundamentals = fundamentals_by_symbol.get(symbol)
             if fundamentals is None or not self._qualifies(fundamentals):
+                # Buffett-style patience: don't churn a good business out of the
+                # portfolio within ``min_hold_days`` of opening just because one
+                # metric drifted. Hard risk events (stop-loss, kill switch, /kill)
+                # run through different code paths and are unaffected.
+                position = state.positions.get(symbol)
+                if (
+                    self.config.min_hold_days > 0
+                    and position is not None
+                    and position.opened_at
+                ):
+                    try:
+                        opened_dt = datetime.fromisoformat(position.opened_at)
+                    except (TypeError, ValueError):
+                        opened_dt = None
+                    if opened_dt is not None:
+                        # Normalize naive timestamps (older persisted state) to
+                        # whatever timezone ``now`` carries so the subtraction
+                        # below never raises TypeError.
+                        if opened_dt.tzinfo is None and now.tzinfo is not None:
+                            opened_dt = opened_dt.replace(tzinfo=now.tzinfo)
+                        elif opened_dt.tzinfo is not None and now.tzinfo is None:
+                            opened_dt = opened_dt.replace(tzinfo=None)
+                        try:
+                            held_days = (now - opened_dt).days
+                        except TypeError:
+                            held_days = self.config.min_hold_days
+                        if held_days < self.config.min_hold_days:
+                            decisions.append({
+                                "strategy": "value_investing",
+                                "symbol": symbol,
+                                "action": "hold",
+                                "reason": "min_hold_days_not_elapsed",
+                                "signals": {
+                                    "held_days": held_days,
+                                    "min_hold_days": self.config.min_hold_days,
+                                },
+                            })
+                            continue
                 close_price = quotes.get(symbol, state.last_prices.get(symbol, state.positions[symbol].current_price))
                 # Execute sell on Coinbase
                 if self.coinbase_broker is not None:
@@ -345,9 +384,15 @@ class StockValueStrategy:
             debt_to_equity=debt_to_equity,
             fcf_positive_signal=fcf_positive_signal,
             pfcf_ratio=pfcf_ratio,
+            roe=_as_float(payload, self.ROE_KEYS),
         )
 
     def _qualifies(self, fundamentals: StockFundamentals) -> bool:
+        # Warren-Buffett-style quality floor: require a minimum return on
+        # equity. Skip the check when data is missing or the floor is 0.
+        if self.config.min_roe > 0:
+            if fundamentals.roe is None or fundamentals.roe < self.config.min_roe:
+                return False
         return (
             fundamentals.pe_ratio < self.config.max_pe_ratio
             and fundamentals.pb_ratio < self.config.max_pb_ratio
