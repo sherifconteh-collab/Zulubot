@@ -318,6 +318,8 @@ class SchedulerService:
         return True
 
     def _should_heartbeat(self, now: datetime) -> bool:
+        if not self.scheduler_config.heartbeat_enabled:
+            return False
         if self._last_heartbeat is None:
             return True
         elapsed = (now - self._last_heartbeat).total_seconds()

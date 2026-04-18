@@ -19,6 +19,7 @@ from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGamma
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AppConfig
 from trading_bot.models import PortfolioState, Position
+from trading_bot.performance_memory import record_close as _perf_record_close
 from trading_bot.observability import DecisionLog, ModuleLatencyTracker
 from trading_bot.polymarket_broker import PolymarketBroker
 from trading_bot.risk import RiskManager, RiskSnapshot
@@ -62,6 +63,26 @@ class TradingBotService:
             self.risk_manager.record_trade_result(state, is_loss=close_price < entry_price)
 
         self.broker.set_on_close(_on_position_closed)
+
+        # Per-symbol performance memory ("learn as it goes"). On every close
+        # we record the realized P&L against the symbol, which strategies
+        # then consult to bench losers and prefer winners.
+        def _on_close_learn(
+            state: PortfolioState,
+            symbol: str,
+            entry_price: float,
+            close_price: float,
+            realized_pnl: float,
+            reason: str,
+        ) -> None:
+            _perf_record_close(
+                state,
+                symbol=symbol,
+                realized_pnl=realized_pnl,
+                config=self.config.learning,
+            )
+
+        self.broker.set_on_position_closed(_on_close_learn)
 
         self.fmp_client = FinancialModelingPrepClient(
             api_key=config.fmp_api_key,
@@ -131,6 +152,7 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
             confirmation_mode=config.trading_agents.confirmation_mode,
+            learning_config=config.learning,
         )
 
         # Polymarket clients and strategy (conditional on enabled)
@@ -180,6 +202,7 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+            learning_config=config.learning,
         )
 
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)

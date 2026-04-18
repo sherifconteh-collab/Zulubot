@@ -22,6 +22,9 @@ class PaperBroker:
         self.logger = logger.getChild("broker")
         self._max_price_history_days = max_price_history_days
         self._on_close: Callable[[PortfolioState, float, float], None] | None = None
+        self._on_position_closed: (
+            Callable[[PortfolioState, str, float, float, float, str], None] | None
+        ) = None
         self._on_trade: Callable[[dict[str, Any]], None] | None = None
 
     def set_on_close(
@@ -35,6 +38,17 @@ class PaperBroker:
         which code path closed the position.
         """
         self._on_close = callback
+
+    def set_on_position_closed(
+        self,
+        callback: Callable[[PortfolioState, str, float, float, float, str], None],
+    ) -> None:
+        """Register a detailed close callback.
+
+        Signature: ``(state, symbol, entry_price, close_price, realized_pnl, reason)``.
+        Used by the per-symbol performance memory / learning layer.
+        """
+        self._on_position_closed = callback
 
     def set_on_trade(self, callback: Callable[[dict[str, Any]], None]) -> None:
         """Register a callback invoked after each open/close bookkeeping event."""
@@ -210,6 +224,10 @@ class PaperBroker:
         )
         if self._on_close is not None:
             self._on_close(state, entry_price, close_price)
+        if self._on_position_closed is not None:
+            self._on_position_closed(
+                state, symbol, entry_price, close_price, realized_pnl, reason,
+            )
         return position
 
     def close_all(self, state: PortfolioState, *, reason: str) -> None:
