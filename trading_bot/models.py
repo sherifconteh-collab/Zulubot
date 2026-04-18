@@ -65,6 +65,10 @@ class PortfolioState:
     consecutive_losses: int = 0
     cooldown_remaining: int = 0
 
+    # Per-symbol performance memory — the bot's online learning record.
+    # See trading_bot/performance_memory.py for the schema.
+    performance_memory: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "cash": self.cash,
@@ -88,6 +92,7 @@ class PortfolioState:
             "position_high_watermarks": self.position_high_watermarks,
             "consecutive_losses": self.consecutive_losses,
             "cooldown_remaining": self.cooldown_remaining,
+            "performance_memory": self.performance_memory,
         }
 
 
@@ -99,6 +104,7 @@ class StockFundamentals:
     debt_to_equity: float
     fcf_positive_signal: float
     pfcf_ratio: float | None = None
+    roe: float | None = None  # Return on equity (Buffett-style quality floor)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,6 +114,7 @@ class StockFundamentals:
             "debt_to_equity": self.debt_to_equity,
             "fcf_positive_signal": self.fcf_positive_signal,
             "pfcf_ratio": self.pfcf_ratio,
+            "roe": self.roe,
         }
 
 

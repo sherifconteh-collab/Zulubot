@@ -92,6 +92,17 @@ class StockStrategyConfig:
     run_interval_days: int = 3
     max_positions: int = 5
     vix_symbol: str = "^VIX"
+    # Buffett-style quality floor: return on equity. A common Buffett heuristic
+    # is "companies that consistently earn high returns on equity" — he looks
+    # for ROE >= 15%. Set to 0 to disable the filter.
+    min_roe: float = 0.15
+    # Minimum holding period for stock positions before the screener is
+    # allowed to sell them due to drifting fundamentals. Protects against
+    # churning good businesses on noisy readings ("our favorite holding
+    # period is forever"). Hard risk events (stop-loss, kill switch, manual
+    # /kill) still close positions immediately — this only gates the
+    # screener's own sells.
+    min_hold_days: int = 14
 
 
 @dataclass(frozen=True)
@@ -203,12 +214,28 @@ class BTC5MinConfig:
 
 
 @dataclass(frozen=True)
+class LearningConfig:
+    """Controls the per-symbol performance-memory learning layer.
+
+    The bot persists realized P&L per ``(symbol)`` and, after
+    ``loser_cooldown_losses`` consecutive losing closes, benches that symbol
+    for ``loser_cooldown_cycles`` strategy cycles. This is a simple, auditable
+    form of online learning — no black-box ML model. A winning close resets
+    both counters.
+    """
+    enabled: bool = True
+    loser_cooldown_losses: int = 3
+    loser_cooldown_cycles: int = 10
+
+
+@dataclass(frozen=True)
 class SchedulerConfig:
     crypto_interval_minutes: int = 10
     btc5min_interval_minutes: int = 5
     stock_check_hour: int = 9
     polymarket_interval_minutes: int = 20
     heartbeat_interval_minutes: int = 60
+    heartbeat_enabled: bool = False  # off by default — heartbeats were a spam source
     poll_interval_seconds: int = 45
 
 
@@ -368,6 +395,7 @@ class AppConfig:
     latency_arb: LatencyArbConfig
     volatility: VolatilityConfig
     btc5min: BTC5MinConfig
+    learning: LearningConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -426,6 +454,8 @@ class AppConfig:
                 run_interval_days=_env_int("STOCK_RUN_INTERVAL_DAYS", 3),
                 max_positions=_env_int("STOCK_MAX_POSITIONS", 5),
                 vix_symbol=os.getenv("STOCK_VIX_SYMBOL", "^VIX").strip() or "^VIX",
+                min_roe=_env_float("STOCK_MIN_ROE", 0.15),
+                min_hold_days=_env_int("STOCK_MIN_HOLD_DAYS", 14),
             ),
             crypto=CryptoStrategyConfig(
                 symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
@@ -448,6 +478,7 @@ class AppConfig:
                 stock_check_hour=_env_int("SCHEDULER_STOCK_CHECK_HOUR", 9),
                 polymarket_interval_minutes=_env_int("SCHEDULER_POLYMARKET_INTERVAL_MINUTES", 20),
                 heartbeat_interval_minutes=_env_int("SCHEDULER_HEARTBEAT_INTERVAL_MINUTES", 60),
+                heartbeat_enabled=_env_bool("SCHEDULER_HEARTBEAT_ENABLED", False),
                 poll_interval_seconds=_env_int("SCHEDULER_POLL_INTERVAL_SECONDS", 45),
             ),
             polymarket=PolymarketConfig(
@@ -577,5 +608,10 @@ class AppConfig:
                 min_kalshi_volume_usd=_env_float("BTC5MIN_MIN_KALSHI_VOLUME_USD", 3_000.0),
                 min_poly_volume_usd=_env_float("BTC5MIN_MIN_POLY_VOLUME_USD", 50_000.0),
                 spot_trading_enabled=_env_bool("BTC5MIN_SPOT_TRADING_ENABLED", True),
+            ),
+            learning=LearningConfig(
+                enabled=_env_bool("LEARNING_ENABLED", True),
+                loser_cooldown_losses=_env_int("LEARNING_LOSER_COOLDOWN_LOSSES", 3),
+                loser_cooldown_cycles=_env_int("LEARNING_LOSER_COOLDOWN_CYCLES", 10),
             ),
         )
