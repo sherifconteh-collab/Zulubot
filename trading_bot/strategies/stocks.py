@@ -122,7 +122,17 @@ class StockValueStrategy:
                     except (TypeError, ValueError):
                         opened_dt = None
                     if opened_dt is not None:
-                        held_days = (now - opened_dt).days
+                        # Normalize naive timestamps (older persisted state) to
+                        # whatever timezone ``now`` carries so the subtraction
+                        # below never raises TypeError.
+                        if opened_dt.tzinfo is None and now.tzinfo is not None:
+                            opened_dt = opened_dt.replace(tzinfo=now.tzinfo)
+                        elif opened_dt.tzinfo is not None and now.tzinfo is None:
+                            opened_dt = opened_dt.replace(tzinfo=None)
+                        try:
+                            held_days = (now - opened_dt).days
+                        except TypeError:
+                            held_days = self.config.min_hold_days
                         if held_days < self.config.min_hold_days:
                             decisions.append({
                                 "strategy": "value_investing",

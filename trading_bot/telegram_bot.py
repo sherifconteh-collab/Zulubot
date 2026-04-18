@@ -351,15 +351,16 @@ class TradingTelegramBot:
         for module_name, module_data in module_results.items():
             if not isinstance(module_data, dict):
                 continue
+            safe_module = html.escape(str(module_name))
             buys = module_data.get("buys") or []
             sells = module_data.get("sells") or []
             err = module_data.get("error")
             if buys or sells:
                 has_trades = True
                 for sym in buys:
-                    trade_lines.append(f"BUY  {html.escape(str(sym))}  [{module_name}]")
+                    trade_lines.append(f"BUY  {html.escape(str(sym))}  [{safe_module}]")
                 for sym in sells:
-                    trade_lines.append(f"SELL {html.escape(str(sym))}  [{module_name}]")
+                    trade_lines.append(f"SELL {html.escape(str(sym))}  [{safe_module}]")
                 self.record_trade({
                     "time": result.get("timestamp", ""),
                     "module": module_name,
@@ -368,7 +369,7 @@ class TradingTelegramBot:
                 })
             if err:
                 error_lines.append(
-                    f"{module_name}: {html.escape(_clip_text(err, 140))}"
+                    f"{safe_module}: {html.escape(_clip_text(err, 140))}"
                 )
 
         kill = bool(risk.get("kill_switch_active"))
