@@ -151,8 +151,10 @@ class CryptoSentimentFundingStrategy:
                     if symbol in state.positions:
                         continue
                     snapshot = snapshots[symbol]
-                    # Signal: funding rate must be negative
-                    if snapshot.funding_rate >= 0:
+                    # Funding-rate filter is opt-in (default OFF = more aggressive).
+                    # Previously this was a hard gate, which in combination with the
+                    # Fear & Greed threshold caused the strategy to almost never trade.
+                    if self.config.require_negative_funding and snapshot.funding_rate >= 0:
                         self.logger.info(
                             "Skipping %s: funding_rate=%.6f (non-negative)", symbol, snapshot.funding_rate
                         )
