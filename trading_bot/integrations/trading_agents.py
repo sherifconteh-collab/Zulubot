@@ -27,6 +27,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any, Callable
 
 from trading_bot.config import TradingAgentsConfig
@@ -106,7 +107,11 @@ def _bucket(value: Any, step: float) -> str:
 
     Bucketing avoids cache-busting on insignificant noise (e.g. a $0.01 price
     move) while still invalidating the cache when inputs change materially.
-    Returns ``"na"`` for missing / non-numeric values.
+    Returns ``"na"`` for missing / non-numeric / non-finite values.
+
+    Uses floor-based bucketing on ``Decimal`` quantities to avoid binary-float
+    half-step bankers'-rounding flips that would otherwise undermine the
+    "stable under micro-noise" property of the cache fingerprint.
     """
     if value is None:
         return "na"
@@ -114,9 +119,15 @@ def _bucket(value: Any, step: float) -> str:
         x = float(value)
     except (TypeError, ValueError):
         return "na"
+    if not math.isfinite(x):
+        return "na"
     if step <= 0:
         return f"{x:.6f}"
-    return f"{round(x / step) * step:.6f}"
+    # Floor-based bucketing via Decimal: deterministic and immune to
+    # half-step binary-float rounding noise.
+    d_step = Decimal(repr(step))
+    bucket_index = (Decimal(repr(x)) / d_step).to_integral_value(rounding=ROUND_FLOOR)
+    return f"{(bucket_index * d_step):.6f}"
 
 
 def _bucket_price(value: Any) -> str:
@@ -132,7 +143,7 @@ def _bucket_price(value: Any) -> str:
         x = float(value)
     except (TypeError, ValueError):
         return "na"
-    if x <= 0:
+    if x <= 0 or not math.isfinite(x):
         return "na"
     step = 10 ** (math.floor(math.log10(x)) - 2)
     return _bucket(x, step)
@@ -564,13 +575,31 @@ class TradingAgentsService:
             f"pe{_bucket(fundamentals.get('pe_ratio'), 0.5)}:"
             f"pb{_bucket(fundamentals.get('pb_ratio'), 0.1)}:"
             f"de{_bucket(fundamentals.get('debt_to_equity'), 0.05)}:"
+            f"pfcf{_bucket(fundamentals.get('pfcf_ratio'), 1.0)}:"
+            f"fcf{fundamentals.get('fcf_positive_signal', 'na')}:"
             f"vix{_bucket(vix_value, 1.0)}"
         )
         if market_signals:
             flow = market_signals.get("options_flow") or {}
+            ins = market_signals.get("insider") or {}
+            short = market_signals.get("short_interest") or {}
+            # Include a stable hash of insider + short-interest sentiment
+            # signals so a verdict isn't served stale when those flip while
+            # P/E, P/B, D/E, and VIX stay within their buckets.
+            intel_hash = hashlib.sha256(
+                "|".join([
+                    str(ins.get("recent_buys", 0)),
+                    str(ins.get("recent_sells", 0)),
+                    str(ins.get("net_sentiment", "")),
+                    _bucket(short.get("short_percent_of_float"), 1.0),
+                    _bucket(short.get("days_to_cover"), 0.5),
+                    str(short.get("net_sentiment", "")),
+                ]).encode("utf-8")
+            ).hexdigest()[:12]
             cache_key += (
                 f":cv{flow.get('calls_volume', 0)}"
                 f":pv{flow.get('puts_volume', 0)}"
+                f":mi{intel_hash}"
             )
         cached = self._check_cache(cache_key)
         if cached is not None:
@@ -710,8 +739,16 @@ class TradingAgentsService:
 
         # Include bucketed YES price (2-cent buckets) and F&G in the cache key
         # since the verdict's action depends on price vs estimated probability.
+        # Also fingerprint the prompt-driving description and tags so a stale
+        # verdict isn't served if either is updated while question/price/F&G
+        # remain in the same buckets.
+        sorted_tags = ",".join(sorted(tags or []))
+        meta_hash = hashlib.sha256(
+            f"{market_description[:300]}\n{sorted_tags}".encode("utf-8")
+        ).hexdigest()[:12]
         cache_key = (
             f"polymarket:{hashlib.md5(market_question.encode()).hexdigest()[:12]}:"
+            f"meta{meta_hash}:"
             f"yp{_bucket(yes_price, 0.02)}:"
             f"fg{_bucket(fear_greed_value, 5)}"
         )
@@ -775,9 +812,15 @@ class TradingAgentsService:
         guarded_category = self._guard_untrusted_text("kalshi category", category)
 
         # Bucket the mid-price (2-cent buckets) and F&G so verdicts are not
-        # served stale once the market has moved materially.
+        # served stale once the market has moved materially. Include a short
+        # hash of prompt-driving metadata so cached verdicts stay aligned if
+        # the Kalshi title or category is corrected/updated for the same ticker.
+        meta_hash = hashlib.sha256(
+            f"{title}\n{category}".encode("utf-8")
+        ).hexdigest()[:12]
         cache_key = (
             f"kalshi:{ticker}:"
+            f"meta{meta_hash}:"
             f"mp{_bucket(mid_price, 0.02)}:"
             f"fg{_bucket(fear_greed_value, 5)}"
         )

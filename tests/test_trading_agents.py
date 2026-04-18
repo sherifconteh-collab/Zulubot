@@ -878,6 +878,135 @@ class CacheKeyFingerprintTests(unittest.TestCase):
         self.assertFalse(v1.cached)
         self.assertTrue(v2.cached)
 
+    def test_stock_cache_invalidates_on_fcf_signal_flip(self) -> None:
+        service = self._make_service([
+            "yes",
+            '{"action": "buy", "confidence": 0.8, "reasoning": "first"}',
+            "yes",
+            '{"action": "sell", "confidence": 0.6, "reasoning": "second"}',
+        ])
+        base = {"pe_ratio": 15.0, "pb_ratio": 2.0, "fcf_positive_signal": True}
+        v1 = service.evaluate_stock("AAPL", base, 25.0)
+        flipped = {**base, "fcf_positive_signal": False}
+        v2 = service.evaluate_stock("AAPL", flipped, 25.0)
+        self.assertFalse(v1.cached)
+        self.assertFalse(v2.cached)
+        self.assertEqual(v2.reasoning, "second")
+
+    def test_stock_cache_invalidates_on_market_intel_change(self) -> None:
+        service = self._make_service([
+            "yes",
+            '{"action": "buy", "confidence": 0.8, "reasoning": "first"}',
+            "yes",
+            '{"action": "sell", "confidence": 0.6, "reasoning": "second"}',
+        ])
+        fundamentals = {"pe_ratio": 15.0, "pb_ratio": 2.0}
+        signals_a = {
+            "options_flow": {"calls_volume": 1000, "puts_volume": 500},
+            "insider": {"recent_buys": 1, "recent_sells": 0, "net_sentiment": "bullish"},
+            "short_interest": {"short_percent_of_float": 3.0, "days_to_cover": 1.0, "net_sentiment": "neutral"},
+        }
+        signals_b = {
+            **signals_a,
+            "insider": {"recent_buys": 0, "recent_sells": 5, "net_sentiment": "bearish"},
+        }
+        v1 = service.evaluate_stock("AAPL", fundamentals, 25.0, signals_a)
+        v2 = service.evaluate_stock("AAPL", fundamentals, 25.0, signals_b)
+        self.assertFalse(v1.cached)
+        self.assertFalse(v2.cached)
+        self.assertEqual(v2.reasoning, "second")
+
+    # ── polymarket / kalshi metadata ───────────────────────────────
+    def test_polymarket_cache_invalidates_on_description_or_tags_change(self) -> None:
+        service = self._make_service([
+            '{"action": "buy", "confidence": 0.7, "reasoning": "first", "estimated_probability": 0.6}',
+            '{"action": "sell", "confidence": 0.6, "reasoning": "second", "estimated_probability": 0.4}',
+            '{"action": "hold", "confidence": 0.5, "reasoning": "third", "estimated_probability": 0.5}',
+        ])
+        v1 = service.evaluate_polymarket(
+            market_question="Will Y happen?",
+            market_description="initial description",
+            yes_price=0.50,
+            tags=["politics"],
+        )
+        # Same question/price/F&G but description changed → must re-evaluate
+        v2 = service.evaluate_polymarket(
+            market_question="Will Y happen?",
+            market_description="updated description",
+            yes_price=0.50,
+            tags=["politics"],
+        )
+        # Same question/price/F&G/description but tags changed → must re-evaluate
+        v3 = service.evaluate_polymarket(
+            market_question="Will Y happen?",
+            market_description="updated description",
+            yes_price=0.50,
+            tags=["politics", "elections"],
+        )
+        self.assertFalse(v1.cached)
+        self.assertFalse(v2.cached)
+        self.assertFalse(v3.cached)
+        self.assertEqual(v1.reasoning, "first")
+        self.assertEqual(v2.reasoning, "second")
+        self.assertEqual(v3.reasoning, "third")
+
+    def test_polymarket_cache_stable_under_tag_reordering(self) -> None:
+        service = self._make_service([
+            '{"action": "buy", "confidence": 0.7, "reasoning": "first", "estimated_probability": 0.6}',
+        ])
+        v1 = service.evaluate_polymarket(
+            market_question="Will Y happen?",
+            market_description="desc",
+            yes_price=0.50,
+            tags=["politics", "elections"],
+        )
+        v2 = service.evaluate_polymarket(
+            market_question="Will Y happen?",
+            market_description="desc",
+            yes_price=0.50,
+            tags=["elections", "politics"],
+        )
+        self.assertFalse(v1.cached)
+        self.assertTrue(v2.cached)
+
+    def test_kalshi_cache_invalidates_on_title_or_category_change(self) -> None:
+        service = self._make_service([
+            "yes",
+            '{"action": "buy", "confidence": 0.7, "reasoning": "first", "estimated_probability": 0.6}',
+            "yes",
+            '{"action": "sell", "confidence": 0.6, "reasoning": "second", "estimated_probability": 0.4}',
+            "yes",
+            '{"action": "hold", "confidence": 0.5, "reasoning": "third", "estimated_probability": 0.5}',
+        ])
+        v1 = service.evaluate_kalshi_market("KX1", "Will X happen?", 0.50, "crypto")
+        v2 = service.evaluate_kalshi_market("KX1", "Will X happen by Friday?", 0.50, "crypto")
+        v3 = service.evaluate_kalshi_market("KX1", "Will X happen by Friday?", 0.50, "economics")
+        self.assertFalse(v1.cached)
+        self.assertFalse(v2.cached)
+        self.assertFalse(v3.cached)
+        self.assertEqual(v1.reasoning, "first")
+        self.assertEqual(v2.reasoning, "second")
+        self.assertEqual(v3.reasoning, "third")
+
+    # ── _bucket determinism ────────────────────────────────────────
+    def test_bucket_handles_non_finite_values(self) -> None:
+        from trading_bot.integrations.trading_agents import _bucket
+        self.assertEqual(_bucket(float("nan"), 0.5), "na")
+        self.assertEqual(_bucket(float("inf"), 0.5), "na")
+        self.assertEqual(_bucket(float("-inf"), 0.5), "na")
+        self.assertEqual(_bucket(None, 0.5), "na")
+        self.assertEqual(_bucket("not-a-number", 0.5), "na")
+
+    def test_bucket_is_stable_across_half_step_boundary(self) -> None:
+        from trading_bot.integrations.trading_agents import _bucket
+        # Floor-based bucketing: values within the same [n*step, (n+1)*step)
+        # interval must collapse to the same bucket regardless of how close
+        # they sit to the boundary.
+        self.assertEqual(_bucket(15.249999, 0.5), _bucket(15.0, 0.5))
+        self.assertEqual(_bucket(15.4999, 0.5), _bucket(15.0, 0.5))
+        # Crossing the boundary moves to the next bucket.
+        self.assertNotEqual(_bucket(15.5, 0.5), _bucket(15.0, 0.5))
+
 
 class MultiAnalystOrderingTests(unittest.TestCase):
     """The aggregated reasoning string must be deterministic regardless of
