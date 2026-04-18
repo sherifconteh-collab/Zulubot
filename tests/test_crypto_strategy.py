@@ -131,6 +131,160 @@ class CryptoStrategyTests(unittest.TestCase):
         self.assertIn("BTCUSDT", result["sells"])
         self.assertNotIn("BTCUSDT", state.positions)
 
+    def test_take_profit_closes_position_independent_of_fear_and_greed(self) -> None:
+        """Autonomous sell: when a position is +take_profit_pct from entry,
+        close it regardless of the F&G value. This lets the bot "sell as it
+        sees fit" on Coinbase rather than waiting for F&G > sell_threshold."""
+        # Neutral F&G (won't trigger either F&G buy or F&G sell branch).
+        # Entry at 50_000; exit price 58_000 → +16% move, above default
+        # take_profit_pct of 15%.
+        strategy = CryptoSentimentFundingStrategy(
+            config=CryptoStrategyConfig(take_profit_pct=0.15, stop_loss_pct=0.0),
+            alternative_client=FakeAlternativeClient(50, "Neutral"),
+            binance_client=FakeBinanceClient({"BTCUSDT": 0.0, "ETHUSDT": 0.0}),
+            logger=self.logger,
+        )
+        state = PortfolioState(
+            cash=95_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+        self.broker.open_position(
+            state,
+            symbol="BTCUSDT",
+            asset_type="crypto",
+            strategy="crypto_sentiment_funding",
+            price=50_000.0,
+            notional=5_000.0,
+            opened_at=self.now,
+            meta={},
+        )
+        # Next cycle: mark price climbs 16% so Binance mark_price goes to 58k.
+        # FakeBinanceClient returns 50_000 for BTC, so override via last_prices.
+        state.last_prices["BTCUSDT"] = 58_000.0
+        # Simulate a Binance fake returning the new mark price by swapping it in.
+        strategy.binance_client = FakeBinanceClient({"BTCUSDT": 0.0, "ETHUSDT": 0.0})
+        # Patch the mark price via a one-off subclass behaviour:
+        original = strategy.binance_client.get_mark_price_and_funding
+
+        def patched(symbol):  # type: ignore[no-redef]
+            snap = original(symbol)
+            if symbol == "BTCUSDT":
+                from trading_bot.models import FundingSnapshot
+                return FundingSnapshot(
+                    symbol=symbol, mark_price=58_000.0,
+                    funding_rate=snap.funding_rate,
+                    next_funding_time=snap.next_funding_time,
+                    observed_at=snap.observed_at,
+                )
+            return snap
+
+        strategy.binance_client.get_mark_price_and_funding = patched  # type: ignore[assignment]
+
+        result = strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        self.assertIn("BTCUSDT", result["sells"])
+        self.assertNotIn("BTCUSDT", state.positions)
+        reasons = [d.get("reason") for d in result["decisions"] if d.get("action") == "sell"]
+        self.assertIn("take_profit", reasons)
+
+    def test_stop_loss_closes_position_independent_of_fear_and_greed(self) -> None:
+        """Autonomous sell: when a position is −stop_loss_pct from entry,
+        close it regardless of F&G."""
+        strategy = CryptoSentimentFundingStrategy(
+            config=CryptoStrategyConfig(take_profit_pct=0.0, stop_loss_pct=0.10),
+            alternative_client=FakeAlternativeClient(50, "Neutral"),
+            binance_client=FakeBinanceClient({"BTCUSDT": 0.0, "ETHUSDT": 0.0}),
+            logger=self.logger,
+        )
+        state = PortfolioState(
+            cash=95_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+        self.broker.open_position(
+            state,
+            symbol="BTCUSDT",
+            asset_type="crypto",
+            strategy="crypto_sentiment_funding",
+            price=50_000.0,
+            notional=5_000.0,
+            opened_at=self.now,
+            meta={},
+        )
+        # Price drops 11% → trigger stop-loss (threshold 10%).
+        original = strategy.binance_client.get_mark_price_and_funding
+
+        def patched(symbol):  # type: ignore[no-redef]
+            snap = original(symbol)
+            if symbol == "BTCUSDT":
+                from trading_bot.models import FundingSnapshot
+                return FundingSnapshot(
+                    symbol=symbol, mark_price=44_500.0,
+                    funding_rate=snap.funding_rate,
+                    next_funding_time=snap.next_funding_time,
+                    observed_at=snap.observed_at,
+                )
+            return snap
+
+        strategy.binance_client.get_mark_price_and_funding = patched  # type: ignore[assignment]
+
+        result = strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        self.assertIn("BTCUSDT", result["sells"])
+        reasons = [d.get("reason") for d in result["decisions"] if d.get("action") == "sell"]
+        self.assertIn("stop_loss", reasons)
+
+    def test_learning_memory_benches_symbol_after_consecutive_losses(self) -> None:
+        """After LEARNING_LOSER_COOLDOWN_LOSSES consecutive losses on a symbol,
+        the crypto strategy skips re-entering it even when F&G is in the buy
+        zone. The cooldown expires after N cycles so the bot can try again."""
+        from trading_bot.config import LearningConfig
+        from trading_bot.performance_memory import record_close
+
+        strategy = CryptoSentimentFundingStrategy(
+            config=CryptoStrategyConfig(),  # aggressive defaults
+            alternative_client=FakeAlternativeClient(20, "Extreme Fear"),
+            binance_client=FakeBinanceClient({"BTCUSDT": 0.0, "ETHUSDT": 0.0}),
+            logger=self.logger,
+            learning_config=LearningConfig(
+                enabled=True, loser_cooldown_losses=2, loser_cooldown_cycles=5,
+            ),
+        )
+        state = PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+        # Seed two consecutive losses on BTCUSDT → cooldown engaged.
+        record_close(
+            state, symbol="BTCUSDT", realized_pnl=-50.0,
+            config=strategy.learning_config,
+        )
+        record_close(
+            state, symbol="BTCUSDT", realized_pnl=-50.0,
+            config=strategy.learning_config,
+        )
+
+        result = strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        self.assertNotIn("BTCUSDT", result["buys"])
+        self.assertIn("ETHUSDT", result["buys"])  # unaffected symbol still bought
+        reasons = [
+            d.get("reason") for d in result["decisions"]
+            if d.get("symbol") == "BTCUSDT" and d.get("action") == "skip_buy"
+        ]
+        self.assertIn("performance_memory_benched", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

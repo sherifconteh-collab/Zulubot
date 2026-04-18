@@ -25,8 +25,9 @@ from typing import Any
 
 from trading_bot.broker import PaperBroker
 from trading_bot.clients_kalshi import KalshiClient
-from trading_bot.config import PredictionConfig
+from trading_bot.config import LearningConfig, PredictionConfig
 from trading_bot.models import PortfolioState
+from trading_bot import performance_memory
 from trading_bot.risk import RiskManager
 
 try:
@@ -67,12 +68,14 @@ class CoinbasePredictionStrategy:
         logger: logging.Logger,
         ai_service: Any | None = None,
         live_trading_enabled: bool = False,
+        learning_config: LearningConfig | None = None,
     ) -> None:
         self.config = config
         self.kalshi = kalshi_client
         self.logger = logger.getChild("strategy.predictions")
         self.ai_service = ai_service
         self.live_trading_enabled = live_trading_enabled
+        self.learning_config = learning_config or LearningConfig(enabled=False)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -440,6 +443,38 @@ class CoinbasePredictionStrategy:
             yes_symbol = f"KX:{ticker}:yes"
             no_symbol = f"KX:{ticker}:no"
             if yes_symbol in state.positions or no_symbol in state.positions:
+                continue
+
+            # "Learn as it goes": bench this ticker if either the YES or NO
+            # side has accumulated losses. Checked per broker-symbol
+            # (``KX:TICKER:yes`` / ``KX:TICKER:no``) since that's how the
+            # performance memory records closed positions.
+            benched_side = None
+            for side_symbol in (yes_symbol, no_symbol):
+                if performance_memory.is_symbol_benched(
+                    state, side_symbol, config=self.learning_config, decrement=True,
+                ):
+                    benched_side = side_symbol
+                    break
+            if benched_side is not None:
+                mem = performance_memory.summary(state, benched_side)
+                self.logger.info(
+                    "Skipping %s: benched by performance memory "
+                    "(consecutive_losses=%s, cooldown_remaining=%s)",
+                    benched_side,
+                    mem.get("consecutive_losses"),
+                    mem.get("cooldown_remaining"),
+                )
+                result["decisions"].append({
+                    "strategy": "coinbase_predictions",
+                    "symbol": benched_side,
+                    "action": "skip_buy",
+                    "reason": "performance_memory_benched",
+                    "signals": {
+                        "consecutive_losses": mem.get("consecutive_losses"),
+                        "cooldown_remaining": mem.get("cooldown_remaining"),
+                    },
+                })
                 continue
 
             mid = market["_mid"]

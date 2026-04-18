@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from trading_bot.broker import PaperBroker
@@ -21,10 +21,11 @@ class FakeFmpClient:
             "DDD": {"symbol": "DDD", "peRatioTTM": 30, "pbRatioTTM": 4.0, "debtToEquityTTM": 0.8},
         }
         self.key_metrics = {
-            "AAA": {"symbol": "AAA", "pfcfRatioTTM": 8},
-            "BBB": {"symbol": "BBB", "pfcfRatioTTM": 7},
-            "CCC": {"symbol": "CCC", "pfcfRatioTTM": 9},
-            "DDD": {"symbol": "DDD", "pfcfRatioTTM": 12},
+            # roeTTM >= 0.15 (15%) to clear the Buffett quality floor.
+            "AAA": {"symbol": "AAA", "pfcfRatioTTM": 8, "roeTTM": 0.22},
+            "BBB": {"symbol": "BBB", "pfcfRatioTTM": 7, "roeTTM": 0.25},
+            "CCC": {"symbol": "CCC", "pfcfRatioTTM": 9, "roeTTM": 0.18},
+            "DDD": {"symbol": "DDD", "pfcfRatioTTM": 12, "roeTTM": 0.05},
         }
         self.vix_value = 30.0
         self.quotes = {"AAA": 100.0, "BBB": 50.0, "CCC": 80.0, "DDD": 25.0}
@@ -85,6 +86,8 @@ class StockStrategyTests(unittest.TestCase):
             daily_baseline_date=self.now.date().isoformat(),
             peak_equity=100_000.0,
         )
+        # Open the position 30 days before "now" so the Buffett min-hold-days
+        # guard (default 14) has long elapsed and the screener is free to sell.
         self.broker.open_position(
             state,
             symbol="AAA",
@@ -92,7 +95,7 @@ class StockStrategyTests(unittest.TestCase):
             strategy="value_investing",
             price=100.0,
             notional=2_000.0,
-            opened_at=self.now,
+            opened_at=self.now - timedelta(days=30),
             meta={},
         )
         self.client.ratios["AAA"]["peRatioTTM"] = 25
@@ -107,6 +110,81 @@ class StockStrategyTests(unittest.TestCase):
 
         self.assertIn("AAA", result["sells"])
         self.assertNotIn("AAA", state.positions)
+
+    def test_buffett_min_roe_filter_rejects_low_roe_stocks(self) -> None:
+        """Stocks below the ROE quality floor (default 15%) are not eligible."""
+        # All four stocks drop below the ROE floor; none should qualify.
+        for sym in ("AAA", "BBB", "CCC", "DDD"):
+            self.client.key_metrics[sym]["roeTTM"] = 0.05
+
+        state = PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+        result = self.strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager,
+            now=self.now, force=True,
+        )
+
+        self.assertEqual(result["top_targets"], [])
+        self.assertEqual(result["buys"], [])
+
+    def test_buffett_min_roe_filter_can_be_disabled(self) -> None:
+        """Setting min_roe=0 disables the Buffett quality floor."""
+        for sym in ("AAA", "BBB", "CCC", "DDD"):
+            self.client.key_metrics[sym]["roeTTM"] = 0.05
+
+        strategy = StockValueStrategy(
+            config=StockStrategyConfig(min_roe=0.0, min_hold_days=0),
+            client=self.client, logger=self.logger,
+        )
+        state = PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+        result = strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager,
+            now=self.now, force=True,
+        )
+        # With ROE floor disabled, AAA/BBB/CCC still qualify on other metrics.
+        self.assertTrue(len(result["buys"]) > 0)
+
+    def test_min_hold_days_prevents_churning_recently_opened_positions(self) -> None:
+        """A stock opened less than min_hold_days ago is not sold by the
+        screener even if its fundamentals have drifted outside the thresholds
+        ("our favorite holding period is forever")."""
+        state = PortfolioState(
+            cash=98_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+        # Position opened 3 days ago — well inside the default 14-day hold.
+        self.broker.open_position(
+            state, symbol="AAA", asset_type="stock",
+            strategy="value_investing", price=100.0, notional=2_000.0,
+            opened_at=self.now - timedelta(days=3), meta={},
+        )
+        # Deteriorate AAA below the P/E threshold so it would normally be sold.
+        self.client.ratios["AAA"]["peRatioTTM"] = 99
+
+        result = self.strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager,
+            now=self.now, force=True,
+        )
+
+        self.assertNotIn("AAA", result["sells"])
+        self.assertIn("AAA", state.positions)
+        hold_decisions = [
+            d for d in result["decisions"]
+            if d.get("symbol") == "AAA" and d.get("action") == "hold"
+        ]
+        self.assertTrue(hold_decisions)
+        self.assertEqual(hold_decisions[0]["reason"], "min_hold_days_not_elapsed")
 
 
 class MarketIntelligenceIntegrationTests(unittest.TestCase):

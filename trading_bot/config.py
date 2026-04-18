@@ -116,6 +116,11 @@ class CryptoStrategyConfig:
     # bot trades on Fear & Greed alone; avoids the dual-gate filter that
     # previously kept the strategy idle for long stretches.
     require_negative_funding: bool = False
+    # Autonomous exit rules so the bot sells as it sees fit, not only when
+    # Fear & Greed climbs above ``sell_fear_threshold``. Both are fractions.
+    # 0.0 disables the respective rule.
+    take_profit_pct: float = 0.15   # +15% from entry → take profits
+    stop_loss_pct: float = 0.10     # −10% from entry → cut loss
 
 
 @dataclass(frozen=True)
@@ -463,6 +468,8 @@ class AppConfig:
                 sell_fear_threshold=_env_int("CRYPTO_SELL_FEAR_THRESHOLD", 75),
                 use_coinbase_pricing=_env_bool("CRYPTO_USE_COINBASE_PRICING", True),
                 require_negative_funding=_env_bool("CRYPTO_REQUIRE_NEGATIVE_FUNDING", False),
+                take_profit_pct=_env_float("CRYPTO_TAKE_PROFIT_PCT", 0.15),
+                stop_loss_pct=_env_float("CRYPTO_STOP_LOSS_PCT", 0.10),
             ),
             coinbase=CoinbaseConfig(
                 api_key=os.getenv("COINBASE_API_KEY", "").strip(),
