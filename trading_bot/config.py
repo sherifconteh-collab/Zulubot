@@ -100,6 +100,11 @@ class CryptoStrategyConfig:
     buy_fear_threshold: int = 35
     sell_fear_threshold: int = 75
     use_coinbase_pricing: bool = True
+    # If True, only buy when Binance perpetual funding rate is negative.
+    # Default False → treat negative funding as an informational signal so the
+    # bot trades on Fear & Greed alone; avoids the dual-gate filter that
+    # previously kept the strategy idle for long stretches.
+    require_negative_funding: bool = False
 
 
 @dataclass(frozen=True)
