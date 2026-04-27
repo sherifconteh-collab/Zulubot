@@ -64,6 +64,10 @@ class TradingBotService:
 
         self.broker.set_on_close(_on_position_closed)
 
+        # In-memory cache of the most recent leads per strategy. Updated by
+        # the scheduler after each module run; read by the /leads command.
+        self._last_leads: dict[str, list[dict[str, Any]]] = {}
+
         # Per-symbol performance memory ("learn as it goes"). On every close
         # we record the realized P&L against the symbol, which strategies
         # then consult to bench losers and prefer winners.
@@ -423,7 +427,15 @@ class TradingBotService:
         self.logger.warning("Kill switch engaged manually. closed=%s failed=%s", liquidation["closed"], liquidation["failed"])
         return summary
 
-    def clear_kill_switch(self) -> dict[str, Any]:
+    def update_last_leads(self, strategy: str, leads: list[dict[str, Any]]) -> None:
+        """Replace the cached leads for *strategy* (called after each scheduler run)."""
+        self._last_leads[strategy] = list(leads)
+
+    def get_last_leads(self) -> dict[str, list[dict[str, Any]]]:
+        """Return the most recent per-strategy leads (for /leads command)."""
+        return {strategy: list(leads) for strategy, leads in self._last_leads.items()}
+
+    def clear_kill_switch(self, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
@@ -438,10 +450,26 @@ class TradingBotService:
         if state.peak_equity > 0 and equity < state.peak_equity:
             total_drawdown = (state.peak_equity - equity) / state.peak_equity
 
+        peak_reset_from: float | None = None
+        peak_reset_to: float | None = None
         if total_drawdown >= self.config.risk.kill_switch_drawdown:
-            raise RuntimeError(
-                f"Kill switch cannot be cleared while total drawdown is {total_drawdown * 100:.2f}% "
-                f"and threshold is {self.config.risk.kill_switch_drawdown * 100:.2f}%"
+            if not force:
+                raise RuntimeError(
+                    f"Kill switch cannot be cleared while total drawdown is {total_drawdown * 100:.2f}% "
+                    f"and threshold is {self.config.risk.kill_switch_drawdown * 100:.2f}%"
+                )
+            # Forced clear: rebase the high-water mark to current equity so the
+            # operator can resume after a stale peak (e.g. after major losses
+            # or a strategy reset). daily_baseline_equity is also rebased so
+            # the daily-halt check doesn't immediately re-trip.
+            peak_reset_from = state.peak_equity
+            peak_reset_to = equity
+            state.peak_equity = equity
+            state.daily_baseline_equity = equity
+            total_drawdown = 0.0
+            self.logger.warning(
+                "Kill switch force-cleared; peak_equity reset $%.2f -> $%.2f",
+                peak_reset_from, peak_reset_to,
             )
 
         pre_risk = self._evaluate_risk(state, now)
@@ -450,16 +478,19 @@ class TradingBotService:
         self._persist_ai_budget(state)
         self.state_store.save(state)
 
+        kill_switch_summary: dict[str, Any] = {
+            "status": "cleared",
+            "reason": "manual_resume_forced" if force and peak_reset_from is not None else "manual_resume",
+        }
+        if peak_reset_from is not None:
+            kill_switch_summary["peak_reset_from"] = peak_reset_from
+            kill_switch_summary["peak_reset_to"] = peak_reset_to
+
         summary = self._build_summary(
             state,
             pre_risk=pre_risk,
             post_risk=post_risk,
-            modules={
-                "kill_switch": {
-                    "status": "cleared",
-                    "reason": "manual_resume",
-                }
-            },
+            modules={"kill_switch": kill_switch_summary},
         )
         self.logger.info("Kill switch cleared manually at drawdown=%.2f%%", total_drawdown * 100)
         return summary

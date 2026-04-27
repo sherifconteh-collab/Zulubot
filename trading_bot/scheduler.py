@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from trading_bot.config import AppConfig, SchedulerConfig
+from trading_bot.leads import extract_leads
 from trading_bot.notifications import NotificationDispatcher
 from trading_bot.service import TradingBotService
 from trading_bot.telegram_bot import TradingTelegramBot
@@ -225,13 +226,43 @@ class SchedulerService:
         try:
             self.logger.info("Running %s cycle at %s", command, now.isoformat())
             result = self.service.run(command)
-            return result
-
         except Exception as exc:
             error_msg = f"{command} module failed: {exc}\n{traceback.format_exc()}"
             self.logger.error(error_msg)
             await self.notifier.notify_error(f"{command} failed: {exc}")
             return None
+
+        if result is not None:
+            try:
+                await self._dispatch_leads(command, result, now)
+            except Exception as exc:
+                # Lead notification must never break the trading loop.
+                self.logger.error("Lead dispatch for %s failed: %s", command, exc)
+        return result
+
+    async def _dispatch_leads(self, strategy: str, result: dict[str, Any], now: datetime) -> None:
+        if not self.config.leads.enabled:
+            return
+        leads = extract_leads(strategy, result)
+        self.service.update_last_leads(strategy, leads)
+        if not leads:
+            return
+        state = self.service.state_store.load()
+        today = now.date().isoformat()
+        if state.notified_leads_date != today:
+            state.notified_leads = {}
+            state.notified_leads_date = today
+        already = set(state.notified_leads.get(strategy, []))
+        new_leads = [lead for lead in leads if lead["symbol"] not in already]
+        if not new_leads:
+            return
+        await self.notifier.notify_leads(
+            strategy,
+            new_leads,
+            max_per_message=self.config.leads.max_per_message,
+        )
+        state.notified_leads[strategy] = sorted(already | {lead["symbol"] for lead in new_leads})
+        self.service.state_store.save(state)
 
     async def _finalize_trade_notifications(self, results: list[dict[str, Any]]) -> None:
         combined = self._combine_results(results)

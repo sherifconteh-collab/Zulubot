@@ -219,6 +219,13 @@ class BTC5MinConfig:
 
 
 @dataclass(frozen=True)
+class LeadsConfig:
+    """Telegram lead/watchlist push controls."""
+    enabled: bool = True
+    max_per_message: int = 10
+
+
+@dataclass(frozen=True)
 class LearningConfig:
     """Controls the per-symbol performance-memory learning layer.
 
@@ -401,6 +408,7 @@ class AppConfig:
     volatility: VolatilityConfig
     btc5min: BTC5MinConfig
     learning: LearningConfig
+    leads: LeadsConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -620,5 +628,9 @@ class AppConfig:
                 enabled=_env_bool("LEARNING_ENABLED", True),
                 loser_cooldown_losses=_env_int("LEARNING_LOSER_COOLDOWN_LOSSES", 3),
                 loser_cooldown_cycles=_env_int("LEARNING_LOSER_COOLDOWN_CYCLES", 10),
+            ),
+            leads=LeadsConfig(
+                enabled=_env_bool("LEADS_NOTIFICATION_ENABLED", True),
+                max_per_message=_env_int("LEADS_MAX_PER_MESSAGE", 10),
             ),
         )
