@@ -113,6 +113,34 @@ def _on_off(enabled: bool) -> str:
     return "ON" if enabled else "OFF"
 
 
+def _format_lead_line(lead: dict[str, Any]) -> str:
+    """One-line representation of a lead for the Telegram leads alert."""
+    symbol = html.escape(str(lead.get("symbol", "?")))
+    reason = html.escape(str(lead.get("reason", "")))
+    signals = lead.get("signals") or {}
+    parts: list[str] = []
+    # Pull out a small set of well-known signal keys for human-readable context.
+    fg = signals.get("fear_greed")
+    if isinstance(fg, (int, float)):
+        parts.append(f"F&G {int(fg)}")
+    funding = signals.get("funding_rate")
+    if isinstance(funding, (int, float)):
+        parts.append(f"funding {funding:+.4%}")
+    yes_price = signals.get("yes_price")
+    if isinstance(yes_price, (int, float)):
+        parts.append(f"YES {yes_price:.2f}")
+    spread = signals.get("spread_pct")
+    if isinstance(spread, (int, float)):
+        parts.append(f"spread {spread:+.2%}")
+    price = signals.get("price")
+    if not parts and isinstance(price, (int, float)):
+        parts.append(f"@ ${price:,.2f}")
+    context = ", ".join(parts)
+    if context:
+        return f"• {symbol} — {context} (skipped: {reason})"
+    return f"• {symbol} (skipped: {reason})"
+
+
 class TradingTelegramBot:
     def __init__(
         self,
@@ -498,6 +526,28 @@ class TradingTelegramBot:
     async def send_error(self, error_msg: str) -> None:
         await self.send_message(f"<b>Error</b>: {html.escape(_clip_text(error_msg, 300))}")
 
+    async def send_leads_alert(
+        self,
+        strategy: str,
+        leads: list[dict[str, Any]],
+        max_per_message: int = 10,
+    ) -> None:
+        """Push a per-strategy watchlist update."""
+        if not leads:
+            return
+        max_per_msg = max(1, int(max_per_message))
+        shown = leads[:max_per_msg]
+        header = (
+            f"<b>Watching</b> ({html.escape(strategy)}) — "
+            f"{len(leads)} new lead{'s' if len(leads) != 1 else ''}"
+        )
+        lines = [header]
+        for lead in shown:
+            lines.append(_format_lead_line(lead))
+        if len(leads) > max_per_msg:
+            lines.append(f"… +{len(leads) - max_per_msg} more")
+        await self.send_message("\n".join(lines))
+
     # ── Inbound command handlers ───────────────────────────────────
 
     def _register_handlers(self) -> None:
@@ -511,6 +561,7 @@ class TradingTelegramBot:
             "latency": self._cmd_latency,
             "audit": self._cmd_audit,
             "decisions": self._cmd_decisions,
+            "leads": self._cmd_leads,
             "pause": self._cmd_pause,
             "resume": self._cmd_resume,
             "kill": self._cmd_kill,
@@ -547,6 +598,7 @@ class TradingTelegramBot:
             "/audit [N] — trade audit tail\n"
             "/decisions [N] — strategy decisions\n"
             "/latency — module timings\n"
+            "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
             "/crypto /stocks /rotation /predict /polymarket /btc5min\n"
@@ -554,6 +606,7 @@ class TradingTelegramBot:
             "\n"
             "<b>Control</b>\n"
             "/pause /resume /kill\n"
+            "/resume force — clear kill switch and reset peak equity\n"
             "\n"
             "<b>Settings</b>\n"
             "/config /ai",
@@ -571,6 +624,32 @@ class TradingTelegramBot:
             await self.send_heartbeat(status)
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_leads(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        leads_by_strategy = self._service.get_last_leads()
+        sections: list[str] = []
+        total = 0
+        for strategy in sorted(leads_by_strategy):
+            leads = leads_by_strategy[strategy]
+            if not leads:
+                continue
+            total += len(leads)
+            sections.append(f"<b>{html.escape(strategy)}</b> ({len(leads)})")
+            for lead in leads[:10]:
+                sections.append(_format_lead_line(lead))
+            if len(leads) > 10:
+                sections.append(f"… +{len(leads) - 10} more")
+            sections.append("")
+        if not sections:
+            await update.message.reply_text("No leads tracked yet. Strategies populate this after each run.")  # type: ignore[union-attr]
+            return
+        header = f"<b>Watchlist</b> — {total} lead{'s' if total != 1 else ''} across {sum(1 for v in leads_by_strategy.values() if v)} strateg{'ies' if sum(1 for v in leads_by_strategy.values() if v) != 1 else 'y'}"
+        await _send_html_chunks(update, header + "\n\n" + "\n".join(sections).rstrip())
 
     async def _cmd_crypto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
@@ -955,19 +1034,28 @@ class TradingTelegramBot:
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
+        force = bool(context.args) and str(context.args[0]).strip().lower() == "force"
         try:
             state = self._service.state_store.load()
             cleared_kill_switch = False
+            peak_reset_msg = ""
             if state.kill_switch_engaged:
-                self._service.clear_kill_switch()
+                summary = self._service.clear_kill_switch(force=force)
                 cleared_kill_switch = True
+                ks = (summary or {}).get("modules", {}).get("kill_switch", {})
+                if "peak_reset_from" in ks:
+                    peak_reset_msg = (
+                        f" (peak reset ${ks['peak_reset_from']:.2f} → ${ks['peak_reset_to']:.2f})"
+                    )
             self._paused = False
-            msg = "Resumed. Trading active."
             if cleared_kill_switch:
-                msg = "Resumed. Kill switch cleared. Trading active."
+                msg = f"Resumed. Kill switch cleared{peak_reset_msg}. Trading active."
+            else:
+                msg = "Resumed. Trading active."
             await update.message.reply_text(msg)  # type: ignore[union-attr]
         except Exception as exc:
-            await update.message.reply_text(f"Resume blocked: {exc}")  # type: ignore[union-attr]
+            hint = "" if force else "\n\nUse /resume force to reset the high-water mark to current equity."
+            await update.message.reply_text(f"Resume blocked: {exc}{hint}")  # type: ignore[union-attr]
 
     async def _cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):

@@ -39,6 +39,18 @@ class NotificationDispatcher:
         if self.telegram and self.telegram.is_configured:
             await self.telegram.send_error(error_msg)
 
+    async def notify_leads(
+        self,
+        strategy: str,
+        leads: list[dict[str, Any]],
+        max_per_message: int = 10,
+    ) -> None:
+        if not leads:
+            return
+        self.logger.info("Leads (%s): %d", strategy, len(leads))
+        if self.telegram and self.telegram.is_configured:
+            await self.telegram.send_leads_alert(strategy, leads, max_per_message=max_per_message)
+
     async def notify_startup(self, paper_mode: bool, vol_targeting_enabled: bool) -> None:
         msg = f"Trading bot started. Paper mode: {paper_mode}"
         self.logger.info(msg)

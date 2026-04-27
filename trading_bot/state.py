@@ -81,6 +81,12 @@ class StateStore:
                 for sym, rec in (payload.get("performance_memory") or {}).items()
                 if isinstance(rec, dict)
             },
+            notified_leads={
+                str(strategy): [str(s) for s in (symbols or [])]
+                for strategy, symbols in (payload.get("notified_leads") or {}).items()
+                if isinstance(symbols, list)
+            },
+            notified_leads_date=str(payload.get("notified_leads_date", "")),
         )
 
     def save(self, state: PortfolioState) -> None:
