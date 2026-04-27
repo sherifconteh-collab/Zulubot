@@ -284,7 +284,7 @@ graph TD
 - **Volatility-targeted position sizing** (opt-in) — scales each position so dollar-risk stays constant
 - Configurable flat position size per trade (default 2% of equity, used when vol targeting is off or history is insufficient)
 - 5% daily drawdown halt on new entries
-- 15% peak-to-equity kill switch (closes all positions)
+- 15% peak-to-equity kill switch (closes all positions); use `/resume force` to rebase the high-water mark and clear a stuck kill switch
 - `PAPER_MODE=true` by default — no real money until explicitly enabled
 - All signals, orders, and risk events logged and Telegram-notified
 
@@ -387,12 +387,13 @@ graph LR
         HB["Heartbeat"]
         RA["Risk Alerts"]
         ER["Error Reports"]
+        LA["Leads Alerts"]
     end
 
     subgraph "Inbound Commands"
-        MON["/status /positions /risk /history"]
+        MON["/status /positions /risk /history /leads"]
         EXEC["/crypto /stocks /rotation /predict /polymarket /btc5min /backtest"]
-        CTRL["/pause /resume /kill"]
+        CTRL["/pause /resume /resume force /kill"]
         CFG["/config /ai"]
     end
 
@@ -404,6 +405,7 @@ graph LR
     BOT --> HB
     BOT --> RA
     BOT --> ER
+    BOT --> LA
 
     MON --> BOT
     EXEC --> BOT
@@ -429,8 +431,10 @@ graph LR
 | `/polymarket` | Force a Polymarket scan |
 | `/btc5min` | BTC 5-min spread signal card (Coinbase vs Kalshi vs Polymarket implied) |
 | `/backtest [range]` | Run a Freqtrade backtest |
+| `/leads` | Watchlist — skipped buys and top targets from the last strategy run |
 | `/pause` | Pause trading |
 | `/resume` | Resume trading |
+| `/resume force` | Resume trading **and** reset the peak-equity high-water mark to current equity, clearing a stuck kill switch |
 | `/kill` | Emergency stop (kill switch) |
 | `/config` | Show current configuration |
 | `/ai` | AI analyst team status & budget |
@@ -443,6 +447,7 @@ graph LR
 - **Interactive commands** always return a completion message (including "no trades executed" when applicable).
 - **Trade alerts** and **heartbeat** include stale-price warnings and recent module latency when available.
 - **Heartbeat** shows equity, Kalshi balance, positions grouped by type, AI analyst status, and last scan dates.
+- **Leads alerts** are automatically pushed after every successful module run with new watchlist entries (skipped buys and top targets). Deduped per-strategy per-day so the same lead doesn't re-fire. Controlled by `LEADS_NOTIFICATION_ENABLED`.
 
 ---
 
@@ -480,6 +485,15 @@ graph LR
 | `LATENCY_ARB_MIN_TRADE_USD` | `1.0` | Minimum position size |
 | `LATENCY_ARB_AI_CONFIRMATION` | `boost` | AI confirmation mode |
 | `LATENCY_ARB_MAX_PRICE_AGE_SECONDS` | `15.0` | Skip stale Coinbase prices before signaling |
+
+### Leads Notifications
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `LEADS_NOTIFICATION_ENABLED` | `true` | Push watchlist leads to Telegram after each module run |
+| `LEADS_MAX_PER_MESSAGE` | `10` | Max leads shown per Telegram message |
+
+A **lead** is a symbol the bot identified as tradeable but did not buy — e.g. because the position-size rounded to zero, the max-positions cap was reached, the AI vetoed it, or the symbol is in cooldown. Leads are deduped per-strategy per-day so the same entry doesn't re-fire until the next calendar day. Use `/leads` to see the current in-memory cache.
 
 ### Observability & Freshness
 
