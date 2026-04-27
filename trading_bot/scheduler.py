@@ -243,7 +243,11 @@ class SchedulerService:
     async def _dispatch_leads(self, strategy: str, result: dict[str, Any], now: datetime) -> None:
         if not self.config.leads.enabled:
             return
-        leads = extract_leads(strategy, result)
+        modules = result.get("modules")
+        module_result = result
+        if isinstance(modules, dict):
+            module_result = modules.get(strategy, result)
+        leads = extract_leads(strategy, module_result)
         self.service.update_last_leads(strategy, leads)
         if not leads:
             return

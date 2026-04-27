@@ -96,12 +96,29 @@ class ClearKillSwitchForceTests(unittest.TestCase):
         self.assertFalse(state.kill_switch_engaged)
         self.assertAlmostEqual(state.peak_equity, 23.55)
         self.assertAlmostEqual(state.daily_baseline_equity, 23.55)
+        self.assertFalse(state.halt_new_trades_for_day)
 
         ks = (summary or {}).get("modules", {}).get("kill_switch", {})
         self.assertEqual(ks.get("status"), "cleared")
         self.assertEqual(ks.get("reason"), "manual_resume_forced")
         self.assertAlmostEqual(ks.get("peak_reset_from"), 113.00)
         self.assertAlmostEqual(ks.get("peak_reset_to"), 23.55)
+
+    def test_force_clear_also_clears_daily_halt_flag(self) -> None:
+        # Scenario: daily drawdown tripped halt_new_trades_for_day before the
+        # kill switch fired.  A same-day /resume force must unblock both flags
+        # so that new entries are permitted immediately.
+        state_payload = self._stuck_state()
+        state_payload["halt_new_trades_for_day"] = True
+        state_payload["daily_baseline_date"] = "2026-04-27"  # same day as now
+        svc, _ = _make_service_with_initial_state(state_payload)
+        svc.broker = _ConstantEquityBroker(equity=23.55, real_broker=svc.broker)
+
+        svc.clear_kill_switch(force=True)
+
+        state = svc.state_store.load()
+        self.assertFalse(state.kill_switch_engaged)
+        self.assertFalse(state.halt_new_trades_for_day)
 
     def test_clear_without_force_succeeds_when_drawdown_under_threshold(self) -> None:
         # Recovered scenario: peak $100, equity $95 → 5% drawdown, well below 15%.
