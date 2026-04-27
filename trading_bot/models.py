@@ -69,6 +69,11 @@ class PortfolioState:
     # See trading_bot/performance_memory.py for the schema.
     performance_memory: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Per-strategy dedup set of lead identifiers already pushed to Telegram
+    # today. Reset when notified_leads_date rolls over to a new ISO date.
+    notified_leads: dict[str, list[str]] = field(default_factory=dict)
+    notified_leads_date: str = ""
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "cash": self.cash,
@@ -93,6 +98,8 @@ class PortfolioState:
             "consecutive_losses": self.consecutive_losses,
             "cooldown_remaining": self.cooldown_remaining,
             "performance_memory": self.performance_memory,
+            "notified_leads": self.notified_leads,
+            "notified_leads_date": self.notified_leads_date,
         }
 
 
