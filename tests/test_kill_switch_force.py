@@ -5,7 +5,9 @@ import logging
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from trading_bot.config import AppConfig
 from trading_bot.service import TradingBotService
@@ -87,7 +89,14 @@ class ClearKillSwitchForceTests(unittest.TestCase):
         self.assertEqual(state.peak_equity, 113.00)
 
     def test_force_clear_resets_peak_to_current_equity_and_clears_flag(self) -> None:
-        svc, _ = _make_service_with_initial_state(self._stuck_state())
+        # Seed with halt_new_trades_for_day=True and today's date so the
+        # date-rollover path in _evaluate_risk() cannot clear the flag on its
+        # own — only our explicit state.halt_new_trades_for_day = False does it.
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        payload = self._stuck_state()
+        payload["halt_new_trades_for_day"] = True
+        payload["daily_baseline_date"] = today
+        svc, _ = _make_service_with_initial_state(payload)
         svc.broker = _ConstantEquityBroker(equity=23.55, real_broker=svc.broker)
 
         summary = svc.clear_kill_switch(force=True)
@@ -108,9 +117,12 @@ class ClearKillSwitchForceTests(unittest.TestCase):
         # Scenario: daily drawdown tripped halt_new_trades_for_day before the
         # kill switch fired.  A same-day /resume force must unblock both flags
         # so that new entries are permitted immediately.
+        # Use today's actual date so the date-rollover path in _evaluate_risk()
+        # cannot clear the flag on its own.
+        today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
         state_payload = self._stuck_state()
         state_payload["halt_new_trades_for_day"] = True
-        state_payload["daily_baseline_date"] = "2026-04-27"  # same day as now
+        state_payload["daily_baseline_date"] = today
         svc, _ = _make_service_with_initial_state(state_payload)
         svc.broker = _ConstantEquityBroker(equity=23.55, real_broker=svc.broker)
 
