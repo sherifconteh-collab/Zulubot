@@ -41,10 +41,14 @@ def _make_scheduler(service: TradingBotService) -> SchedulerService:
 
 
 CRYPTO_RESULT_TWO_LEADS = {
-    "decisions": [
-        {"symbol": "ETHUSDT", "action": "skip_buy", "reason": "position_size_zero", "signals": {"fear_greed": 22}},
-        {"symbol": "SOLUSDT", "action": "skip_buy", "reason": "ai_rejected", "signals": {}},
-    ]
+    "modules": {
+        "crypto": {
+            "decisions": [
+                {"symbol": "ETHUSDT", "action": "skip_buy", "reason": "position_size_zero", "signals": {"fear_greed": 22}},
+                {"symbol": "SOLUSDT", "action": "skip_buy", "reason": "ai_rejected", "signals": {}},
+            ]
+        }
+    }
 }
 
 
@@ -95,9 +99,13 @@ class SchedulerLeadsDispatchTests(unittest.TestCase):
         sched.notifier.notify_leads.reset_mock()
 
         result_with_extra = {
-            "decisions": list(CRYPTO_RESULT_TWO_LEADS["decisions"]) + [
-                {"symbol": "AVAXUSDT", "action": "skip_buy", "reason": "position_size_zero"},
-            ]
+            "modules": {
+                "crypto": {
+                    "decisions": list(CRYPTO_RESULT_TWO_LEADS["modules"]["crypto"]["decisions"]) + [
+                        {"symbol": "AVAXUSDT", "action": "skip_buy", "reason": "position_size_zero"},
+                    ]
+                }
+            }
         }
         asyncio.run(sched._dispatch_leads("crypto", result_with_extra, now))
 
