@@ -551,7 +551,7 @@ class TradingTelegramBot:
         for lead in shown:
             line = _format_lead_line(lead)
             extra = len(line) + 1  # +1 for the joining newline
-            if current_lines and current_len + extra > _TG_MAX_MSG_LEN:
+            if current_len + extra > _TG_MAX_MSG_LEN:
                 chunks.append("\n".join(current_lines))
                 current_lines = [cont_header]
                 current_len = len(cont_header)

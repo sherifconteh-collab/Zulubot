@@ -244,9 +244,7 @@ class SchedulerService:
         if not self.config.leads.enabled:
             return
         modules = result.get("modules")
-        module_result = result
-        if isinstance(modules, dict):
-            module_result = modules.get(strategy, result)
+        module_result = modules.get(strategy, result) if isinstance(modules, dict) else result
         leads = extract_leads(strategy, module_result)
         self.service.update_last_leads(strategy, leads)
         if not leads:
