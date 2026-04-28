@@ -563,7 +563,9 @@ class TradingTelegramBot:
             if current_len + extra > _TG_MAX_MSG_LEN:
                 chunks.append("\n".join(current_lines))
                 current_lines = [cont_header]
+                current_len = len(cont_header)
             current_lines.append(trailer)
+            current_len += extra
 
         chunks.append("\n".join(current_lines))
 
