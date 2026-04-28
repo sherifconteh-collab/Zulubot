@@ -466,6 +466,7 @@ class TradingBotService:
             peak_reset_to = equity
             state.peak_equity = equity
             state.daily_baseline_equity = equity
+            state.halt_new_trades_for_day = False
             total_drawdown = 0.0
             self.logger.warning(
                 "Kill switch force-cleared; peak_equity reset $%.2f -> $%.2f",

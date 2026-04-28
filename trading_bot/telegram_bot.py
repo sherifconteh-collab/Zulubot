@@ -532,7 +532,7 @@ class TradingTelegramBot:
         leads: list[dict[str, Any]],
         max_per_message: int = 10,
     ) -> None:
-        """Push a per-strategy watchlist update."""
+        """Push a per-strategy watchlist update, chunked to stay within Telegram's limit."""
         if not leads:
             return
         max_per_msg = max(1, int(max_per_message))
@@ -541,12 +541,36 @@ class TradingTelegramBot:
             f"<b>Watching</b> ({html.escape(strategy)}) — "
             f"{len(leads)} new lead{'s' if len(leads) != 1 else ''}"
         )
-        lines = [header]
+        cont_header = f"{header} <i>(cont.)</i>"
+        trailer = f"… +{len(leads) - max_per_msg} more" if len(leads) > max_per_msg else None
+
+        chunks: list[str] = []
+        current_lines: list[str] = [header]
+        current_len: int = len(header)
+
         for lead in shown:
-            lines.append(_format_lead_line(lead))
-        if len(leads) > max_per_msg:
-            lines.append(f"… +{len(leads) - max_per_msg} more")
-        await self.send_message("\n".join(lines))
+            line = _format_lead_line(lead)
+            extra = len(line) + 1  # +1 for the joining newline
+            if current_len + extra > _TG_MAX_MSG_LEN:
+                chunks.append("\n".join(current_lines))
+                current_lines = [cont_header]
+                current_len = len(cont_header)
+            current_lines.append(line)
+            current_len += extra
+
+        if trailer is not None:
+            extra = len(trailer) + 1
+            if current_len + extra > _TG_MAX_MSG_LEN:
+                chunks.append("\n".join(current_lines))
+                current_lines = [cont_header]
+                current_len = len(cont_header)
+            current_lines.append(trailer)
+            current_len += extra
+
+        chunks.append("\n".join(current_lines))
+
+        for chunk in chunks:
+            await self.send_message(chunk)
 
     # ── Inbound command handlers ───────────────────────────────────
 
@@ -648,7 +672,8 @@ class TradingTelegramBot:
         if not sections:
             await update.message.reply_text("No leads tracked yet. Strategies populate this after each run.")  # type: ignore[union-attr]
             return
-        header = f"<b>Watchlist</b> — {total} lead{'s' if total != 1 else ''} across {sum(1 for v in leads_by_strategy.values() if v)} strateg{'ies' if sum(1 for v in leads_by_strategy.values() if v) != 1 else 'y'}"
+        active_strategies = sum(1 for v in leads_by_strategy.values() if v)
+        header = f"<b>Watchlist</b> — {total} lead{'s' if total != 1 else ''} across {active_strategies} strateg{'ies' if active_strategies != 1 else 'y'}"
         await _send_html_chunks(update, header + "\n\n" + "\n".join(sections).rstrip())
 
     async def _cmd_crypto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
