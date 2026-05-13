@@ -30,6 +30,7 @@ from trading_bot.strategies.btc_5min import BTC5MinSpreadStrategy
 from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
 from trading_bot.strategies.latency_arb import LatencyArbStrategy
+from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.stocks import StockValueStrategy
 
@@ -226,6 +227,15 @@ class TradingBotService:
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
+        # Markov Chain regime-switching strategy
+        self.markov_strategy = MarkovRegimeStrategy(
+            config=config.markov,
+            coinbase_client=self.coinbase_client,
+            binance_client=self.binance_client,
+            coinbase_broker=self.coinbase_broker,
+            logger=logger,
+        )
+
         # BTC 5-min spread strategy (spot vs Kalshi vs Polymarket)
         self.btc5min_strategy = BTC5MinSpreadStrategy(
             config=config.btc5min,
@@ -364,6 +374,16 @@ class TradingBotService:
             module_results["btc5min"] = self._run_module(
                 "btc5min",
                 lambda: self.btc5min_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        if command == "markov" or (command == "all" and self.config.markov.enabled):
+            module_results["markov"] = self._run_module(
+                "markov",
+                lambda: self.markov_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
