@@ -241,6 +241,41 @@ class LearningConfig:
 
 
 @dataclass(frozen=True)
+class MarkovStrategyConfig:
+    """Configuration for the Markov Chain regime-switching strategy."""
+
+    enabled: bool = False
+    # Symbols to trade when the regime signal is bullish
+    symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    # Symbol whose price history drives regime detection (BTC is the market barometer)
+    regime_symbol: str = "BTCUSDT"
+    # Rolling return window (days) for state classification
+    return_window: int = 20
+    # Rolling return threshold to classify as Bull
+    bull_threshold: float = 0.02
+    # Rolling return threshold to classify as Bear
+    bear_threshold: float = -0.02
+    # signal = bull_prob - bear_prob; open long when above this
+    entry_signal_threshold: float = 0.10
+    # Close positions when signal drops below this
+    exit_signal_threshold: float = 0.0
+    # Autonomous stop-loss: close when price drops this fraction from entry
+    stop_loss_pct: float = 0.10
+    # Autonomous take-profit: close when price rises this fraction from entry
+    take_profit_pct: float = 0.20
+    # Minimum price history days before the strategy is allowed to trade
+    min_history_days: int = 40
+    # Laplace smoothing for transition matrix (0.0 = pure MLE)
+    laplace_alpha: float = 0.1
+    # Chapman-Kolmogorov forecast horizon (steps ahead; 1 = next period)
+    forecast_steps: int = 1
+    # Scheduler interval
+    run_interval_minutes: int = 60
+    # Use Coinbase pricing (True) or Binance mark price (False)
+    use_coinbase_pricing: bool = True
+
+
+@dataclass(frozen=True)
 class SchedulerConfig:
     crypto_interval_minutes: int = 10
     btc5min_interval_minutes: int = 5
@@ -409,6 +444,7 @@ class AppConfig:
     btc5min: BTC5MinConfig
     learning: LearningConfig
     leads: LeadsConfig
+    markov: MarkovStrategyConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -632,5 +668,22 @@ class AppConfig:
             leads=LeadsConfig(
                 enabled=_env_bool("LEADS_NOTIFICATION_ENABLED", True),
                 max_per_message=_env_int("LEADS_MAX_PER_MESSAGE", 10),
+            ),
+            markov=MarkovStrategyConfig(
+                enabled=_env_bool("MARKOV_ENABLED", False),
+                symbols=_env_list("MARKOV_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
+                regime_symbol=os.getenv("MARKOV_REGIME_SYMBOL", "BTCUSDT").strip(),
+                return_window=_env_int("MARKOV_RETURN_WINDOW", 20),
+                bull_threshold=_env_float("MARKOV_BULL_THRESHOLD", 0.02),
+                bear_threshold=_env_float("MARKOV_BEAR_THRESHOLD", -0.02),
+                entry_signal_threshold=_env_float("MARKOV_ENTRY_SIGNAL_THRESHOLD", 0.10),
+                exit_signal_threshold=_env_float("MARKOV_EXIT_SIGNAL_THRESHOLD", 0.0),
+                stop_loss_pct=_env_float("MARKOV_STOP_LOSS_PCT", 0.10),
+                take_profit_pct=_env_float("MARKOV_TAKE_PROFIT_PCT", 0.20),
+                min_history_days=_env_int("MARKOV_MIN_HISTORY_DAYS", 40),
+                laplace_alpha=_env_float("MARKOV_LAPLACE_ALPHA", 0.1),
+                forecast_steps=_env_int("MARKOV_FORECAST_STEPS", 1),
+                run_interval_minutes=_env_int("MARKOV_RUN_INTERVAL_MINUTES", 60),
+                use_coinbase_pricing=_env_bool("MARKOV_USE_COINBASE_PRICING", True),
             ),
         )
