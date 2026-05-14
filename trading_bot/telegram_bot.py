@@ -216,6 +216,7 @@ class TradingTelegramBot:
             "rotation": "\U0001f504",
             "predictions": "\U0001f3b2",
             "latency_arb": "\u26a1",
+            "markov": "\U0001f9ed",
         }
         return icons.get(module_name, "\u2699\ufe0f")
 
@@ -358,6 +359,26 @@ class TradingTelegramBot:
                 lines.append(f"   \u26a0\ufe0f Stale feeds: {stale_preview}")
             execution_text = "live Kalshi" if can_trade_live else "paper shadowing"
             lines.append(f"   \U0001f4cc Execution: {execution_text}")
+            return
+
+        if module_name == "markov":
+            state_name = str(module_data.get("current_state", "?"))
+            signal = module_data.get("signal")
+            bull = module_data.get("bull_prob")
+            bear = module_data.get("bear_prob")
+            status = module_data.get("status", "")
+            _state_icons = {"bull": "\U0001f402", "bear": "\U0001f43b", "sideways": "\u27a1\ufe0f"}
+            state_icon = _state_icons.get(state_name.lower(), "\u2753")
+            lines.append(f"   {state_icon} Regime: {html.escape(state_name.upper())}")
+            if signal is not None:
+                arrow = "\u25b2" if float(signal) > 0 else ("\u25bc" if float(signal) < 0 else "\u25cf")
+                lines.append(f"   {arrow} Signal: {float(signal):+.4f}")
+            if bull is not None and bear is not None:
+                lines.append(f"   \U0001f402 {float(bull):.1%}  \U0001f43b {float(bear):.1%}")
+            if status == "insufficient_data":
+                hist = module_data.get("history_days", 0)
+                min_h = module_data.get("min_history_days", 40)
+                lines.append(f"   \u23f3 Building history {int(hist)}/{int(min_h)} days")
             return
 
         self._append_generic_ai_context(lines, module_data)
@@ -597,6 +618,7 @@ class TradingTelegramBot:
             "ai": self._cmd_ai,
             "history": self._cmd_history,
             "btc5min": self._cmd_btc5min,
+            "markov": self._cmd_markov,
             "help": self._cmd_help,
             "start": self._cmd_help,
         }
@@ -625,7 +647,7 @@ class TradingTelegramBot:
             "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
-            "/crypto /stocks /rotation /predict /polymarket /btc5min\n"
+            "/crypto /stocks /rotation /predict /polymarket /btc5min /markov\n"
             "/backtest [range]\n"
             "\n"
             "<b>Control</b>\n"
@@ -755,6 +777,103 @@ class TradingTelegramBot:
             await update.message.reply_text(  # type: ignore[union-attr]
                 "\n".join(lines), parse_mode="HTML"
             )
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_markov(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            result = self._service.run("markov")
+            m = (result.get("modules") or {}).get("markov") or {}
+
+            status = m.get("status", "unknown")
+            if status == "insufficient_data":
+                hist = m.get("history_days", 0)
+                min_h = m.get("min_history_days", 40)
+                sym = html.escape(str(m.get("regime_symbol", "?")))
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"<b>\U0001f9ed Markov</b> — building history\n"
+                    f"⏳ {sym}: {int(hist)}/{int(min_h)} days collected.\n"
+                    f"Strategy will begin signalling once {int(min_h)} days of data are available.",
+                    parse_mode="HTML",
+                )
+                return
+
+            if status not in ("completed",):
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"<b>\U0001f9ed Markov</b>: {html.escape(str(status))}",
+                    parse_mode="HTML",
+                )
+                return
+
+            state_name = str(m.get("current_state", "?"))
+            signal = float(m.get("signal", 0.0))
+            bull = float(m.get("bull_prob", 0.0))
+            bear = float(m.get("bear_prob", 0.0))
+            sideways = float(m.get("sideways_prob", 0.0))
+            n_trans = int(m.get("n_transitions", 0))
+            hist_days = int(m.get("history_days", 0))
+            regime_sym = html.escape(str(m.get("regime_symbol", "?")))
+            opens = m.get("opens") or []
+            closes = m.get("closes") or []
+            stat_dist = m.get("stationary_distribution") or {}
+
+            _state_icons = {"bull": "\U0001f402", "bear": "\U0001f43b", "sideways": "➡️"}
+            state_icon = _state_icons.get(state_name.lower(), "❓")
+            signal_arrow = "▲" if signal > 0 else ("▼" if signal < 0 else "●")
+            signal_bar = _progress_bar((signal + 1) / 2, width=12)
+
+            cfg = self._service.config.markov
+            entry_thr = float(cfg.entry_signal_threshold)
+            exit_thr = float(cfg.exit_signal_threshold)
+
+            if signal > entry_thr:
+                action_tag = "🟢 LONG SIGNAL"
+            elif signal < exit_thr:
+                action_tag = "🔴 CLOSE SIGNAL"
+            else:
+                action_tag = "⚪ NEUTRAL — hold"
+
+            lines = [
+                f"<b>\U0001f9ed Markov Regime</b> — {regime_sym}",
+                f"{state_icon} State: <b>{html.escape(state_name.upper())}</b>",
+                f"{signal_arrow} Signal: <code>{signal:+.4f}</code>  {signal_bar}",
+                f"→ {action_tag}",
+                "",
+                "<b>Next-step probabilities</b>",
+                f"\U0001f402 Bull      {_progress_bar(bull, 10)} {bull:.1%}",
+                f"\U0001f43b Bear      {_progress_bar(bear, 10)} {bear:.1%}",
+                f"➡️  Sideways  {_progress_bar(sideways, 10)} {sideways:.1%}",
+            ]
+
+            if stat_dist:
+                s_bull = float(stat_dist.get("bull", 0))
+                s_bear = float(stat_dist.get("bear", 0))
+                s_side = float(stat_dist.get("sideways", 0))
+                lines += [
+                    "",
+                    "<b>Long-run (stationary)</b>",
+                    f"\U0001f402 {s_bull:.1%}  \U0001f43b {s_bear:.1%}  ➡️ {s_side:.1%}",
+                ]
+
+            lines += [
+                "",
+                f"📅 History: {hist_days}d  |  Transitions: {n_trans}",
+                f"⚙️ Entry >{entry_thr:+.2f}  Exit <{exit_thr:+.2f}",
+            ]
+
+            if opens or closes:
+                lines.append("")
+                if opens:
+                    lines.append("✅ Opened: " + ", ".join(html.escape(str(s)) for s in opens))
+                if closes:
+                    lines.append("🔴 Closed: " + ", ".join(html.escape(str(s)) for s in closes))
+
+            await _send_html_chunks(update, "\n".join(lines))
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 

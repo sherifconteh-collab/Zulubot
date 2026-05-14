@@ -95,14 +95,18 @@ def estimate_transition_matrix(
     """MLE transition matrix with optional Laplace smoothing.
 
     Returns an (n_states × n_states) float64 array where each row sums to 1.
-    Rows with zero observed transitions (after smoothing) are set to uniform.
+    Rows with zero observed transitions (after smoothing) are set to uniform
+    distribution regardless of laplace_alpha.
     """
     counts = np.full((n_states, n_states), laplace_alpha, dtype=np.float64)
     for i in range(len(state_sequence) - 1):
         counts[state_sequence[i], state_sequence[i + 1]] += 1.0
     row_sums = counts.sum(axis=1, keepdims=True)
-    row_sums = np.where(row_sums == 0, 1.0, row_sums)
-    return counts / row_sums
+    zero_rows = (row_sums == 0).flatten()
+    matrix = counts / np.where(row_sums == 0, 1.0, row_sums)
+    if zero_rows.any():
+        matrix[zero_rows] = 1.0 / n_states
+    return matrix
 
 
 def stationary_distribution(transition_matrix: np.ndarray) -> np.ndarray:
