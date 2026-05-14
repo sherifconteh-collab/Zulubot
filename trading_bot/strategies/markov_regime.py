@@ -64,6 +64,9 @@ class MarkovRegimeStrategy:
     ) -> dict[str, Any]:
         """Single strategy cycle. Returns a summary dict."""
 
+        if not self.config.enabled:
+            return {"status": "disabled", "opens": [], "closes": [], "decisions": []}
+
         opens: list[str] = []
         closes: list[str] = []
         decisions: list[dict[str, Any]] = []
