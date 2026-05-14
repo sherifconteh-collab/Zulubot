@@ -67,6 +67,7 @@ class RiskConfig:
     max_open_positions: int = 0             # 0 = unlimited; portfolio-wide cap across all strategies
     cooldown_consecutive_losses: int = 0    # 0 = disabled; pause after N consecutive losing trades
     cooldown_periods: int = 3               # number of trade cycles to skip after cooldown triggers
+    post_kill_cooldown_hours: float = 1.0   # hours to block new entries after kill switch is cleared (0 = no cooldown)
 
 
 @dataclass(frozen=True)
@@ -493,6 +494,7 @@ class AppConfig:
                 max_open_positions=_env_int("MAX_OPEN_POSITIONS", 0),
                 cooldown_consecutive_losses=_env_int("COOLDOWN_CONSECUTIVE_LOSSES", 0),
                 cooldown_periods=_env_int("COOLDOWN_PERIODS", 3),
+                post_kill_cooldown_hours=_env_float("POST_KILL_COOLDOWN_HOURS", 1.0),
             ),
             stock=StockStrategyConfig(
                 max_pe_ratio=_env_float("STOCK_MAX_PE", 25.0),
