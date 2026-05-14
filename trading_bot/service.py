@@ -326,6 +326,17 @@ class TradingBotService:
                     now=now,
                 ),
             )
+        # Markov runs before gated modules so state.markov_regime_signal is fresh.
+        if command == "markov" or (command == "all" and self.config.markov.enabled):
+            module_results["markov"] = self._run_module(
+                "markov",
+                lambda: self.markov_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
         if command in {"predictions", "all"}:
             module_results["predictions"] = self._run_module(
                 "predictions",
@@ -374,16 +385,6 @@ class TradingBotService:
             module_results["btc5min"] = self._run_module(
                 "btc5min",
                 lambda: self.btc5min_strategy.run(
-                    state,
-                    broker=self.broker,
-                    risk_manager=self.risk_manager,
-                    now=now,
-                ),
-            )
-        if command == "markov" or (command == "all" and self.config.markov.enabled):
-            module_results["markov"] = self._run_module(
-                "markov",
-                lambda: self.markov_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,

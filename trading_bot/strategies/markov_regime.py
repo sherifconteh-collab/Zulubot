@@ -256,6 +256,8 @@ class MarkovRegimeStrategy:
             "history_days": markov.history_days,
             "opens": opens,
             "closes": closes,
+            "buys": opens,
+            "sells": closes,
             "decisions": decisions,
         }
 
