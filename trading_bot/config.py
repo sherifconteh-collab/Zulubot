@@ -511,7 +511,7 @@ class AppConfig:
                 min_hold_days=_env_int("STOCK_MIN_HOLD_DAYS", 14),
             ),
             crypto=CryptoStrategyConfig(
-                symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
+                symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT", "XRPUSDT"]),
                 buy_fear_threshold=_env_int("CRYPTO_BUY_FEAR_THRESHOLD", 35),
                 sell_fear_threshold=_env_int("CRYPTO_SELL_FEAR_THRESHOLD", 75),
                 use_coinbase_pricing=_env_bool("CRYPTO_USE_COINBASE_PRICING", True),
