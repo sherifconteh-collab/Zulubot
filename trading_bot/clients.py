@@ -296,14 +296,14 @@ class BinanceFuturesClient:
     # Map Binance-style symbols to Hyperliquid asset names
     SYMBOL_TO_HL: dict[str, str] = {
         "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL",
-        "ADAUSDT": "ADA", "DOTUSDT": "DOT", "LINKUSDT": "LINK",
-        "AVAXUSDT": "AVAX", "MATICUSDT": "MATIC",
+        "XRPUSDT": "XRP", "ADAUSDT": "ADA", "DOTUSDT": "DOT",
+        "LINKUSDT": "LINK", "AVAXUSDT": "AVAX", "MATICUSDT": "MATIC",
     }
     # Map Binance-style symbols to Coinbase product IDs
     SYMBOL_TO_CB: dict[str, str] = {
         "BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
-        "ADAUSDT": "ADA-USD", "DOTUSDT": "DOT-USD", "LINKUSDT": "LINK-USD",
-        "AVAXUSDT": "AVAX-USD", "MATICUSDT": "MATIC-USD",
+        "XRPUSDT": "XRP-USD", "ADAUSDT": "ADA-USD", "DOTUSDT": "DOT-USD",
+        "LINKUSDT": "LINK-USD", "AVAXUSDT": "AVAX-USD", "MATICUSDT": "MATIC-USD",
     }
 
     def __init__(
@@ -407,6 +407,7 @@ class CoinbaseClient(BaseHttpClient):
         "BTCUSDT": "BTC-USD",
         "ETHUSDT": "ETH-USD",
         "SOLUSDT": "SOL-USD",
+        "XRPUSDT": "XRP-USD",
         "ADAUSDT": "ADA-USD",
         "DOTUSDT": "DOT-USD",
         "LINKUSDT": "LINK-USD",
