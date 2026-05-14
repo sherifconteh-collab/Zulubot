@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from trading_bot.config import RiskConfig, VolatilityConfig
 from trading_bot.models import PortfolioState
@@ -20,6 +20,7 @@ class RiskSnapshot:
     kill_switch_active: bool
     kill_switch_triggered_now: bool
     cooldown_active: bool = False
+    post_kill_cooldown_active: bool = False
 
 
 class RiskManager:
@@ -57,6 +58,7 @@ class RiskManager:
             state.kill_switch_engaged = True
             kill_switch_triggered_now = True
 
+        post_kill_cooldown_active = self._post_kill_cooldown_active(state, now)
         return RiskSnapshot(
             equity=equity,
             daily_drawdown=daily_drawdown,
@@ -65,6 +67,7 @@ class RiskManager:
             kill_switch_active=state.kill_switch_engaged,
             kill_switch_triggered_now=kill_switch_triggered_now,
             cooldown_active=state.cooldown_remaining > 0,
+            post_kill_cooldown_active=post_kill_cooldown_active,
         )
 
     # ------------------------------------------------------------------ #
@@ -78,7 +81,23 @@ class RiskManager:
             return False
         if state.cooldown_remaining > 0:
             return False
+        if self._post_kill_cooldown_active(state, datetime.now(timezone.utc)):
+            return False
         return True
+
+    def _post_kill_cooldown_active(self, state: PortfolioState, now: datetime) -> bool:
+        """True when entries should be blocked following a recent kill switch clear."""
+        hours = self.config.post_kill_cooldown_hours
+        if hours <= 0 or not state.kill_switch_cleared_at:
+            return False
+        try:
+            cleared = datetime.fromisoformat(state.kill_switch_cleared_at)
+            if cleared.tzinfo is None:
+                cleared = cleared.replace(tzinfo=timezone.utc)
+            now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            return (now_utc - cleared) < timedelta(hours=hours)
+        except (ValueError, OSError):
+            return False
 
     # ------------------------------------------------------------------ #
     # Trailing stop-loss                                                   #

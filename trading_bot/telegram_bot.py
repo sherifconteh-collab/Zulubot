@@ -1153,6 +1153,11 @@ class TradingTelegramBot:
         dd_daily = risk.get("daily_drawdown_pct", 0) or 0
         dd_total = risk.get("total_drawdown_pct", 0) or 0
 
+        post_kill = bool(risk.get("post_kill_cooldown_active"))
+        cleared_at = risk.get("kill_switch_cleared_at")
+        cfg = self._service.config if self._service else None
+        cooldown_h = cfg.risk.post_kill_cooldown_hours if cfg else 1.0
+
         lines = [
             "<b>Risk</b>",
             f"Daily DD    {dd_daily:.2f}% / 5.0%",
@@ -1162,6 +1167,12 @@ class TradingTelegramBot:
             f"Daily halt  {'ACTIVE' if risk.get('daily_halt_active') else 'ok'}",
             f"Kill switch {'ENGAGED' if risk.get('kill_switch_active') else 'ok'}",
         ]
+        if post_kill:
+            cleared_str = html.escape(str(cleared_at or "?")[:19])
+            lines.append(f"Post-kill   🕐 cooldown active ({cooldown_h:.0f}h) — cleared {cleared_str}")
+        elif cleared_at and not risk.get("kill_switch_active"):
+            cleared_str = html.escape(str(cleared_at)[:19])
+            lines.append(f"Post-kill   ✅ cooldown elapsed (cleared {cleared_str})")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1192,8 +1203,13 @@ class TradingTelegramBot:
                         f" (peak reset ${ks['peak_reset_from']:.2f} → ${ks['peak_reset_to']:.2f})"
                     )
             self._paused = False
+            cooldown_h = self._service.config.risk.post_kill_cooldown_hours
             if cleared_kill_switch:
-                msg = f"Resumed. Kill switch cleared{peak_reset_msg}. Trading active."
+                cooldown_note = (
+                    f" New entries blocked for {cooldown_h:.0f}h (post-kill cooldown)."
+                    if cooldown_h > 0 else ""
+                )
+                msg = f"Resumed. Kill switch cleared{peak_reset_msg}.{cooldown_note} Trading active."
             else:
                 msg = "Resumed. Trading active."
             await update.message.reply_text(msg)  # type: ignore[union-attr]

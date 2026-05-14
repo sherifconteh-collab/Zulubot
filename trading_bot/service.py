@@ -495,6 +495,7 @@ class TradingBotService:
 
         pre_risk = self._evaluate_risk(state, now)
         state.kill_switch_engaged = False
+        state.kill_switch_cleared_at = now.isoformat()
         post_risk = self._evaluate_risk(state, now)
         self._persist_ai_budget(state)
         self.state_store.save(state)
@@ -1114,6 +1115,8 @@ class TradingBotService:
                 "cooldown_active": post_risk.cooldown_active,
                 "consecutive_losses": state.consecutive_losses,
                 "cooldown_remaining": state.cooldown_remaining,
+                "post_kill_cooldown_active": post_risk.post_kill_cooldown_active,
+                "kill_switch_cleared_at": state.kill_switch_cleared_at or None,
             },
             "last_stock_screen_date": state.last_stock_screen_date,
             "last_polymarket_scan_date": state.last_polymarket_scan_date,
