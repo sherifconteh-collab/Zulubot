@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         choices=[
             "stocks", "crypto", "polymarket", "rotation", "predictions",
-            "latency_arb", "btc5min", "all", "status",
+            "latency_arb", "btc5min", "markov", "all", "status",
             "run-daemon", "backtest", "hyperopt", "download-data", "btc-terminal",
         ],
         help=(

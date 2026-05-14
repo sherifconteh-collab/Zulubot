@@ -124,7 +124,8 @@ class MarkovRegimeStrategy:
         )
 
         # 5. Autonomous exits: stop-loss / take-profit
-        self._handle_autonomous_exits(
+        # Track which symbols were just closed so we don't immediately re-enter
+        just_closed: set[str] = self._handle_autonomous_exits(
             state,
             broker=broker,
             prices=prices,
@@ -165,6 +166,15 @@ class MarkovRegimeStrategy:
                             "symbol": symbol,
                             "action": "skip_buy",
                             "reason": "already_open",
+                            "signals": _signal_dict(markov),
+                        })
+                        continue
+                    if symbol in just_closed:
+                        decisions.append({
+                            "strategy": _STRATEGY_NAME,
+                            "symbol": symbol,
+                            "action": "skip_buy",
+                            "reason": "just_closed_this_cycle",
                             "signals": _signal_dict(markov),
                         })
                         continue
@@ -247,25 +257,25 @@ class MarkovRegimeStrategy:
 
     def _fetch_prices(self) -> dict[str, float]:
         all_symbols = list({self.config.regime_symbol} | set(self.config.symbols))
+        prices: dict[str, float] = {}
+
         if self.config.use_coinbase_pricing and self.coinbase_client is not None:
             try:
                 prices = self.coinbase_client.get_spot_prices(all_symbols)
-                if prices:
-                    return prices
             except Exception as exc:
                 self.logger.warning("Markov: Coinbase price fetch failed: %s", exc)
 
+        # Fill any missing symbols from Binance (covers partial Coinbase responses)
         if self.binance_client is not None:
-            prices: dict[str, float] = {}
             for symbol in all_symbols:
-                try:
-                    snap = self.binance_client.get_mark_price_and_funding(symbol)
-                    prices[symbol] = snap.mark_price
-                except Exception as exc:
-                    self.logger.warning("Markov: Binance price fetch failed for %s: %s", symbol, exc)
-            return prices
+                if symbol not in prices:
+                    try:
+                        snap = self.binance_client.get_mark_price_and_funding(symbol)
+                        prices[symbol] = snap.mark_price
+                    except Exception as exc:
+                        self.logger.warning("Markov: Binance price fetch failed for %s: %s", symbol, exc)
 
-        return {}
+        return prices
 
     def _handle_autonomous_exits(
         self,
@@ -276,11 +286,13 @@ class MarkovRegimeStrategy:
         markov: MarkovResult,
         closes: list[str],
         decisions: list[dict[str, Any]],
-    ) -> None:
+    ) -> set[str]:
+        """Close positions that hit stop-loss or take-profit. Returns the set of closed symbols."""
+        just_closed: set[str] = set()
         tp = self.config.take_profit_pct
         sl = self.config.stop_loss_pct
         if tp <= 0 and sl <= 0:
-            return
+            return just_closed
 
         for symbol in list(self.config.symbols):
             position = state.positions.get(symbol)
@@ -301,6 +313,7 @@ class MarkovRegimeStrategy:
 
             broker.close_position(state, symbol=symbol, price=price, reason=hit_reason)
             closes.append(symbol)
+            just_closed.add(symbol)
             decisions.append({
                 "strategy": _STRATEGY_NAME,
                 "symbol": symbol,
@@ -313,6 +326,8 @@ class MarkovRegimeStrategy:
                     "move_pct": round(move_pct, 4),
                 },
             })
+
+        return just_closed
 
     def _close_all_positions(
         self,
