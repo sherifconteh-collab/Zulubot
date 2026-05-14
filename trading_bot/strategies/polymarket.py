@@ -122,6 +122,21 @@ class PolymarketStrategy:
                         "daily_halt": state.halt_new_trades_for_day,
                     },
                 })
+            elif (
+                self.config.use_markov_regime_gate
+                and state.markov_regime_state
+                and state.markov_regime_signal < 0
+            ):
+                result["decisions"].append({
+                    "strategy": "polymarket_threshold",
+                    "symbol": "*",
+                    "action": "skip_buy",
+                    "reason": "markov_bear_regime",
+                    "signals": {
+                        "markov_state": state.markov_regime_state,
+                        "markov_signal": state.markov_regime_signal,
+                    },
+                })
             else:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,

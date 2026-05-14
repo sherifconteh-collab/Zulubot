@@ -126,6 +126,11 @@ class MarkovRegimeStrategy:
             markov.n_transitions,
         )
 
+        # Publish regime signal to state so other strategies (Polymarket, Kalshi)
+        # can use it as a market-wide regime gate.
+        state.markov_regime_state = markov.current_state_name
+        state.markov_regime_signal = markov.signal
+
         # 5. Autonomous exits: stop-loss / take-profit
         # Track which symbols were just closed so we don't immediately re-enter
         just_closed: set[str] = self._handle_autonomous_exits(
