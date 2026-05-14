@@ -247,7 +247,7 @@ class MarkovStrategyConfig:
 
     enabled: bool = False
     # Symbols to trade when the regime signal is bullish
-    symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "XRPUSDT"])
     # Symbol whose price history drives regime detection (BTC is the market barometer)
     regime_symbol: str = "BTCUSDT"
     # Rolling return window (days) for state classification
@@ -341,6 +341,7 @@ class PolymarketStrategyConfig:
     stop_loss_threshold: float = 0.15
     max_positions: int = 5
     use_trading_agents: bool = False
+    use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
 
 
 @dataclass(frozen=True)
@@ -384,6 +385,7 @@ class PredictionConfig:
     # predictions trade on price thresholds alone — previously this gate kept
     # the Kalshi strategy idle outside of extreme sentiment regimes.
     require_crypto_fear_greed: bool = False
+    use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
 
 
 @dataclass(frozen=True)
@@ -551,6 +553,7 @@ class AppConfig:
                 stop_loss_threshold=_env_float("POLYMARKET_STOP_LOSS", 0.15),
                 max_positions=_env_int("POLYMARKET_MAX_POSITIONS", 5),
                 use_trading_agents=_env_bool("POLYMARKET_USE_TRADING_AGENTS", False),
+                use_markov_regime_gate=_env_bool("POLYMARKET_MARKOV_GATE", True),
             ),
             trading_agents=TradingAgentsConfig(
                 enabled=_env_bool("TRADING_AGENTS_ENABLED", False),
@@ -620,6 +623,7 @@ class AppConfig:
                 market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather"]),
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
                 require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
+                use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),
@@ -673,7 +677,7 @@ class AppConfig:
             ),
             markov=MarkovStrategyConfig(
                 enabled=_env_bool("MARKOV_ENABLED", True),
-                symbols=_env_list("MARKOV_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
+                symbols=_env_list("MARKOV_SYMBOLS", ["BTCUSDT", "ETHUSDT", "XRPUSDT"]),
                 regime_symbol=os.getenv("MARKOV_REGIME_SYMBOL", "BTCUSDT").strip(),
                 return_window=_env_int("MARKOV_RETURN_WINDOW", 20),
                 bull_threshold=_env_float("MARKOV_BULL_THRESHOLD", 0.02),
