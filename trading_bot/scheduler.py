@@ -170,6 +170,19 @@ class SchedulerService:
                 await self._handle_kill_switch(result)
                 return
 
+        # Markov Chain regime cycle — runs before gated modules (predictions, polymarket)
+        # so that state.markov_regime_signal is fresh when those entry scans execute.
+        if self._should_run_markov(now):
+            result = await self._run_module("markov", now)
+            if result is not None:
+                module_results.append(result)
+            self._last_markov_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
+
         # Predictions cycle
         if self._should_run_predictions(now):
             result = await self._run_module("predictions", now)
@@ -200,18 +213,6 @@ class SchedulerService:
             if result is not None:
                 module_results.append(result)
             self._last_stock_run = now
-            if result is not None and result.get("risk", {}).get("kill_switch_active"):
-                await self._finalize_trade_notifications(module_results)
-                trade_notification_sent = bool(module_results)
-                await self._handle_kill_switch(result)
-                return
-
-        # Markov Chain regime cycle
-        if self._should_run_markov(now):
-            result = await self._run_module("markov", now)
-            if result is not None:
-                module_results.append(result)
-            self._last_markov_run = now
             if result is not None and result.get("risk", {}).get("kill_switch_active"):
                 await self._finalize_trade_notifications(module_results)
                 trade_notification_sent = bool(module_results)

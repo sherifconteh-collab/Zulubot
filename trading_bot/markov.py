@@ -64,7 +64,7 @@ def rolling_returns(prices: list[float], window: int) -> list[float]:
 
     Returns a list of length max(0, len(prices) - window).
     """
-    if len(prices) < window + 1:
+    if window < 1 or len(prices) < window + 1:
         return []
     result: list[float] = []
     for i in range(window, len(prices)):
@@ -167,6 +167,8 @@ def compute_markov_signal(
     current_state = state_seq[-1]
     trans_matrix = estimate_transition_matrix(state_seq, laplace_alpha=laplace_alpha)
 
+    if forecast_steps < 1:
+        forecast_steps = 1
     if forecast_steps > 1:
         stepped = np.linalg.matrix_power(trans_matrix, forecast_steps)
     else:
