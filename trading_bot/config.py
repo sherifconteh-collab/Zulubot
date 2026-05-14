@@ -672,7 +672,7 @@ class AppConfig:
                 max_per_message=_env_int("LEADS_MAX_PER_MESSAGE", 10),
             ),
             markov=MarkovStrategyConfig(
-                enabled=_env_bool("MARKOV_ENABLED", False),
+                enabled=_env_bool("MARKOV_ENABLED", True),
                 symbols=_env_list("MARKOV_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
                 regime_symbol=os.getenv("MARKOV_REGIME_SYMBOL", "BTCUSDT").strip(),
                 return_window=_env_int("MARKOV_RETURN_WINDOW", 20),
