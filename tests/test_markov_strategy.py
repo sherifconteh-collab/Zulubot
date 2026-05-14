@@ -460,6 +460,18 @@ class TestMarkovRegimeStrategy(unittest.TestCase):
         # BTCUSDT is already open — should not open again
         self.assertNotIn("BTCUSDT", result["opens"])
 
+    def test_disabled_strategy_returns_disabled_status(self) -> None:
+        strategy = self._make_strategy(MarkovStrategyConfig(enabled=False))
+        state = _default_state({"BTCUSDT": _bull_prices(60, daily_gain=0.005)})
+
+        result = strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now)
+
+        self.assertEqual(result["status"], "disabled")
+        self.assertEqual(result["opens"], [])
+        self.assertEqual(result["closes"], [])
+        # No positions should have been opened or closed
+        self.assertEqual(state.positions, {})
+
 
 if __name__ == "__main__":
     unittest.main()
