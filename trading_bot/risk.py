@@ -2,13 +2,43 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+from typing import Any
 
 from trading_bot.config import RiskConfig, VolatilityConfig
 from trading_bot.models import PortfolioState
 from trading_bot.volatility import VolatilityEngine
 
 logger = logging.getLogger(__name__)
+
+
+def markov_regime_blocks_entry(
+    state: PortfolioState,
+    gate_enabled: bool,
+    strategy_name: str,
+) -> dict[str, Any] | None:
+    """Return a skip_buy decision if the Markov bear gate should block new entries, else None.
+
+    Returns None when the gate is disabled, when no regime has been computed yet
+    (markov_regime_state == ""), or when the signal is non-negative (neutral/bull).
+    """
+    if not gate_enabled:
+        return None
+    if not state.markov_regime_state:
+        return None
+    if state.markov_regime_signal >= 0:
+        return None
+    return {
+        "strategy": strategy_name,
+        "symbol": "*",
+        "action": "skip_buy",
+        "reason": "markov_bear_regime",
+        "signals": {
+            "markov_state": state.markov_regime_state,
+            "markov_signal": state.markov_regime_signal,
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -20,6 +50,7 @@ class RiskSnapshot:
     kill_switch_active: bool
     kill_switch_triggered_now: bool
     cooldown_active: bool = False
+    post_kill_cooldown_active: bool = False
 
 
 class RiskManager:
@@ -57,6 +88,7 @@ class RiskManager:
             state.kill_switch_engaged = True
             kill_switch_triggered_now = True
 
+        post_kill_cooldown_active = self._post_kill_cooldown_active(state, now)
         return RiskSnapshot(
             equity=equity,
             daily_drawdown=daily_drawdown,
@@ -65,6 +97,7 @@ class RiskManager:
             kill_switch_active=state.kill_switch_engaged,
             kill_switch_triggered_now=kill_switch_triggered_now,
             cooldown_active=state.cooldown_remaining > 0,
+            post_kill_cooldown_active=post_kill_cooldown_active,
         )
 
     # ------------------------------------------------------------------ #
@@ -78,7 +111,23 @@ class RiskManager:
             return False
         if state.cooldown_remaining > 0:
             return False
+        if self._post_kill_cooldown_active(state, datetime.now(timezone.utc)):
+            return False
         return True
+
+    def _post_kill_cooldown_active(self, state: PortfolioState, now: datetime) -> bool:
+        """True when entries should be blocked following a recent kill switch clear."""
+        hours = self.config.post_kill_cooldown_hours
+        if hours <= 0 or not state.kill_switch_cleared_at:
+            return False
+        try:
+            cleared = datetime.fromisoformat(state.kill_switch_cleared_at)
+            if cleared.tzinfo is None:
+                cleared = cleared.replace(tzinfo=timezone.utc)
+            now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            return (now_utc - cleared) < timedelta(hours=hours)
+        except (ValueError, OSError):
+            return False
 
     # ------------------------------------------------------------------ #
     # Trailing stop-loss                                                   #

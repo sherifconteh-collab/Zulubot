@@ -30,6 +30,7 @@ from trading_bot.strategies.btc_5min import BTC5MinSpreadStrategy
 from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
 from trading_bot.strategies.latency_arb import LatencyArbStrategy
+from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.stocks import StockValueStrategy
 
@@ -226,6 +227,15 @@ class TradingBotService:
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
+        # Markov Chain regime-switching strategy
+        self.markov_strategy = MarkovRegimeStrategy(
+            config=config.markov,
+            coinbase_client=self.coinbase_client,
+            binance_client=self.binance_client,
+            coinbase_broker=self.coinbase_broker,
+            logger=logger,
+        )
+
         # BTC 5-min spread strategy (spot vs Kalshi vs Polymarket)
         self.btc5min_strategy = BTC5MinSpreadStrategy(
             config=config.btc5min,
@@ -267,6 +277,12 @@ class TradingBotService:
             self._sync_kalshi_positions(state)
 
         self.refresh_open_positions(state, now=now)
+
+        # If Markov is disabled, clear any stale regime state so downstream gates
+        # (Polymarket, Kalshi) aren't blocked by a bear signal from a prior run.
+        if not self.config.markov.enabled:
+            state.markov_regime_state = ""
+            state.markov_regime_signal = 0.0
 
         # Update trailing-stop high watermarks and close breached positions
         self.risk_manager.update_high_watermarks(state)
@@ -310,6 +326,17 @@ class TradingBotService:
             module_results["rotation"] = self._run_module(
                 "rotation",
                 lambda: self.rotation_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        # Markov runs before gated modules so state.markov_regime_signal is fresh.
+        if command == "markov" or (command == "all" and self.config.markov.enabled):
+            module_results["markov"] = self._run_module(
+                "markov",
+                lambda: self.markov_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
@@ -475,6 +502,7 @@ class TradingBotService:
 
         pre_risk = self._evaluate_risk(state, now)
         state.kill_switch_engaged = False
+        state.kill_switch_cleared_at = now.isoformat()
         post_risk = self._evaluate_risk(state, now)
         self._persist_ai_budget(state)
         self.state_store.save(state)
@@ -716,19 +744,30 @@ class TradingBotService:
         ], total_count
 
     def refresh_open_positions(self, state: PortfolioState, *, now: datetime | None = None) -> None:
+        # Collect all stock + crypto prices in one batch so a single mark_positions
+        # call fires the daily price-history gate. This ensures the Markov regime
+        # symbol (a crypto ticker) is recorded to price_history even on days when
+        # stock positions trigger the gate before the crypto refresh would run.
+        batch_prices: dict[str, float] = {}
+
         stock_symbols = sorted(
             symbol for symbol, position in state.positions.items() if position.asset_type == "stock"
         )
         if stock_symbols:
             try:
-                quotes = self.fmp_client.get_batch_quotes(stock_symbols)
-                self.broker.mark_positions(state, quotes, now=now)
+                batch_prices.update(self.fmp_client.get_batch_quotes(stock_symbols))
             except Exception as exc:
                 self.logger.warning("Unable to refresh stock prices: %s", exc)
 
-        crypto_symbols = sorted(
-            symbol for symbol, position in state.positions.items() if position.asset_type == "crypto"
-        )
+        crypto_symbols = sorted({
+            symbol
+            for symbol, position in state.positions.items()
+            if position.asset_type == "crypto"
+        })
+        # Always include the Markov regime symbol so its history accumulates
+        # even when there are no open crypto positions.
+        if self.config.markov.enabled:
+            crypto_symbols = sorted(set(crypto_symbols) | {self.config.markov.regime_symbol})
         if crypto_symbols:
             try:
                 # Prefer Coinbase spot prices, fall back to Binance mark prices
@@ -739,9 +778,12 @@ class TradingBotService:
                 for symbol in crypto_symbols:
                     if symbol not in prices:
                         prices[symbol] = self.binance_client.get_mark_price_and_funding(symbol).mark_price
-                self.broker.mark_positions(state, prices, now=now)
+                batch_prices.update(prices)
             except Exception as exc:
                 self.logger.warning("Unable to refresh crypto prices: %s", exc)
+
+        if batch_prices:
+            self.broker.mark_positions(state, batch_prices, now=now)
 
         kalshi_prediction_prices: dict[str, float] = {}
         kalshi_prediction_symbols = {
@@ -1094,6 +1136,8 @@ class TradingBotService:
                 "cooldown_active": post_risk.cooldown_active,
                 "consecutive_losses": state.consecutive_losses,
                 "cooldown_remaining": state.cooldown_remaining,
+                "post_kill_cooldown_active": post_risk.post_kill_cooldown_active,
+                "kill_switch_cleared_at": state.kill_switch_cleared_at or None,
             },
             "last_stock_screen_date": state.last_stock_screen_date,
             "last_polymarket_scan_date": state.last_polymarket_scan_date,

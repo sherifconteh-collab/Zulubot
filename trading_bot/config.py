@@ -67,6 +67,7 @@ class RiskConfig:
     max_open_positions: int = 0             # 0 = unlimited; portfolio-wide cap across all strategies
     cooldown_consecutive_losses: int = 0    # 0 = disabled; pause after N consecutive losing trades
     cooldown_periods: int = 3               # number of trade cycles to skip after cooldown triggers
+    post_kill_cooldown_hours: float = 1.0   # hours to block new entries after kill switch is cleared (0 = no cooldown)
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,41 @@ class LearningConfig:
 
 
 @dataclass(frozen=True)
+class MarkovStrategyConfig:
+    """Configuration for the Markov Chain regime-switching strategy."""
+
+    enabled: bool = False
+    # Symbols to trade when the regime signal is bullish
+    symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "XRPUSDT"])
+    # Symbol whose price history drives regime detection (BTC is the market barometer)
+    regime_symbol: str = "BTCUSDT"
+    # Rolling return window (days) for state classification
+    return_window: int = 20
+    # Rolling return threshold to classify as Bull
+    bull_threshold: float = 0.02
+    # Rolling return threshold to classify as Bear
+    bear_threshold: float = -0.02
+    # signal = bull_prob - bear_prob; open long when above this
+    entry_signal_threshold: float = 0.10
+    # Close positions when signal drops below this
+    exit_signal_threshold: float = 0.0
+    # Autonomous stop-loss: close when price drops this fraction from entry
+    stop_loss_pct: float = 0.10
+    # Autonomous take-profit: close when price rises this fraction from entry
+    take_profit_pct: float = 0.20
+    # Minimum price history days before the strategy is allowed to trade
+    min_history_days: int = 40
+    # Laplace smoothing for transition matrix (0.0 = pure MLE)
+    laplace_alpha: float = 0.1
+    # Chapman-Kolmogorov forecast horizon (steps ahead; 1 = next period)
+    forecast_steps: int = 1
+    # Scheduler interval
+    run_interval_minutes: int = 60
+    # Use Coinbase pricing (True) or Binance mark price (False)
+    use_coinbase_pricing: bool = True
+
+
+@dataclass(frozen=True)
 class SchedulerConfig:
     crypto_interval_minutes: int = 10
     btc5min_interval_minutes: int = 5
@@ -305,6 +341,7 @@ class PolymarketStrategyConfig:
     stop_loss_threshold: float = 0.15
     max_positions: int = 5
     use_trading_agents: bool = False
+    use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
 
 
 @dataclass(frozen=True)
@@ -348,6 +385,7 @@ class PredictionConfig:
     # predictions trade on price thresholds alone — previously this gate kept
     # the Kalshi strategy idle outside of extreme sentiment regimes.
     require_crypto_fear_greed: bool = False
+    use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
 
 
 @dataclass(frozen=True)
@@ -409,6 +447,7 @@ class AppConfig:
     btc5min: BTC5MinConfig
     learning: LearningConfig
     leads: LeadsConfig
+    markov: MarkovStrategyConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -457,6 +496,7 @@ class AppConfig:
                 max_open_positions=_env_int("MAX_OPEN_POSITIONS", 0),
                 cooldown_consecutive_losses=_env_int("COOLDOWN_CONSECUTIVE_LOSSES", 0),
                 cooldown_periods=_env_int("COOLDOWN_PERIODS", 3),
+                post_kill_cooldown_hours=_env_float("POST_KILL_COOLDOWN_HOURS", 1.0),
             ),
             stock=StockStrategyConfig(
                 max_pe_ratio=_env_float("STOCK_MAX_PE", 25.0),
@@ -471,7 +511,7 @@ class AppConfig:
                 min_hold_days=_env_int("STOCK_MIN_HOLD_DAYS", 14),
             ),
             crypto=CryptoStrategyConfig(
-                symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT"]),
+                symbols=_env_list("CRYPTO_SYMBOLS", ["BTCUSDT", "ETHUSDT", "XRPUSDT"]),
                 buy_fear_threshold=_env_int("CRYPTO_BUY_FEAR_THRESHOLD", 35),
                 sell_fear_threshold=_env_int("CRYPTO_SELL_FEAR_THRESHOLD", 75),
                 use_coinbase_pricing=_env_bool("CRYPTO_USE_COINBASE_PRICING", True),
@@ -513,6 +553,7 @@ class AppConfig:
                 stop_loss_threshold=_env_float("POLYMARKET_STOP_LOSS", 0.15),
                 max_positions=_env_int("POLYMARKET_MAX_POSITIONS", 5),
                 use_trading_agents=_env_bool("POLYMARKET_USE_TRADING_AGENTS", False),
+                use_markov_regime_gate=_env_bool("POLYMARKET_MARKOV_GATE", True),
             ),
             trading_agents=TradingAgentsConfig(
                 enabled=_env_bool("TRADING_AGENTS_ENABLED", False),
@@ -582,6 +623,7 @@ class AppConfig:
                 market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather"]),
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
                 require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
+                use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),
@@ -632,5 +674,22 @@ class AppConfig:
             leads=LeadsConfig(
                 enabled=_env_bool("LEADS_NOTIFICATION_ENABLED", True),
                 max_per_message=_env_int("LEADS_MAX_PER_MESSAGE", 10),
+            ),
+            markov=MarkovStrategyConfig(
+                enabled=_env_bool("MARKOV_ENABLED", True),
+                symbols=_env_list("MARKOV_SYMBOLS", ["BTCUSDT", "ETHUSDT", "XRPUSDT"]),
+                regime_symbol=os.getenv("MARKOV_REGIME_SYMBOL", "BTCUSDT").strip(),
+                return_window=_env_int("MARKOV_RETURN_WINDOW", 20),
+                bull_threshold=_env_float("MARKOV_BULL_THRESHOLD", 0.02),
+                bear_threshold=_env_float("MARKOV_BEAR_THRESHOLD", -0.02),
+                entry_signal_threshold=_env_float("MARKOV_ENTRY_SIGNAL_THRESHOLD", 0.10),
+                exit_signal_threshold=_env_float("MARKOV_EXIT_SIGNAL_THRESHOLD", 0.0),
+                stop_loss_pct=_env_float("MARKOV_STOP_LOSS_PCT", 0.10),
+                take_profit_pct=_env_float("MARKOV_TAKE_PROFIT_PCT", 0.20),
+                min_history_days=_env_int("MARKOV_MIN_HISTORY_DAYS", 40),
+                laplace_alpha=_env_float("MARKOV_LAPLACE_ALPHA", 0.1),
+                forecast_steps=_env_int("MARKOV_FORECAST_STEPS", 1),
+                run_interval_minutes=_env_int("MARKOV_RUN_INTERVAL_MINUTES", 60),
+                use_coinbase_pricing=_env_bool("MARKOV_USE_COINBASE_PRICING", True),
             ),
         )
