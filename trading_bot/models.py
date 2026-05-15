@@ -40,6 +40,9 @@ class PortfolioState:
     peak_equity: float = 0.0
     halt_new_trades_for_day: bool = False
     kill_switch_engaged: bool = False
+    kill_switch_cleared_at: str = ""  # ISO timestamp of last kill switch clear; used for post-kill cooldown
+    markov_regime_state: str = ""     # last computed Markov regime: "bull", "bear", "sideways", or "" = not yet run
+    markov_regime_signal: float = 0.0 # last computed bull_prob - bear_prob
     last_stock_screen_date: str | None = None
     last_polymarket_scan_date: str | None = None
     last_predictions_scan_date: str | None = None
@@ -87,6 +90,9 @@ class PortfolioState:
             "peak_equity": self.peak_equity,
             "halt_new_trades_for_day": self.halt_new_trades_for_day,
             "kill_switch_engaged": self.kill_switch_engaged,
+            "kill_switch_cleared_at": self.kill_switch_cleared_at,
+            "markov_regime_state": self.markov_regime_state,
+            "markov_regime_signal": self.markov_regime_signal,
             "last_stock_screen_date": self.last_stock_screen_date,
             "last_polymarket_scan_date": self.last_polymarket_scan_date,
             "last_predictions_scan_date": self.last_predictions_scan_date,

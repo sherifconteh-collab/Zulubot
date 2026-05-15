@@ -17,7 +17,7 @@ from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGamma
 from trading_bot.config import PolymarketStrategyConfig
 from trading_bot.models import PolymarketMarket, PortfolioState
 from trading_bot.polymarket_broker import PolymarketBroker
-from trading_bot.risk import RiskManager
+from trading_bot.risk import RiskManager, markov_regime_blocks_entry
 
 try:
     from trading_bot.integrations.trading_agents import TradingAgentsService
@@ -122,6 +122,10 @@ class PolymarketStrategy:
                         "daily_halt": state.halt_new_trades_for_day,
                     },
                 })
+            elif markov_block := markov_regime_blocks_entry(
+                state, self.config.use_markov_regime_gate, "polymarket_threshold"
+            ):
+                result["decisions"].append(markov_block)
             else:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
