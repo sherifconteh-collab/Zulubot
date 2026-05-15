@@ -472,6 +472,51 @@ class TestMarkovRegimeStrategy(unittest.TestCase):
         # No positions should have been opened or closed
         self.assertEqual(state.positions, {})
 
+    def test_insufficient_history_clears_stale_regime_state(self) -> None:
+        strategy = self._make_strategy()
+        state = _default_state({"BTCUSDT": [50_000.0] * 5})
+        # Pre-set a stale bear signal from a previous cycle
+        state.markov_regime_state = "bear"
+        state.markov_regime_signal = -0.4
+
+        result = strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now)
+
+        self.assertEqual(result["status"], "insufficient_data")
+        # Stale signal must be cleared so downstream gates aren't blocked
+        self.assertEqual(state.markov_regime_state, "")
+        self.assertEqual(state.markov_regime_signal, 0.0)
+
+    def test_computation_failed_clears_stale_regime_state(self) -> None:
+        from unittest.mock import patch
+        strategy = self._make_strategy()
+        bull_history = _bull_prices(60, daily_gain=0.005)
+        state = _default_state({"BTCUSDT": bull_history})
+        state.markov_regime_state = "bull"
+        state.markov_regime_signal = 0.5
+
+        with patch("trading_bot.strategies.markov_regime.compute_markov_signal", return_value=None):
+            result = strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now)
+
+        self.assertEqual(result["status"], "computation_failed")
+        self.assertEqual(state.markov_regime_state, "")
+        self.assertEqual(state.markov_regime_signal, 0.0)
+
+    def test_result_contains_buys_sells_aliases(self) -> None:
+        strategy = self._make_strategy(MarkovStrategyConfig(
+            enabled=True,
+            min_history_days=40,
+            entry_signal_threshold=0.05,
+            laplace_alpha=0.05,
+        ))
+        state = _default_state({"BTCUSDT": _bull_prices(60, daily_gain=0.005)})
+
+        result = strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now)
+
+        self.assertIn("buys", result)
+        self.assertIn("sells", result)
+        self.assertEqual(result["buys"], result["opens"])
+        self.assertEqual(result["sells"], result["closes"])
+
 
 if __name__ == "__main__":
     unittest.main()

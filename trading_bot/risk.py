@@ -4,11 +4,41 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from typing import Any
+
 from trading_bot.config import RiskConfig, VolatilityConfig
 from trading_bot.models import PortfolioState
 from trading_bot.volatility import VolatilityEngine
 
 logger = logging.getLogger(__name__)
+
+
+def markov_regime_blocks_entry(
+    state: PortfolioState,
+    gate_enabled: bool,
+    strategy_name: str,
+) -> dict[str, Any] | None:
+    """Return a skip_buy decision if the Markov bear gate should block new entries, else None.
+
+    Returns None when the gate is disabled, when no regime has been computed yet
+    (markov_regime_state == ""), or when the signal is non-negative (neutral/bull).
+    """
+    if not gate_enabled:
+        return None
+    if not state.markov_regime_state:
+        return None
+    if state.markov_regime_signal >= 0:
+        return None
+    return {
+        "strategy": strategy_name,
+        "symbol": "*",
+        "action": "skip_buy",
+        "reason": "markov_bear_regime",
+        "signals": {
+            "markov_state": state.markov_regime_state,
+            "markov_signal": state.markov_regime_signal,
+        },
+    }
 
 
 @dataclass(frozen=True)
