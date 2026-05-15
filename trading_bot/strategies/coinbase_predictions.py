@@ -28,7 +28,7 @@ from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.config import LearningConfig, PredictionConfig
 from trading_bot.models import PortfolioState
 from trading_bot import performance_memory
-from trading_bot.risk import RiskManager
+from trading_bot.risk import RiskManager, markov_regime_blocks_entry
 
 try:
     from trading_bot.integrations.trading_agents import TradingAgentsService, apply_ai_confirmation
@@ -137,21 +137,10 @@ class CoinbasePredictionStrategy:
                         "daily_halt": state.halt_new_trades_for_day,
                     },
                 })
-            elif (
-                self.config.use_markov_regime_gate
-                and state.markov_regime_state
-                and state.markov_regime_signal < 0
+            elif markov_block := markov_regime_blocks_entry(
+                state, self.config.use_markov_regime_gate, "coinbase_predictions"
             ):
-                result["decisions"].append({
-                    "strategy": "coinbase_predictions",
-                    "symbol": "*",
-                    "action": "skip_buy",
-                    "reason": "markov_bear_regime",
-                    "signals": {
-                        "markov_state": state.markov_regime_state,
-                        "markov_signal": state.markov_regime_signal,
-                    },
-                })
+                result["decisions"].append(markov_block)
             else:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
