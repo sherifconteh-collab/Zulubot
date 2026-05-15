@@ -87,6 +87,10 @@ class MarkovRegimeStrategy:
                 len(regime_prices),
                 self.config.min_history_days,
             )
+            # Clear stale regime state so downstream gates don't block on a
+            # previously-computed bear signal when history is unavailable.
+            state.markov_regime_state = ""
+            state.markov_regime_signal = 0.0
             return {
                 "status": "insufficient_data",
                 "regime_symbol": self.config.regime_symbol,
@@ -109,6 +113,8 @@ class MarkovRegimeStrategy:
 
         if markov is None:
             self.logger.warning("Markov: compute_markov_signal returned None despite history check.")
+            state.markov_regime_state = ""
+            state.markov_regime_signal = 0.0
             return {
                 "status": "computation_failed",
                 "opens": opens,
