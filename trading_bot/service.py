@@ -16,6 +16,7 @@ from trading_bot.clients import (
 )
 from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGammaClient
+from trading_bot.clients_robinhood import RobinhoodClient
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import AppConfig
 from trading_bot.models import PortfolioState, Position
@@ -31,6 +32,7 @@ from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrate
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
 from trading_bot.strategies.latency_arb import LatencyArbStrategy
 from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
+from trading_bot.strategies.options import OptionsStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.stocks import StockValueStrategy
 
@@ -236,6 +238,21 @@ class TradingBotService:
             logger=logger,
         )
 
+        # Robinhood client + options strategy
+        self.robinhood_client = RobinhoodClient(
+            username=config.robinhood.username,
+            password=config.robinhood.password,
+            mfa_secret=config.robinhood.mfa_secret,
+            logger=logger,
+        )
+        self.options_strategy = OptionsStrategy(
+            config=config.options,
+            robinhood_client=self.robinhood_client,
+            alternative_client=self.alternative_client,
+            logger=logger,
+            live_trading_enabled=not config.paper_mode and self.robinhood_client.can_trade,
+        )
+
         # BTC 5-min spread strategy (spot vs Kalshi vs Polymarket)
         self.btc5min_strategy = BTC5MinSpreadStrategy(
             config=config.btc5min,
@@ -391,6 +408,16 @@ class TradingBotService:
             module_results["btc5min"] = self._run_module(
                 "btc5min",
                 lambda: self.btc5min_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        if command in {"options", "all"}:
+            module_results["options"] = self._run_module(
+                "options",
+                lambda: self.options_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
@@ -807,6 +834,24 @@ class TradingBotService:
             except Exception as exc:
                 self.logger.warning("Unable to refresh Kalshi prediction prices: %s", exc)
 
+        # Refresh options positions via yfinance
+        options_positions = {
+            sym: pos
+            for sym, pos in state.positions.items()
+            if pos.asset_type == "option"
+        }
+        if options_positions:
+            try:
+                options_prices: dict[str, float] = {}
+                for sym, pos in options_positions.items():
+                    price = self.options_strategy.get_current_option_price(pos)
+                    if price is not None and price > 0:
+                        options_prices[sym] = price
+                if options_prices:
+                    self.broker.mark_positions(state, options_prices, now=now)
+            except Exception as exc:
+                self.logger.warning("Unable to refresh options prices: %s", exc)
+
         # Refresh prediction market prices from CLOB
         prediction_symbols = sorted(
             symbol
@@ -1041,6 +1086,20 @@ class TradingBotService:
                             self.logger.error("Kalshi kill-switch sell failed for %s: %s", symbol, exc)
                             live_close_ok = False
                     else:
+                        live_close_ok = False
+                elif position.asset_type == "option":
+                    if self.robinhood_client.can_trade:
+                        order = self.robinhood_client.place_option_sell_order(
+                            symbol=position.meta.get("underlying", ""),
+                            expiration_date=position.meta.get("expiration_date", ""),
+                            strike=position.meta.get("strike", ""),
+                            option_type=position.meta.get("option_type", "call"),
+                            quantity=int(position.meta.get("contracts", 1)),
+                            limit_price=max(0.01, round(position.current_price * 0.98, 2)),
+                        )
+                        live_close_ok = order is not None
+                    else:
+                        self.logger.warning("Skipping live option close for %s — Robinhood not configured.", symbol)
                         live_close_ok = False
                 elif position.asset_type == "prediction":
                     self.logger.warning("Skipping unsupported live prediction close for %s during %s", symbol, reason)
