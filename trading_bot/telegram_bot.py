@@ -217,6 +217,7 @@ class TradingTelegramBot:
             "predictions": "\U0001f3b2",
             "latency_arb": "\u26a1",
             "markov": "\U0001f9ed",
+            "options": "\U0001f4ca",
         }
         return icons.get(module_name, "\u2699\ufe0f")
 
@@ -619,6 +620,7 @@ class TradingTelegramBot:
             "history": self._cmd_history,
             "btc5min": self._cmd_btc5min,
             "markov": self._cmd_markov,
+            "options": self._cmd_options,
             "help": self._cmd_help,
             "start": self._cmd_help,
         }
@@ -647,7 +649,7 @@ class TradingTelegramBot:
             "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
-            "/crypto /stocks /rotation /predict /polymarket /btc5min /markov\n"
+            "/crypto /stocks /rotation /predict /polymarket /btc5min /markov /options\n"
             "/backtest [range]\n"
             "\n"
             "<b>Control</b>\n"
@@ -885,6 +887,19 @@ class TradingTelegramBot:
             return
         try:
             result = self._service.run("rotation")
+            result["force_send"] = True
+            await self.send_trade_alert(result)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_options(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            result = self._service.run("options")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:

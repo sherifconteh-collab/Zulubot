@@ -416,6 +416,35 @@ class LatencyArbConfig:
 
 
 @dataclass(frozen=True)
+class RobinhoodConfig:
+    username: str = ""
+    password: str = ""
+    mfa_secret: str = ""  # Base32 TOTP secret; requires pyotp installed
+
+
+@dataclass(frozen=True)
+class OptionsStrategyConfig:
+    enabled: bool = False
+    symbols: list[str] = field(default_factory=lambda: ["AAPL", "SPY", "QQQ", "TSLA", "NVDA"])
+    min_dte: int = 21                    # minimum days to expiration
+    max_dte: int = 60                    # maximum days to expiration
+    # Only buy contracts where |delta| >= min_delta (deep in-the-money).
+    # delta >= 0.70 → stock-like behavior, lower theta decay, high ITM probability.
+    min_delta: float = 0.70
+    max_positions: int = 5
+    take_profit_pct: float = 0.50        # close when premium gains +50%
+    stop_loss_pct: float = 0.50          # close when premium loses -50%
+    close_at_dte: int = 7                # close when DTE drops below this
+    buy_call_fear_threshold: int = 30    # buy calls when F&G < this
+    buy_put_fear_threshold: int = 70     # buy puts when F&G > this
+    capital_allocation_pct: float = 0.10 # fraction of total equity for options
+    check_interval_minutes: int = 60
+    min_volume: int = 100
+    min_open_interest: int = 500
+    max_iv: float = 1.50                 # skip contracts with IV > 150%
+
+
+@dataclass(frozen=True)
 class AppConfig:
     paper_mode: bool
     initial_cash: float
@@ -448,6 +477,8 @@ class AppConfig:
     learning: LearningConfig
     leads: LeadsConfig
     markov: MarkovStrategyConfig
+    robinhood: RobinhoodConfig
+    options: OptionsStrategyConfig
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -691,5 +722,28 @@ class AppConfig:
                 forecast_steps=_env_int("MARKOV_FORECAST_STEPS", 1),
                 run_interval_minutes=_env_int("MARKOV_RUN_INTERVAL_MINUTES", 60),
                 use_coinbase_pricing=_env_bool("MARKOV_USE_COINBASE_PRICING", True),
+            ),
+            robinhood=RobinhoodConfig(
+                username=os.getenv("ROBINHOOD_USERNAME", "").strip(),
+                password=os.getenv("ROBINHOOD_PASSWORD", "").strip(),
+                mfa_secret=os.getenv("ROBINHOOD_MFA_SECRET", "").strip(),
+            ),
+            options=OptionsStrategyConfig(
+                enabled=_env_bool("OPTIONS_ENABLED", False),
+                symbols=_env_list("OPTIONS_SYMBOLS", ["AAPL", "SPY", "QQQ", "TSLA", "NVDA"]),
+                min_dte=_env_int("OPTIONS_MIN_DTE", 21),
+                max_dte=_env_int("OPTIONS_MAX_DTE", 60),
+                min_delta=_env_float("OPTIONS_MIN_DELTA", 0.70),
+                max_positions=_env_int("OPTIONS_MAX_POSITIONS", 5),
+                take_profit_pct=_env_float("OPTIONS_TAKE_PROFIT_PCT", 0.50),
+                stop_loss_pct=_env_float("OPTIONS_STOP_LOSS_PCT", 0.50),
+                close_at_dte=_env_int("OPTIONS_CLOSE_AT_DTE", 7),
+                buy_call_fear_threshold=_env_int("OPTIONS_BUY_CALL_FEAR_THRESHOLD", 30),
+                buy_put_fear_threshold=_env_int("OPTIONS_BUY_PUT_FEAR_THRESHOLD", 70),
+                capital_allocation_pct=_env_float("OPTIONS_CAPITAL_ALLOCATION_PCT", 0.10),
+                check_interval_minutes=_env_int("OPTIONS_CHECK_INTERVAL_MINUTES", 60),
+                min_volume=_env_int("OPTIONS_MIN_VOLUME", 100),
+                min_open_interest=_env_int("OPTIONS_MIN_OPEN_INTEREST", 500),
+                max_iv=_env_float("OPTIONS_MAX_IV", 1.50),
             ),
         )
