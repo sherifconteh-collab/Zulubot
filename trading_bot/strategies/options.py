@@ -162,8 +162,20 @@ class OptionsStrategy:
                 continue
 
             # Each standard option contract controls 100 shares
-            contracts_count = max(1, int(per_position_capital / (mark * 100)))
+            contracts_count = int(per_position_capital / (mark * 100))
+            if contracts_count <= 0:
+                self.logger.info(
+                    "Options: skipping %s — contract cost ($%.2f) exceeds per-position capital ($%.2f)",
+                    symbol, mark * 100, per_position_capital,
+                )
+                continue
             notional = contracts_count * mark * 100
+            if notional > state.cash:
+                self.logger.info(
+                    "Options: insufficient cash for %s (need $%.2f, have $%.2f)",
+                    symbol, notional, state.cash,
+                )
+                continue
             limit_price = contract["ask"] if contract["ask"] > 0 else mark * 1.02
 
             order_placed = False
@@ -177,6 +189,10 @@ class OptionsStrategy:
                     limit_price=round(limit_price, 2),
                 )
                 order_placed = order is not None
+                if not order_placed:
+                    # Live order rejected — do not record a position we don't own
+                    self.logger.warning("Options: live BUY order failed for %s; skipping bookkeeping.", symbol)
+                    continue
 
             pos_symbol = self._pos_symbol(
                 symbol, contract["expiration_date"], contract["strike"], option_type
@@ -259,7 +275,7 @@ class OptionsStrategy:
 
             entry = pos.entry_price
             current = pos.current_price
-            if entry <= 0:
+            if entry <= 0 or current is None or current <= 0:
                 continue
 
             pnl_pct = (current - entry) / entry
@@ -278,14 +294,22 @@ class OptionsStrategy:
                 continue
 
             if self.live_trading_enabled:
-                self.robinhood.place_option_sell_order(
-                    symbol=pos.meta.get("underlying", ""),
-                    expiration_date=pos.meta.get("expiration_date", ""),
-                    strike=pos.meta.get("strike", ""),
-                    option_type=pos.meta.get("option_type", "call"),
-                    quantity=int(pos.meta.get("contracts", 1)),
+                meta = pos.meta or {}
+                sell_order = self.robinhood.place_option_sell_order(
+                    symbol=str(meta.get("underlying", "")),
+                    expiration_date=str(meta.get("expiration_date", "")),
+                    strike=str(meta.get("strike", "")),
+                    option_type=str(meta.get("option_type", "call")),
+                    quantity=max(1, int(meta.get("contracts", 1))),
                     limit_price=max(0.01, round(current * 0.98, 2)),
                 )
+                if sell_order is None:
+                    # Live sell failed — keep the paper position to retry next cycle
+                    self.logger.warning(
+                        "Options: live SELL order failed for %s (%s); retaining paper position.",
+                        sym, close_reason,
+                    )
+                    continue
 
             broker.close_position(state, symbol=sym, price=current, reason=close_reason)
             closes.append(sym)
@@ -427,13 +451,14 @@ class OptionsStrategy:
             if spot <= 0:
                 return None
 
-            # Deep-ITM moneyness threshold that approximates |delta| >= 0.70
+            # Approximate |delta| >= min_delta using moneyness.
+            # A call/put delta of X corresponds to ~(X-0.50)/2 fraction ITM.
+            # e.g. min_delta=0.70 → itm_pct=0.10 → calls ≤ 90% spot, puts ≥ 110% spot.
+            itm_pct = (self.config.min_delta - 0.50) / 2.0
             if option_type == "call":
-                # Buy calls at strikes <= 90% of spot (≈ delta >= 0.70)
-                itm_mask = df["strike"] <= spot * (1.0 - (self.config.min_delta - 0.30))
+                itm_mask = df["strike"] <= spot * (1.0 - itm_pct)
             else:
-                # Buy puts at strikes >= 110% of spot (≈ |delta| >= 0.70)
-                itm_mask = df["strike"] >= spot * (1.0 + (self.config.min_delta - 0.30))
+                itm_mask = df["strike"] >= spot * (1.0 + itm_pct)
 
             df_itm = df[itm_mask].copy()
 
@@ -483,18 +508,39 @@ class OptionsStrategy:
         return self._get_current_option_price(position)
 
     def _get_current_option_price(self, position: Any) -> float | None:
-        """Fetch current mark price for an open position via yfinance."""
+        """Fetch current mark price. Uses Robinhood (live, real-time) or yfinance (paper, delayed)."""
+        meta = position.meta or {}
+        underlying = meta.get("underlying", "")
+        expiration_date = meta.get("expiration_date", "")
+        strike_str = meta.get("strike", "")
+        option_type = meta.get("option_type", "call")
+        if not (underlying and expiration_date and strike_str):
+            return None
+
+        # Live mode: use Robinhood for real-time pricing (avoids 15-min yfinance delay)
+        if self.live_trading_enabled and self.robinhood.can_trade:
+            try:
+                data = self.robinhood.get_option_market_data(
+                    symbol=underlying,
+                    expiration_date=expiration_date,
+                    strike=strike_str,
+                    option_type=option_type,
+                )
+                if data:
+                    mark = _safe_float(data.get("adjusted_mark_price"))
+                    if mark > 0:
+                        return mark
+                    bid = _safe_float(data.get("bid_price"))
+                    ask = _safe_float(data.get("ask_price"))
+                    if bid > 0 and ask > 0:
+                        return (bid + ask) / 2.0
+            except Exception as exc:
+                self.logger.warning("Robinhood price fetch failed for %s; falling back to yfinance: %s", underlying, exc)
+
+        # Paper mode (or Robinhood fallback): use yfinance
         if not _YF_AVAILABLE:
             return None
         try:
-            meta = position.meta or {}
-            underlying = meta.get("underlying", "")
-            expiration_date = meta.get("expiration_date", "")
-            strike_str = meta.get("strike", "")
-            option_type = meta.get("option_type", "call")
-            if not (underlying and expiration_date and strike_str):
-                return None
-
             target_strike = float(strike_str)
             ticker = yf.Ticker(underlying)
             chain = ticker.option_chain(expiration_date)

@@ -899,7 +899,7 @@ class TradingTelegramBot:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
         try:
-            result = self._service.run("options")
+            result = await asyncio.to_thread(self._service.run, "options")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
