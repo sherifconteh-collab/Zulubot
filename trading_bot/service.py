@@ -1089,13 +1089,15 @@ class TradingBotService:
                         live_close_ok = False
                 elif position.asset_type == "option":
                     if self.robinhood_client.can_trade:
+                        meta = position.meta or {}
+                        close_px = position.current_price or position.entry_price
                         order = self.robinhood_client.place_option_sell_order(
-                            symbol=position.meta.get("underlying", ""),
-                            expiration_date=position.meta.get("expiration_date", ""),
-                            strike=position.meta.get("strike", ""),
-                            option_type=position.meta.get("option_type", "call"),
-                            quantity=int(position.meta.get("contracts", 1)),
-                            limit_price=max(0.01, round(position.current_price * 0.98, 2)),
+                            symbol=str(meta.get("underlying", "")),
+                            expiration_date=str(meta.get("expiration_date", "")),
+                            strike=str(meta.get("strike", "")),
+                            option_type=str(meta.get("option_type", "call")),
+                            quantity=max(1, int(meta.get("contracts", 1))),
+                            limit_price=max(0.01, round(close_px * 0.98, 2)),
                         )
                         live_close_ok = order is not None
                     else:

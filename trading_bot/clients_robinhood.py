@@ -59,10 +59,11 @@ class RobinhoodClient:
                 if _PYOTP_AVAILABLE:
                     mfa_code = pyotp.TOTP(self.mfa_secret).now()
                 else:
-                    self.logger.warning(
-                        "ROBINHOOD_MFA_SECRET set but pyotp is not installed. "
-                        "Install pyotp to enable TOTP-based 2FA."
+                    self.logger.error(
+                        "ROBINHOOD_MFA_SECRET is set but pyotp is not installed. "
+                        "2FA is required — install pyotp or remove ROBINHOOD_MFA_SECRET."
                     )
+                    return False
             kwargs: dict[str, Any] = {"store_session": True, "pickle_name": "zulubot"}
             if mfa_code:
                 kwargs["mfa_code"] = mfa_code
@@ -179,12 +180,15 @@ class RobinhoodClient:
                 optionType=option_type,
                 timeInForce="gtc",
             )
-            self.logger.info(
-                "Placed BUY option order: %s %s %s %s qty=%d @ $%.2f id=%s",
-                symbol, expiration_date, strike, option_type, quantity, limit_price,
-                (order or {}).get("id", "?") if isinstance(order, dict) else "?",
-            )
-            return order if isinstance(order, dict) else {}
+            if isinstance(order, dict) and "id" in order:
+                self.logger.info(
+                    "Placed BUY option order: %s %s %s %s qty=%d @ $%.2f id=%s",
+                    symbol, expiration_date, strike, option_type, quantity, limit_price,
+                    order["id"],
+                )
+                return order
+            self.logger.error("BUY option order rejected or missing id: %s", order)
+            return None
         except Exception as exc:
             self.logger.error("Failed to place option buy order for %s: %s", symbol, exc)
             return None
@@ -214,12 +218,15 @@ class RobinhoodClient:
                 optionType=option_type,
                 timeInForce="gtc",
             )
-            self.logger.info(
-                "Placed SELL option order: %s %s %s %s qty=%d @ $%.2f id=%s",
-                symbol, expiration_date, strike, option_type, quantity, limit_price,
-                (order or {}).get("id", "?") if isinstance(order, dict) else "?",
-            )
-            return order if isinstance(order, dict) else {}
+            if isinstance(order, dict) and "id" in order:
+                self.logger.info(
+                    "Placed SELL option order: %s %s %s %s qty=%d @ $%.2f id=%s",
+                    symbol, expiration_date, strike, option_type, quantity, limit_price,
+                    order["id"],
+                )
+                return order
+            self.logger.error("SELL option order rejected or missing id: %s", order)
+            return None
         except Exception as exc:
             self.logger.error("Failed to place option sell order for %s: %s", symbol, exc)
             return None
