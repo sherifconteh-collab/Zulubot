@@ -170,10 +170,15 @@ class OptionsStrategy:
                 )
                 continue
             notional = contracts_count * mark * 100
-            if notional > state.cash:
+            available_cash = (
+                self.robinhood.get_account_buying_power()
+                if self.live_trading_enabled and self.robinhood.can_trade
+                else state.cash
+            )
+            if notional > available_cash:
                 self.logger.info(
                     "Options: insufficient cash for %s (need $%.2f, have $%.2f)",
-                    symbol, notional, state.cash,
+                    symbol, notional, available_cash,
                 )
                 continue
             limit_price = contract["ask"] if contract["ask"] > 0 else mark * 1.02
