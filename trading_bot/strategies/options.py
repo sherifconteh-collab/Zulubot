@@ -287,7 +287,7 @@ class OptionsStrategy:
                 close_reason = "take_profit"
             elif pnl_pct <= -self.config.stop_loss_pct:
                 close_reason = "stop_loss"
-            elif 0 < dte < self.config.close_at_dte:
+            elif dte < self.config.close_at_dte:
                 close_reason = "dte_expiry"
 
             if close_reason is None:
