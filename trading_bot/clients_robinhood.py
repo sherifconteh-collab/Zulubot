@@ -129,7 +129,7 @@ class RobinhoodClient:
             data = rh.options.get_option_market_data(
                 symbol,
                 expirationDate=expiration_date,
-                strike=strike,
+                strikePrice=strike,
                 optionType=option_type,
                 info=None,
             )
