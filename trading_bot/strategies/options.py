@@ -208,7 +208,10 @@ class OptionsStrategy:
                 asset_type=self._ASSET_TYPE,
                 strategy=self._STRATEGY_NAME,
                 price=limit_price,
-                notional=notional,
+                # In live mode the cash left Robinhood, not the Coinbase cash bucket
+                # tracked by state.cash. Pass notional=0 so the paper broker records
+                # the position without debiting the wrong account's balance.
+                notional=0 if self.live_trading_enabled else notional,
                 opened_at=now,
                 meta={
                     "underlying": symbol,
