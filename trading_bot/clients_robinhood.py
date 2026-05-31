@@ -135,6 +135,8 @@ class RobinhoodClient:
             )
             if isinstance(data, list) and data:
                 item = data[0]
+                if isinstance(item, list) and item:
+                    item = item[0]
                 return item if isinstance(item, dict) else {}
             return data if isinstance(data, dict) else {}
         except Exception as exc:
