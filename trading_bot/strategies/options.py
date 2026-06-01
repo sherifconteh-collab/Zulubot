@@ -72,11 +72,13 @@ class OptionsStrategy:
 
         if state.kill_switch_engaged:
             return {"status": "halted", "reason": "kill_switch", "opens": [], "closes": []}
-        if state.halt_new_trades_for_day:
-            return {"status": "halted", "reason": "daily_halt", "opens": [], "closes": []}
 
-        # Manage existing positions before entering new ones
+        # Exits must run even during a daily drawdown halt so stop-losses and
+        # take-profits still fire. Only new entries are gated by halt_new_trades_for_day.
         closes = self._manage_positions(state, broker, now)
+
+        if state.halt_new_trades_for_day:
+            return {"status": "halted", "reason": "daily_halt", "opens": [], "closes": closes}
 
         # Fear & Greed drives directional bias
         try:
@@ -208,10 +210,7 @@ class OptionsStrategy:
                 asset_type=self._ASSET_TYPE,
                 strategy=self._STRATEGY_NAME,
                 price=limit_price,
-                # In live mode the cash left Robinhood, not the Coinbase cash bucket
-                # tracked by state.cash. Pass notional=0 so the paper broker records
-                # the position without debiting the wrong account's balance.
-                notional=0 if self.live_trading_enabled else notional,
+                notional=notional,
                 opened_at=now,
                 meta={
                     "underlying": symbol,
