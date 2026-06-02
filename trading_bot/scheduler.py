@@ -45,6 +45,7 @@ class SchedulerService:
         self._last_heartbeat: datetime | None = None
         self._last_latency_arb_run: datetime | None = None
         self._last_markov_run: datetime | None = None
+        self._last_options_run: datetime | None = None
 
         # When latency arb is active, tighten the poll loop to its scan interval
         if config.latency_arb.enabled:
@@ -219,6 +220,18 @@ class SchedulerService:
                 await self._handle_kill_switch(result)
                 return
 
+        # Options cycle
+        if self._should_run_options(now):
+            result = await self._run_module("options", now)
+            if result is not None:
+                module_results.append(result)
+            self._last_options_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
+
         if module_results:
             await self._finalize_trade_notifications(module_results)
             trade_notification_sent = True
@@ -371,6 +384,14 @@ class SchedulerService:
             return True
         elapsed = (now - self._last_markov_run).total_seconds()
         return elapsed >= self.config.markov.run_interval_minutes * 60
+
+    def _should_run_options(self, now: datetime) -> bool:
+        if not self.config.options.enabled:
+            return False
+        if self._last_options_run is None:
+            return True
+        elapsed = (now - self._last_options_run).total_seconds()
+        return elapsed >= self.config.options.check_interval_minutes * 60
 
     def _should_heartbeat(self, now: datetime) -> bool:
         if not self.scheduler_config.heartbeat_enabled:
