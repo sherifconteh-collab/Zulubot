@@ -172,9 +172,10 @@ class OptionsStrategy:
                 )
                 continue
             notional = contracts_count * mark * 100
+            live_rh = self.live_trading_enabled and self.robinhood.can_trade
             available_cash = (
                 self.robinhood.get_account_buying_power()
-                if self.live_trading_enabled and self.robinhood.can_trade
+                if live_rh
                 else state.cash
             )
             if notional > available_cash:
@@ -201,6 +202,13 @@ class OptionsStrategy:
                     self.logger.warning("Options: live BUY order failed for %s; skipping bookkeeping.", symbol)
                     continue
 
+            # Route bookkeeping through the "robinhood" cash bucket in live mode so
+            # PaperBroker debits state.cash_reserves["robinhood"] (synced from real
+            # buying power above) instead of state.cash (which tracks Coinbase USD).
+            if live_rh:
+                state.cash_reserves["robinhood"] = available_cash
+            rh_bucket: str | None = "robinhood" if live_rh else None
+
             pos_symbol = self._pos_symbol(
                 symbol, contract["expiration_date"], contract["strike"], option_type
             )
@@ -212,6 +220,7 @@ class OptionsStrategy:
                 price=limit_price,
                 notional=notional,
                 opened_at=now,
+                cash_bucket=rh_bucket,
                 meta={
                     "underlying": symbol,
                     "expiration_date": contract["expiration_date"],
