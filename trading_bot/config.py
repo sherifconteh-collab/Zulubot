@@ -48,6 +48,27 @@ def _env_list_lower(name: str, default: list[str]) -> list[str]:
     return [part.strip().lower() for part in raw_value.split(",") if part.strip()]
 
 
+def _env_float_map(name: str, default: dict[str, float]) -> dict[str, float]:
+    """Parse "XRPUSDT:2.0,BTCUSDT:1.0" into {"XRPUSDT": 2.0, "BTCUSDT": 1.0}.
+
+    Malformed entries are skipped; an empty/unset variable returns the default.
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    parsed: dict[str, float] = {}
+    for part in raw_value.split(","):
+        if ":" not in part:
+            continue
+        key, _, value = part.partition(":")
+        key = key.strip().upper()
+        try:
+            parsed[key] = float(value.strip())
+        except ValueError:
+            continue
+    return parsed if parsed else default
+
+
 def _default_storage_root() -> Path:
     explicit_root = os.getenv("BOT_STORAGE_DIR")
     if explicit_root:
@@ -122,6 +143,20 @@ class CryptoStrategyConfig:
     # 0.0 disables the respective rule.
     take_profit_pct: float = 0.15   # +15% from entry → take profits
     stop_loss_pct: float = 0.10     # −10% from entry → cut loss
+    # Per-symbol capital weights (e.g. {"XRPUSDT": 2.0}) scale the sized
+    # notional for that symbol. Missing symbols default to 1.0.
+    symbol_weights: dict[str, float] = field(default_factory=dict)
+    # Per-symbol exit overrides; missing symbols fall back to the globals
+    # above. A 0.0 override disables that rule for the symbol.
+    take_profit_overrides: dict[str, float] = field(default_factory=dict)
+    stop_loss_overrides: dict[str, float] = field(default_factory=dict)
+    # Skip buys when the symbol's own price is more than ``trend_tolerance_pct``
+    # below its ``trend_sma_days``-day SMA — avoids buying a coin in a steep
+    # downtrend just because market-wide fear is high. Fails open when there is
+    # insufficient price history.
+    trend_filter_enabled: bool = True
+    trend_sma_days: int = 20
+    trend_tolerance_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -549,6 +584,12 @@ class AppConfig:
                 require_negative_funding=_env_bool("CRYPTO_REQUIRE_NEGATIVE_FUNDING", False),
                 take_profit_pct=_env_float("CRYPTO_TAKE_PROFIT_PCT", 0.15),
                 stop_loss_pct=_env_float("CRYPTO_STOP_LOSS_PCT", 0.10),
+                symbol_weights=_env_float_map("CRYPTO_SYMBOL_WEIGHTS", {}),
+                take_profit_overrides=_env_float_map("CRYPTO_TAKE_PROFIT_OVERRIDES", {}),
+                stop_loss_overrides=_env_float_map("CRYPTO_STOP_LOSS_OVERRIDES", {}),
+                trend_filter_enabled=_env_bool("CRYPTO_TREND_FILTER_ENABLED", True),
+                trend_sma_days=_env_int("CRYPTO_TREND_SMA_DAYS", 20),
+                trend_tolerance_pct=_env_float("CRYPTO_TREND_TOLERANCE_PCT", 0.05),
             ),
             coinbase=CoinbaseConfig(
                 api_key=os.getenv("COINBASE_API_KEY", "").strip(),

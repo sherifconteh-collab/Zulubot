@@ -55,6 +55,55 @@ class CryptoSentimentFundingStrategy:
         # instantiation in tests doesn't require the full AppConfig.
         self.learning_config = learning_config or LearningConfig(enabled=False)
 
+    def _passes_trend_filter(
+        self, symbol: str, price: float, state: PortfolioState
+    ) -> tuple[bool, dict[str, Any]]:
+        """Check the symbol's own price trend before buying on market-wide fear.
+
+        Blocks the buy when price is more than ``trend_tolerance_pct`` below its
+        ``trend_sma_days``-day SMA (steep downtrend / falling knife). Uses the
+        daily closes in ``state.price_history``; falls back to Coinbase daily
+        candles on cold start. Fails open when history is still insufficient.
+        """
+        if not self.config.trend_filter_enabled or price <= 0:
+            return True, {}
+        window = max(2, self.config.trend_sma_days)
+        closes = list(state.price_history.get(symbol, []))
+        if len(closes) < window and self.coinbase_client is not None:
+            try:
+                candles = self.coinbase_client.get_candles(
+                    symbol, granularity="ONE_DAY", limit=window
+                )
+                fetched = [
+                    float(candle["close"])
+                    for candle in candles
+                    if isinstance(candle, dict) and candle.get("close") is not None
+                ]
+                if len(fetched) > len(closes):
+                    closes = fetched
+            except Exception:
+                self.logger.warning(
+                    "Trend filter: candle fetch failed for %s", symbol, exc_info=True
+                )
+        if len(closes) < window:
+            self.logger.info(
+                "Trend filter: insufficient history for %s (%d/%d days) — allowing buy.",
+                symbol,
+                len(closes),
+                window,
+            )
+            return True, {}
+        sma = sum(closes[-window:]) / window
+        signals = {
+            "price": round(price, 4),
+            "sma": round(sma, 4),
+            "sma_days": window,
+            "tolerance": self.config.trend_tolerance_pct,
+        }
+        if price < sma * (1 - self.config.trend_tolerance_pct):
+            return False, signals
+        return True, signals
+
     def _get_execution_prices(self, symbols: list[str]) -> dict[str, float]:
         """Get prices from Coinbase when available, fall back to Binance mark price."""
         if self.config.use_coinbase_pricing and self.coinbase_client is not None:
@@ -192,6 +241,27 @@ class CryptoSentimentFundingStrategy:
                             },
                         })
                         continue
+                    trend_ok, trend_signals = self._passes_trend_filter(
+                        symbol, execution_prices[symbol], state
+                    )
+                    if not trend_ok:
+                        self.logger.info(
+                            "Skipping %s: price %.4f is below trend filter SMA %.4f",
+                            symbol,
+                            trend_signals.get("price", 0.0),
+                            trend_signals.get("sma", 0.0),
+                        )
+                        decisions.append({
+                            "strategy": "crypto_sentiment_funding",
+                            "symbol": symbol,
+                            "action": "skip_buy",
+                            "reason": "trend_filter_downtrend",
+                            "signals": {
+                                "fear_greed": fear_greed.value,
+                                **trend_signals,
+                            },
+                        })
+                        continue
                     snapshot = snapshots[symbol]
                     # Funding-rate filter is opt-in (default OFF = more aggressive).
                     # Previously this was a hard gate, which in combination with the
@@ -214,6 +284,9 @@ class CryptoSentimentFundingStrategy:
                         continue
                     equity = broker.portfolio_equity(state)
                     notional = risk_manager.position_notional(state, equity, symbol=symbol)
+                    weight = self.config.symbol_weights.get(symbol, 1.0)
+                    if weight != 1.0:
+                        notional = min(notional * weight, state.cash)
                     if notional <= 0:
                         self.logger.warning("Skipping crypto buy for %s because position size is zero.", symbol)
                         decisions.append({
@@ -306,6 +379,7 @@ class CryptoSentimentFundingStrategy:
                                 "funding_rate": round(snapshot.funding_rate, 6),
                                 "price": round(price, 4),
                                 "notional": round(notional, 2),
+                                "weight": weight,
                             },
                         })
 
@@ -358,14 +432,14 @@ class CryptoSentimentFundingStrategy:
 
         Runs every cycle regardless of Fear & Greed — the point is to let the
         bot exit on its own terms. Both thresholds are optional; 0.0 disables
-        the respective rule. Only inspects positions opened by this strategy.
+        the respective rule. Per-symbol overrides take precedence over the
+        global defaults. Only inspects positions opened by this strategy.
         """
-        tp = self.config.take_profit_pct
-        sl = self.config.stop_loss_pct
-        if tp <= 0 and sl <= 0:
-            return
-
         for symbol in list(self.config.symbols):
+            tp = self.config.take_profit_overrides.get(symbol, self.config.take_profit_pct)
+            sl = self.config.stop_loss_overrides.get(symbol, self.config.stop_loss_pct)
+            if tp <= 0 and sl <= 0:
+                continue
             position = state.positions.get(symbol)
             if position is None or position.strategy != "crypto_sentiment_funding":
                 continue
