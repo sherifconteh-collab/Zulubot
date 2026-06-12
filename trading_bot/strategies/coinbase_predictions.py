@@ -169,8 +169,16 @@ class CoinbasePredictionStrategy:
     # Market discovery (public Kalshi API, no auth needed)
     # ------------------------------------------------------------------
 
+    _MAX_DISCOVERED_MARKETS = 500  # global cap to stay rate-limit friendly
+
     def _discover_markets(self) -> list[dict[str, Any]]:
-        """Fetch open markets from Kalshi for our configured categories."""
+        """Fetch open markets from Kalshi for our configured categories.
+
+        Follows the pagination cursor (the API returns at most ``limit``
+        markets per page) and orders results round-robin across categories
+        so a single busy category (e.g. economics/CPI) can't crowd out the
+        rest of the candidate list.
+        """
         import time
 
         series_to_scan: list[str] = []
@@ -181,46 +189,102 @@ class CoinbasePredictionStrategy:
             for s_list in SERIES_BY_CATEGORY.values():
                 series_to_scan.extend(s_list)
 
+        if self.config.discover_series:
+            series_to_scan.extend(self._discover_extra_series(set(series_to_scan)))
+
+        max_pages = max(1, self.config.max_pages_per_series)
         all_markets: list[dict[str, Any]] = []
         for series in series_to_scan:
-            try:
-                markets, _ = self.kalshi.get_markets(
-                    series_ticker=series, status="open", limit=20,
+            if len(all_markets) >= self._MAX_DISCOVERED_MARKETS:
+                self.logger.info(
+                    "Market discovery cap reached (%d); skipping remaining series.",
+                    self._MAX_DISCOVERED_MARKETS,
                 )
-                for m in markets:
-                    m["_series"] = series
-                    m["_category"] = self._series_to_category(series)
-                    # Parse dollar prices
-                    m["_yes_bid"] = _parse_dollars(m.get("yes_bid_dollars"))
-                    m["_yes_ask"] = _parse_dollars(m.get("yes_ask_dollars"))
-                    m["_no_bid"] = _parse_dollars(m.get("no_bid_dollars"))
-                    m["_no_ask"] = _parse_dollars(m.get("no_ask_dollars"))
-                    m["_last"] = _parse_dollars(m.get("last_price_dollars"))
-                    m["_volume"] = _parse_dollars(m.get("volume_fp"))
-                    m["_mid"] = self._mid_price(m)
-                    # Only include markets with price data and sufficient volume
-                    has_price = (
-                        m["_yes_ask"] > 0.01
-                        or m["_yes_bid"] > 0
-                        or m["_no_ask"] > 0.01
-                        or m["_no_bid"] > 0
-                        or m["_last"] > 0
+                break
+            try:
+                cursor: str | None = None
+                for _page in range(max_pages):
+                    markets, cursor = self.kalshi.get_markets(
+                        series_ticker=series, status="open", limit=50, cursor=cursor,
                     )
-                    has_volume = m["_volume"] >= self.config.min_volume_usd
-                    if has_price and has_volume:
-                        all_markets.append(m)
-                time.sleep(0.3)  # Rate limit
+                    for m in markets:
+                        m["_series"] = series
+                        m["_category"] = self._series_to_category(series)
+                        # Parse dollar prices
+                        m["_yes_bid"] = _parse_dollars(m.get("yes_bid_dollars"))
+                        m["_yes_ask"] = _parse_dollars(m.get("yes_ask_dollars"))
+                        m["_no_bid"] = _parse_dollars(m.get("no_bid_dollars"))
+                        m["_no_ask"] = _parse_dollars(m.get("no_ask_dollars"))
+                        m["_last"] = _parse_dollars(m.get("last_price_dollars"))
+                        m["_volume"] = _parse_dollars(m.get("volume_fp"))
+                        m["_mid"] = self._mid_price(m)
+                        # Only include markets with price data and sufficient volume
+                        has_price = (
+                            m["_yes_ask"] > 0.01
+                            or m["_yes_bid"] > 0
+                            or m["_no_ask"] > 0.01
+                            or m["_no_bid"] > 0
+                            or m["_last"] > 0
+                        )
+                        has_volume = m["_volume"] >= self.config.min_volume_usd
+                        if has_price and has_volume:
+                            all_markets.append(m)
+                    time.sleep(0.3)  # Rate limit
+                    if not cursor or len(all_markets) >= self._MAX_DISCOVERED_MARKETS:
+                        break
             except Exception as exc:
                 self.logger.debug("Failed to fetch series %s: %s", series, exc)
 
-        # Sort by volume (most active first)
-        all_markets.sort(key=lambda m: m["_volume"], reverse=True)
+        ordered = self._round_robin_by_category(all_markets)
 
         self.logger.info(
-            "Discovered %d active prediction markets from %d series.",
-            len(all_markets), len(series_to_scan),
+            "Discovered %d active prediction markets from %d series (categories: %s).",
+            len(ordered),
+            len(series_to_scan),
+            sorted({m["_category"] for m in ordered}),
         )
-        return all_markets
+        return ordered
+
+    def _discover_extra_series(self, known: set[str]) -> list[str]:
+        """Opt-in: pull series tickers from the Kalshi events API so new
+        market series are picked up without code changes."""
+        try:
+            events = self.kalshi.get_events(status="open", limit=200)
+        except Exception as exc:
+            self.logger.debug("Series discovery via events failed: %s", exc)
+            return []
+        extra = sorted({
+            e.get("series_ticker", "")
+            for e in events
+            if e.get("series_ticker") and e.get("series_ticker") not in known
+        })
+        if extra:
+            self.logger.info("Discovered %d extra Kalshi series: %s", len(extra), extra[:20])
+        return extra
+
+    @staticmethod
+    def _round_robin_by_category(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Order markets round-robin across categories, by volume within each.
+
+        A plain global volume sort lets the busiest category fill every
+        position slot; interleaving gives each category a fair look while
+        still preferring liquid markets first within a category.
+        """
+        by_category: dict[str, list[dict[str, Any]]] = {}
+        for m in markets:
+            by_category.setdefault(m.get("_category", "other"), []).append(m)
+        for bucket in by_category.values():
+            bucket.sort(key=lambda m: m["_volume"], reverse=True)
+
+        ordered: list[dict[str, Any]] = []
+        buckets = [by_category[cat] for cat in sorted(by_category)]
+        index = 0
+        while any(index < len(bucket) for bucket in buckets):
+            for bucket in buckets:
+                if index < len(bucket):
+                    ordered.append(bucket[index])
+            index += 1
+        return ordered
 
     @staticmethod
     def _series_to_category(series: str) -> str:
@@ -435,6 +499,17 @@ class CoinbasePredictionStrategy:
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=cash_bucket)
         available_cash = broker.get_cash_balance(state, cash_bucket=cash_bucket)
 
+        # Multi-outcome events (e.g. "What will CPI be: A/B/C/D") are several
+        # mutually exclusive contracts. Compare every outcome in an event and
+        # only trade the best-edge one, holding at most 1 position per event.
+        best_by_event = self._best_outcomes_by_event(markets, fear_greed_value)
+        held_events = {
+            pos.meta.get("event_ticker")
+            for pos in self._get_prediction_positions(state).values()
+            if pos.meta.get("event_ticker")
+        }
+        events_entered: set[str] = set()
+
         for market in markets:
             if slots_available <= 0:
                 break
@@ -447,6 +522,13 @@ class CoinbasePredictionStrategy:
             yes_symbol = f"KX:{ticker}:yes"
             no_symbol = f"KX:{ticker}:no"
             if yes_symbol in state.positions or no_symbol in state.positions:
+                continue
+
+            event = market.get("event_ticker") or ticker
+            if event in held_events or event in events_entered:
+                continue
+            if best_by_event.get(event) not in (None, ticker):
+                # A sibling outcome in the same event has a better edge.
                 continue
 
             # "Learn as it goes": bench this ticker if either the YES or NO
@@ -588,6 +670,7 @@ class CoinbasePredictionStrategy:
                     "side": side,
                     "entry_price": price,
                     "category": market.get("_category", "other"),
+                    "event_ticker": market.get("event_ticker", ""),
                     "fear_greed": fear_greed_value,
                     "title": market.get("title", ""),
                     "subtitle": market.get("subtitle", ""),
@@ -614,11 +697,46 @@ class CoinbasePredictionStrategy:
                     },
                 })
                 slots_available -= 1
+                events_entered.add(event)
                 self.logger.info(
                     "Prediction entry: %s side=%s price=$%.2f qty=%d notional=$%.2f | %s",
                     symbol, side, price, quantity, actual_notional,
                     market.get("subtitle", market.get("title", "")),
                 )
+
+    def _best_outcomes_by_event(
+        self,
+        markets: list[dict[str, Any]],
+        fear_greed_value: int | None,
+    ) -> dict[str, str]:
+        """Map event_ticker → ticker of the best-edge outcome in that event.
+
+        Edge is how far the mid sits beyond the buy threshold for the
+        signalled side. Markets without an event_ticker count as their own
+        single-outcome event.
+        """
+        best: dict[str, tuple[str, float]] = {}
+        for market in markets:
+            ticker = market.get("ticker", "")
+            if not ticker:
+                continue
+            mid = market["_mid"]
+            if mid <= 0 or mid >= 1.0:
+                continue
+            signal = self._evaluate_signal(market, mid, fear_greed_value)
+            if signal is None:
+                continue
+            side, _price = signal
+            edge = (
+                self.config.buy_yes_threshold - mid
+                if side == "yes"
+                else mid - self.config.buy_no_threshold
+            )
+            event = market.get("event_ticker") or ticker
+            current = best.get(event)
+            if current is None or edge > current[1]:
+                best[event] = (ticker, edge)
+        return {event: ticker for event, (ticker, _edge) in best.items()}
 
     def _evaluate_signal(
         self,

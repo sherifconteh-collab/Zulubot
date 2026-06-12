@@ -279,9 +279,92 @@ class TradingAgentsServiceTests(unittest.TestCase):
 
         self.assertIsNone(verdict_1)
         self.assertIsNone(verdict_2)
-        self.assertGreaterEqual(calls_after_first, 2)
-        self.assertEqual(failing_client.create.call_count, calls_after_first)
+        # Fail-closed pre-screen: each evaluation makes exactly one (Haiku)
+        # call and never falls through to the deep model on error.
+        self.assertEqual(calls_after_first, 1)
+        self.assertEqual(failing_client.create.call_count, 2)
         self.assertEqual(service.get_circuit_breaker_status()["state"], "open")
+
+    def _make_prompt_capturing_service(self, captured: list[str]) -> TradingAgentsService:
+        class CapturingClient:
+            def __init__(self) -> None:
+                self.messages = self
+
+            def _respond(self, kwargs) -> str:
+                prompt = kwargs["messages"][0]["content"]
+                captured.append(prompt)
+                if "Quick assessment" in prompt:
+                    return "yes"
+                return '{"action": "buy", "confidence": 0.7, "reasoning": "ok"}'
+
+            def create(self, **kwargs) -> FakeAnthropicMessage:
+                return FakeAnthropicMessage(self._respond(kwargs))
+
+            def parse(self, **kwargs):  # noqa: ANN201
+                text = self._respond(kwargs)
+                output_format = kwargs.get("output_format")
+                if output_format is None:
+                    return FakeAnthropicMessage(text)
+                return FakeAnthropicParsedMessage(text, output_format)
+
+        service = TradingAgentsService(TradingAgentsConfig(enabled=False), self.logger)
+        service.config = self.config
+        service._anthropic_client = CapturingClient()
+        return service
+
+    def test_evaluate_crypto_includes_trend_and_vol_in_prompt(self) -> None:
+        captured: list[str] = []
+        service = self._make_prompt_capturing_service(captured)
+
+        verdict = service.evaluate_crypto(
+            symbol="XRPUSDT",
+            fear_greed_value=20,
+            funding_rate=-0.0005,
+            price=2.15,
+            trend_pct=-0.08,
+            realized_vol=0.85,
+        )
+
+        self.assertIsNotNone(verdict)
+        deep_prompts = [p for p in captured if "Quick assessment" not in p]
+        self.assertTrue(deep_prompts)
+        self.assertIn("8.0% below", deep_prompts[0])
+        self.assertIn("Realized Volatility", deep_prompts[0])
+        self.assertIn("85%", deep_prompts[0])
+
+    def test_evaluate_crypto_omits_trend_lines_when_not_provided(self) -> None:
+        captured: list[str] = []
+        service = self._make_prompt_capturing_service(captured)
+
+        verdict = service.evaluate_crypto(
+            symbol="XRPUSDT",
+            fear_greed_value=20,
+            funding_rate=-0.0005,
+            price=2.15,
+        )
+
+        self.assertIsNotNone(verdict)
+        deep_prompts = [p for p in captured if "Quick assessment" not in p]
+        self.assertTrue(deep_prompts)
+        self.assertNotIn("SMA", deep_prompts[0])
+        self.assertNotIn("Realized Volatility", deep_prompts[0])
+
+    def test_evaluate_crypto_trend_shift_invalidates_cache(self) -> None:
+        json_verdict = '{"action": "buy", "confidence": 0.7, "reasoning": "ok"}'
+        service = self._make_service(["yes", json_verdict, "yes", json_verdict])
+        client = service._anthropic_client
+
+        kwargs = dict(
+            symbol="XRPUSDT", fear_greed_value=20, funding_rate=-0.0005, price=2.15,
+        )
+        service.evaluate_crypto(**kwargs, trend_pct=-0.10)
+        calls_after_first = client._call_idx
+        service.evaluate_crypto(**kwargs, trend_pct=0.10)  # trend flipped → re-analyze
+        calls_after_second = client._call_idx
+        service.evaluate_crypto(**kwargs, trend_pct=0.10)  # same bucket → cache hit
+
+        self.assertGreater(calls_after_second, calls_after_first)
+        self.assertEqual(client._call_idx, calls_after_second)
 
     def test_polymarket_prompt_guard_wraps_untrusted_text(self) -> None:
         captured_prompts: list[str] = []
