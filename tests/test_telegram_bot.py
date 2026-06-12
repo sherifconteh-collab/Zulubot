@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from trading_bot.telegram_bot import TradingTelegramBot
+from trading_bot.telegram_bot import TradingTelegramBot, _format_lead_line
 
 
 class TradingTelegramBotTests(unittest.IsolatedAsyncioTestCase):
@@ -194,6 +194,167 @@ class TradingTelegramBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("connection refused", message)
         # No dividers.
         self.assertNotIn("\u2500" * 10, message)
+
+
+def _make_update() -> SimpleNamespace:
+    return SimpleNamespace(
+        effective_chat=SimpleNamespace(id=123),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+
+
+class LeadLineTests(unittest.TestCase):
+    def test_holder_signal_is_human_readable(self) -> None:
+        line = _format_lead_line({
+            "symbol": "XRPUSDT",
+            "reason": "held_by_other_strategy",
+            "signals": {"fear_greed": 20, "holder": "markov_regime"},
+        })
+        self.assertIn("held by markov_regime", line)
+        self.assertIn("XRPUSDT", line)
+
+    def test_trend_filter_signal_shows_gap_vs_sma(self) -> None:
+        line = _format_lead_line({
+            "symbol": "XRPUSDT",
+            "reason": "trend_filter_downtrend",
+            "signals": {"price": 1.8, "sma": 2.0, "sma_days": 20},
+        })
+        self.assertIn("-10.0% vs SMA20", line)
+
+
+class ModuleContextTests(unittest.TestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_telegram_bot"))
+
+    def test_crypto_context_shows_weights_and_trend_gate(self) -> None:
+        self.bot.set_service(SimpleNamespace(config=SimpleNamespace(
+            crypto=SimpleNamespace(
+                symbol_weights={"XRPUSDT": 2.0},
+                trend_filter_enabled=True,
+                trend_sma_days=20,
+                trend_tolerance_pct=0.05,
+            ),
+        )))
+        lines: list[str] = []
+        self.bot._append_module_context(
+            lines, "crypto",
+            {"fear_and_greed": 30, "funding_rates": {}, "price_sources": {}},
+        )
+        joined = "\n".join(lines)
+        self.assertIn("XRPUSDT ×2", joined)
+        self.assertIn("20d SMA", joined)
+
+    def test_predictions_context_lists_categories(self) -> None:
+        lines: list[str] = []
+        self.bot._append_module_context(
+            lines, "predictions",
+            {
+                "markets_discovered": 40,
+                "markets_scanned": 40,
+                "can_trade": False,
+                "categories": ["crypto", "economics", "weather"],
+            },
+        )
+        self.assertIn("crypto, economics, weather", "\n".join(lines))
+
+
+class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_telegram_bot"))
+
+    async def test_cmd_config_shows_xrp_and_kalshi_enhancements(self) -> None:
+        cfg = SimpleNamespace(
+            paper_mode=True,
+            initial_cash=100_000.0,
+            risk=SimpleNamespace(
+                max_position_fraction=0.10,
+                daily_halt_drawdown=0.05,
+                kill_switch_drawdown=0.15,
+            ),
+            crypto=SimpleNamespace(
+                symbols=["BTCUSDT", "XRPUSDT"],
+                buy_fear_threshold=35,
+                sell_fear_threshold=75,
+                require_negative_funding=False,
+                take_profit_pct=0.15,
+                stop_loss_pct=0.10,
+                symbol_weights={"XRPUSDT": 2.0},
+                take_profit_overrides={"XRPUSDT": 0.25},
+                stop_loss_overrides={},
+                trend_filter_enabled=True,
+                trend_sma_days=20,
+                trend_tolerance_pct=0.05,
+            ),
+            stock=SimpleNamespace(
+                max_pe_ratio=15, max_pb_ratio=1.5,
+                max_debt_to_equity=0.5, vix_buy_threshold=25,
+            ),
+            altcoin_rotation=SimpleNamespace(
+                enabled=True, fee_pct=0.006, scout_multiplier=3,
+                check_interval_minutes=30, qty_memory_cycles=336,
+            ),
+            predictions=SimpleNamespace(
+                enabled=True, buy_yes_threshold=0.45, buy_no_threshold=0.55,
+                require_crypto_fear_greed=False,
+                max_pages_per_series=3, discover_series=False,
+            ),
+            polymarket_strategy=SimpleNamespace(enabled=False),
+            scheduler=SimpleNamespace(
+                crypto_interval_minutes=30, stock_check_hour=15,
+                heartbeat_enabled=False, heartbeat_interval_minutes=60,
+            ),
+            trading_agents=SimpleNamespace(
+                enabled=True, confirmation_mode="boost",
+                circuit_breaker_enabled=True,
+            ),
+        )
+        self.bot.set_service(SimpleNamespace(config=cfg))
+        update = _make_update()
+
+        await self.bot._cmd_config(update, SimpleNamespace(args=[]))
+
+        update.message.reply_text.assert_awaited_once()
+        message = update.message.reply_text.await_args.args[0]
+        self.assertIn("XRPUSDT ×2", message)
+        self.assertIn("XRPUSDT 25%", message)
+        self.assertIn("sma20-gate", message)
+        self.assertIn("mem 336cy", message)
+        self.assertIn("pages≤3", message)
+        self.assertIn("breaker on", message)
+
+    async def test_cmd_ai_shows_circuit_breaker_state(self) -> None:
+        cfg = SimpleNamespace(
+            trading_agents=SimpleNamespace(
+                enabled=True,
+                confirmation_mode="boost",
+                quick_model="claude-haiku-4-5-20251001",
+                deep_model="claude-sonnet-4-6",
+                max_cost_per_month=5.0,
+                multi_analyst_enabled=False,
+                selected_analysts=[],
+            ),
+        )
+        ai = SimpleNamespace(
+            get_monthly_cost=lambda: 0.50,
+            get_budget_remaining=lambda: 4.50,
+            get_circuit_breaker_status=lambda: {
+                "state": "open",
+                "failure_count": 3,
+                "failure_threshold": 3,
+                "cooldown_seconds": 300,
+                "remaining_open_seconds": 120.0,
+            },
+        )
+        self.bot.set_service(SimpleNamespace(config=cfg, ai_service=ai))
+        update = _make_update()
+
+        await self.bot._cmd_ai(update, SimpleNamespace(args=[]))
+
+        update.message.reply_text.assert_awaited_once()
+        message = update.message.reply_text.await_args.args[0]
+        self.assertIn("Breaker    open (3/3 failures), retry in 120s", message)
 
 
 if __name__ == "__main__":

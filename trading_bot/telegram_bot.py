@@ -132,7 +132,18 @@ def _format_lead_line(lead: dict[str, Any]) -> str:
     spread = signals.get("spread_pct")
     if isinstance(spread, (int, float)):
         parts.append(f"spread {spread:+.2%}")
+    holder = signals.get("holder")
+    if holder:
+        parts.append(f"held by {html.escape(str(holder))}")
     price = signals.get("price")
+    sma = signals.get("sma")
+    if (
+        isinstance(sma, (int, float)) and sma > 0
+        and isinstance(price, (int, float))
+    ):
+        sma_days = signals.get("sma_days")
+        label = f"SMA{int(sma_days)}" if isinstance(sma_days, (int, float)) else "SMA"
+        parts.append(f"{(price / sma - 1) * 100:+.1f}% vs {label}")
     if not parts and isinstance(price, (int, float)):
         parts.append(f"@ ${price:,.2f}")
     context = ", ".join(parts)
@@ -277,6 +288,19 @@ class TradingTelegramBot:
                 src = sources.get(sym, "?")
                 rate_icon = "\U0001f53b" if rate < 0 else "\U0001f53a"
                 lines.append(f"   {rate_icon} {html.escape(str(sym))} funding={float(rate):.6f} ({html.escape(str(src))})")
+            crypto_cfg = getattr(getattr(self._service, "config", None), "crypto", None)
+            if crypto_cfg is not None:
+                weights = getattr(crypto_cfg, "symbol_weights", {}) or {}
+                if weights:
+                    weight_text = ", ".join(
+                        f"{html.escape(str(sym))} ×{w:g}" for sym, w in weights.items()
+                    )
+                    lines.append(f"   ⚖️ Weights: {weight_text}")
+                if getattr(crypto_cfg, "trend_filter_enabled", False):
+                    lines.append(
+                        f"   \U0001f4d0 Trend gate: {int(crypto_cfg.trend_sma_days)}d SMA "
+                        f"(−{float(crypto_cfg.trend_tolerance_pct):.0%} tolerance)"
+                    )
             return
 
         if module_name == "stocks":
@@ -325,6 +349,12 @@ class TradingTelegramBot:
             resolved = module_data.get("resolved_closed", [])
             can_trade = bool(module_data.get("can_trade"))
             lines.append(f"   \U0001f3b2 Markets: {scanned}/{discovered} scanned")
+            categories = module_data.get("categories") or []
+            if categories:
+                lines.append(
+                    "   \U0001f5c2 Categories: "
+                    + ", ".join(html.escape(str(c)) for c in categories)
+                )
             execution_text = "live-enabled" if can_trade else "scan-only / paper"
             lines.append(f"   \U0001f4cc Execution: {execution_text}")
             if resolved:
@@ -996,6 +1026,21 @@ class TradingTelegramBot:
             f"Spent      ${monthly:.4f} ({usage_pct:.0f}% of ${cap:.2f}/mo)",
             f"Remaining  ${remaining:.2f}",
         ]
+        if hasattr(ai, "get_circuit_breaker_status"):
+            breaker = ai.get_circuit_breaker_status() or {}
+            b_state = str(breaker.get("state", "?"))
+            if b_state == "disabled":
+                lines.append("Breaker    off")
+            else:
+                b_line = (
+                    f"Breaker    {b_state} "
+                    f"({int(breaker.get('failure_count', 0))}"
+                    f"/{int(breaker.get('failure_threshold', 0))} failures)"
+                )
+                remaining_s = float(breaker.get("remaining_open_seconds", 0) or 0)
+                if remaining_s > 0:
+                    b_line += f", retry in {remaining_s:.0f}s"
+                lines.append(b_line)
         if multi and analysts:
             lines.append("Analysts   " + ", ".join(analysts))
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
@@ -1257,6 +1302,28 @@ class TradingTelegramBot:
             return
         cfg = self._service.config
 
+        crypto_extras: list[str] = []
+        if cfg.crypto.symbol_weights:
+            crypto_extras.append(
+                "  weights   "
+                + ", ".join(f"{s} ×{w:g}" for s, w in cfg.crypto.symbol_weights.items())
+            )
+        if cfg.crypto.take_profit_overrides:
+            crypto_extras.append(
+                "  TP        "
+                + ", ".join(f"{s} {p:.0%}" for s, p in cfg.crypto.take_profit_overrides.items())
+                + f"  (default {cfg.crypto.take_profit_pct:.0%})"
+            )
+        if cfg.crypto.stop_loss_overrides:
+            crypto_extras.append(
+                "  SL        "
+                + ", ".join(f"{s} {p:.0%}" for s, p in cfg.crypto.stop_loss_overrides.items())
+                + f"  (default {cfg.crypto.stop_loss_pct:.0%})"
+            )
+
+        mem_cycles = cfg.altcoin_rotation.qty_memory_cycles
+        rotation_mem = f"mem {mem_cycles}cy" if mem_cycles > 0 else "mem ∞"
+
         lines = [
             "<b>Config</b>",
             f"Mode         {'PAPER' if cfg.paper_mode else 'LIVE'}",
@@ -1271,14 +1338,20 @@ class TradingTelegramBot:
             "<b>Strategies</b>",
             f"Crypto      {', '.join(cfg.crypto.symbols)}  "
             f"buy<{cfg.crypto.buy_fear_threshold} sell>{cfg.crypto.sell_fear_threshold}"
-            + ("  funding-gate" if cfg.crypto.require_negative_funding else ""),
+            + ("  funding-gate" if cfg.crypto.require_negative_funding else "")
+            + (f"  sma{cfg.crypto.trend_sma_days}-gate"
+               if cfg.crypto.trend_filter_enabled else ""),
+            *crypto_extras,
             f"Stocks      P/E<{cfg.stock.max_pe_ratio} P/B<{cfg.stock.max_pb_ratio} "
             f"D/E<{cfg.stock.max_debt_to_equity} VIX>{cfg.stock.vix_buy_threshold}",
             f"Rotation    {'on' if cfg.altcoin_rotation.enabled else 'off'}  "
-            f"fee {cfg.altcoin_rotation.fee_pct*100:.1f}% x{cfg.altcoin_rotation.scout_multiplier}",
+            f"fee {cfg.altcoin_rotation.fee_pct*100:.1f}% x{cfg.altcoin_rotation.scout_multiplier}  "
+            f"{rotation_mem}",
             f"Kalshi      {'on' if cfg.predictions.enabled else 'off'}  "
             f"YES<{cfg.predictions.buy_yes_threshold} NO>{cfg.predictions.buy_no_threshold}"
-            + ("  fng-gate" if cfg.predictions.require_crypto_fear_greed else ""),
+            + ("  fng-gate" if cfg.predictions.require_crypto_fear_greed else "")
+            + f"  pages≤{cfg.predictions.max_pages_per_series}"
+            + ("  auto-series" if cfg.predictions.discover_series else ""),
             f"Polymarket  {'on' if cfg.polymarket_strategy.enabled else 'off'}",
             "",
             "<b>Schedule</b>",
@@ -1290,7 +1363,11 @@ class TradingTelegramBot:
                if cfg.scheduler.heartbeat_enabled else "off"),
             "",
             f"<b>AI</b>: {'on' if cfg.trading_agents.enabled else 'off'}"
-            + (f" ({cfg.trading_agents.confirmation_mode})" if cfg.trading_agents.enabled else ""),
+            + (
+                f" ({cfg.trading_agents.confirmation_mode}, "
+                f"breaker {'on' if cfg.trading_agents.circuit_breaker_enabled else 'off'})"
+                if cfg.trading_agents.enabled else ""
+            ),
         ]
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
 
