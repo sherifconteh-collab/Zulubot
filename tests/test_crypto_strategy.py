@@ -563,7 +563,7 @@ class EnvFloatMapTests(unittest.TestCase):
             self.assertEqual(_env_float_map("TEST_MAP", {"XRPUSDT": 2.0}), {"XRPUSDT": 2.0})
 
     def test_malformed_entries_skipped_and_full_garbage_falls_back(self) -> None:
-        with patch.dict(os.environ, {"TEST_MAP": "XRPUSDT:2.0,nonsense,BTC:abc"}):
+        with patch.dict(os.environ, {"TEST_MAP": "XRPUSDT:2.0,nonsense,BTC:abc,:3.0"}):
             self.assertEqual(_env_float_map("TEST_MAP", {}), {"XRPUSDT": 2.0})
         with patch.dict(os.environ, {"TEST_MAP": "nonsense"}):
             self.assertEqual(_env_float_map("TEST_MAP", {"XRPUSDT": 2.0}), {"XRPUSDT": 2.0})

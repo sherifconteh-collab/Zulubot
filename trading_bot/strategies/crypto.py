@@ -285,8 +285,7 @@ class CryptoSentimentFundingStrategy:
                     equity = broker.portfolio_equity(state)
                     notional = risk_manager.position_notional(state, equity, symbol=symbol)
                     weight = self.config.symbol_weights.get(symbol, 1.0)
-                    if weight != 1.0:
-                        notional = min(notional * weight, state.cash)
+                    notional = min(notional * weight, state.cash)
                     if notional <= 0:
                         self.logger.warning("Skipping crypto buy for %s because position size is zero.", symbol)
                         decisions.append({
