@@ -124,6 +124,7 @@ class CoinbasePredictionStrategy:
                 return result
 
             result["markets_scanned"] = len(markets)
+            result["categories"] = sorted({m.get("_category", "other") for m in markets})
 
             # Step 4: Scan for new entry signals
             if state.kill_switch_engaged or state.halt_new_trades_for_day:
