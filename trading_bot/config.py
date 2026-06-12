@@ -62,6 +62,8 @@ def _env_float_map(name: str, default: dict[str, float]) -> dict[str, float]:
             continue
         key, _, value = part.partition(":")
         key = key.strip().upper()
+        if not key:
+            continue
         try:
             parsed[key] = float(value.strip())
         except ValueError:
