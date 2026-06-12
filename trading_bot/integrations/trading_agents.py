@@ -668,35 +668,62 @@ class TradingAgentsService:
         fear_greed_value: int,
         funding_rate: float,
         price: float,
+        trend_pct: float | None = None,
+        realized_vol: float | None = None,
     ) -> AgentVerdict | None:
         """Evaluate a crypto buy/sell signal with AI.
 
-        Called only when F&G + funding rate signals align.
+        Called only when F&G + funding rate signals align. ``trend_pct``
+        (price vs its N-day SMA, e.g. -0.03 = 3% below) and ``realized_vol``
+        (annualized) give the model the coin's own price context so it can
+        do more than restate the sentiment signal.
         """
         if not self.is_available or self._ai_temporarily_unavailable():
             return None
 
         # Bucket inputs so caching survives micro-noise but invalidates on
         # material moves: F&G to nearest 5, funding rate to 0.0005,
-        # price to 1% buckets.
+        # price to 1% buckets, trend to 1% steps, vol to 5% steps.
+        trend_part = f":tr{_bucket(trend_pct, 0.01)}" if trend_pct is not None else ""
+        vol_part = f":rv{_bucket(realized_vol, 0.05)}" if realized_vol is not None else ""
         cache_key = (
             f"crypto:{symbol}:"
             f"fg{_bucket(fear_greed_value, 5)}:"
             f"fr{_bucket(funding_rate, 0.0005)}:"
             f"px{_bucket_price(price)}"
+            f"{trend_part}{vol_part}"
         )
         cached = self._check_cache(cache_key)
         if cached is not None:
             return cached
 
-        prompt = (
-            f"You are a crypto sentiment analyst. Evaluate {symbol} for a potential trade.\n\n"
+        trend_lines = ""
+        if trend_pct is not None:
+            direction = "above" if trend_pct >= 0 else "below"
+            trend_lines += (
+                f"  Price vs 20-day SMA: {abs(trend_pct) * 100:.1f}% {direction}\n"
+            )
+        if realized_vol is not None:
+            trend_lines += f"  Realized Volatility (annualized): {realized_vol * 100:.0f}%\n"
+
+        trend_context = ""
+        if trend_lines:
+            trend_context = (
+                " A price far below its SMA suggests a downtrend; weigh whether "
+                "the fear signal is a true contrarian opportunity or a falling knife."
+            )
+        signals_block = (
             f"Signals:\n"
             f"  Fear & Greed Index: {fear_greed_value}\n"
             f"  Binance Funding Rate: {funding_rate:.6f}\n"
-            f"  Current Price: ${price:,.2f}\n\n"
+            f"  Current Price: ${price:,.2f}\n"
+            f"{trend_lines}\n"
             f"Context: Fear < 25 with negative funding = potential buy signal. "
-            f"Fear > 75 = potential sell signal.\n\n"
+            f"Fear > 75 = potential sell signal.{trend_context}"
+        )
+        prompt = (
+            f"You are a crypto sentiment analyst. Evaluate {symbol} for a potential trade.\n\n"
+            f"{signals_block}\n\n"
             f"Respond with JSON: {{\"action\": \"buy\"|\"sell\"|\"hold\"|\"skip\", "
             f"\"confidence\": 0.0-1.0, \"reasoning\": \"one sentence\"}}"
         )
@@ -705,12 +732,7 @@ class TradingAgentsService:
         if self.config.multi_analyst_enabled:
             data_prompt = (
                 f"Evaluate {symbol} for a potential trade.\n\n"
-                f"Signals:\n"
-                f"  Fear & Greed Index: {fear_greed_value}\n"
-                f"  Binance Funding Rate: {funding_rate:.6f}\n"
-                f"  Current Price: ${price:,.2f}\n\n"
-                f"Context: Fear < 25 with negative funding = potential buy signal. "
-                f"Fear > 75 = potential sell signal."
+                f"{signals_block}"
             )
             return self._multi_analyst_evaluation(cache_key, data_prompt)
 
@@ -1156,6 +1178,10 @@ class TradingAgentsService:
             return None
 
         should_investigate = self._quick_screen(prompt, image_urls=image_urls)
+        if should_investigate is None:
+            # Pre-screen errored: fail closed on cost (no Sonnet call) without
+            # distorting the trade — no verdict means the quant signal stands.
+            return None
         if not should_investigate:
             skip_verdict = AgentVerdict(
                 action="skip",
@@ -1306,10 +1332,12 @@ class TradingAgentsService:
         self._set_cache(cache_key, verdict)
         return verdict
 
-    def _quick_screen(self, prompt: str, *, image_urls: list[str] | None = None) -> bool:
+    def _quick_screen(self, prompt: str, *, image_urls: list[str] | None = None) -> bool | None:
         """Haiku pre-screen: should we investigate further?
 
-        Returns True if Haiku thinks the signal warrants deep analysis.
+        Returns True if Haiku thinks the signal warrants deep analysis,
+        False if not, and None when the screen itself failed (caller should
+        abstain rather than spend on the deep model or emit a verdict).
         """
         screen_prompt = (
             f"Quick assessment — should this trading signal be investigated further? "
@@ -1336,10 +1364,12 @@ class TradingAgentsService:
             return result
 
         except Exception as exc:
-            self.logger.error("Haiku pre-screen failed: %s", exc)
+            self.logger.warning("Haiku pre-screen failed: %s — skipping deep analysis.", exc)
             self._record_ai_failure(exc)
-            # On failure, default to investigating (conservative)
-            return True
+            # Fail closed: if the cheap gate errors, don't spend on the deep
+            # model. None (vs False) means "no verdict" so position sizing
+            # is not distorted by an API error.
+            return None
 
     def _call_model(
         self,

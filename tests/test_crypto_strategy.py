@@ -519,6 +519,78 @@ class CryptoStrategyTests(unittest.TestCase):
         self.assertNotIn("BTCUSDT", result["buys"])
         self.assertIn("ETHUSDT", result["buys"])
 
+    def test_buy_skips_symbol_held_by_other_strategy_with_decision(self) -> None:
+        """A symbol held by e.g. the Markov strategy is skipped with a clear
+        decision instead of silently dropping the buy signal."""
+        strategy = CryptoSentimentFundingStrategy(
+            config=CryptoStrategyConfig(),
+            alternative_client=FakeAlternativeClient(20, "Extreme Fear"),
+            binance_client=FakeBinanceClient({"BTCUSDT": 0.0, "ETHUSDT": 0.0}),
+            logger=self.logger,
+        )
+        state = self._fresh_state()
+        self.broker.open_position(
+            state,
+            symbol="BTCUSDT",
+            asset_type="crypto",
+            strategy="markov_regime",
+            price=50_000.0,
+            notional=2_000.0,
+            opened_at=self.now,
+            meta={},
+        )
+
+        result = strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        self.assertNotIn("BTCUSDT", result["buys"])
+        self.assertIn("ETHUSDT", result["buys"])
+        self.assertIn("BTCUSDT", state.positions)  # untouched
+        skip = [
+            d for d in result["decisions"]
+            if d.get("symbol") == "BTCUSDT" and d.get("reason") == "held_by_other_strategy"
+        ]
+        self.assertEqual(len(skip), 1)
+        self.assertEqual(skip[0]["signals"]["holder"], "markov_regime")
+
+    def test_ai_service_receives_trend_and_vol_context(self) -> None:
+        """The AI confirmation call includes the coin's trend vs SMA and
+        realized volatility so the model sees price context."""
+
+        class CapturingAIService:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def evaluate_crypto(self, **kwargs):
+                self.calls.append(kwargs)
+                return None  # no verdict → quant signal stands
+
+        ai = CapturingAIService()
+        strategy = CryptoSentimentFundingStrategy(
+            config=CryptoStrategyConfig(),
+            alternative_client=FakeAlternativeClient(20, "Extreme Fear"),
+            binance_client=FakeBinanceClient({"BTCUSDT": 0.0, "ETHUSDT": 0.0}),
+            logger=self.logger,
+            ai_service=ai,
+        )
+        state = self._fresh_state()
+        # 20 days of history slightly above the current 50k mark price:
+        # inside trend tolerance (so the buy proceeds) but a real SMA exists.
+        state.price_history["BTCUSDT"] = [51_000.0] * 20
+
+        strategy.run(
+            state, broker=self.broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        btc_calls = [c for c in ai.calls if c.get("symbol") == "BTCUSDT"]
+        self.assertEqual(len(btc_calls), 1)
+        call = btc_calls[0]
+        self.assertIn("trend_pct", call)
+        self.assertIn("realized_vol", call)
+        self.assertIsNotNone(call["trend_pct"])
+        self.assertLess(call["trend_pct"], 0)  # price below its SMA
+
     def test_trend_filter_fails_open_when_candle_fetch_errors(self) -> None:
         class BrokenCoinbaseClient:
             def get_spot_prices(self, symbols):

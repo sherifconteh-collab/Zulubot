@@ -11,6 +11,7 @@ from trading_bot.config import CryptoStrategyConfig, LearningConfig
 from trading_bot.models import PortfolioState
 from trading_bot import performance_memory
 from trading_bot.risk import RiskManager
+from trading_bot.volatility import VolatilityEngine
 
 try:
     from trading_bot.integrations.trading_agents import (
@@ -214,6 +215,23 @@ class CryptoSentimentFundingStrategy:
             else:
                 for symbol in self.config.symbols:
                     if symbol in state.positions:
+                        holder = state.positions[symbol].strategy
+                        if holder != "crypto_sentiment_funding":
+                            self.logger.info(
+                                "Skipping %s buy: position already held by strategy %s",
+                                symbol,
+                                holder,
+                            )
+                            decisions.append({
+                                "strategy": "crypto_sentiment_funding",
+                                "symbol": symbol,
+                                "action": "skip_buy",
+                                "reason": "held_by_other_strategy",
+                                "signals": {
+                                    "fear_greed": fear_greed.value,
+                                    "holder": holder,
+                                },
+                            })
                         continue
                     # "Learn as it goes": if the bot has been losing on this
                     # symbol repeatedly, bench it for a few cycles. A winning
@@ -300,14 +318,25 @@ class CryptoSentimentFundingStrategy:
                         })
                         continue
 
-                    # AI confirmation (optional)
+                    # AI confirmation (optional). Give the model the coin's own
+                    # price context (trend vs SMA, realized vol) so it can do
+                    # more than restate the sentiment signal.
                     ai_meta: dict[str, Any] = {}
                     if self.ai_service is not None and apply_ai_confirmation is not None:
+                        trend_pct: float | None = None
+                        sma = trend_signals.get("sma")
+                        if sma:
+                            trend_pct = execution_prices[symbol] / sma - 1.0
+                        realized_vol = VolatilityEngine.calculate_ewma_vol(
+                            state.price_history.get(symbol, [])
+                        )
                         verdict = self.ai_service.evaluate_crypto(
                             symbol=symbol,
                             fear_greed_value=fear_greed.value,
                             funding_rate=snapshot.funding_rate,
                             price=execution_prices[symbol],
+                            trend_pct=trend_pct,
+                            realized_vol=realized_vol,
                         )
                         notional, ai_meta = apply_ai_confirmation(
                             verdict,

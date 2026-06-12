@@ -343,7 +343,7 @@ class TradingAgentsConfig:
         "value_investor", "contrarian", "sentiment_analyst",
     )
     prompt_injection_protection_enabled: bool = False
-    circuit_breaker_enabled: bool = False
+    circuit_breaker_enabled: bool = True
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_cooldown_seconds: int = 300
     streaming_enabled: bool = False
@@ -399,6 +399,10 @@ class AltcoinRotationConfig:
     excluded_coins: list[str] = field(default_factory=list)  # coins to never trade
     max_coins_to_track: int = 50         # limit to top 50 by volume
     capital_allocation_pct: float = 0.60 # use 60% of total capital for rotation
+    # "Never go backwards" memory expiry: remembered best coin quantities
+    # older than this many cycles are ignored, so a coin crash can't lock the
+    # bot out of re-entering forever. 0 = never expire (legacy behavior).
+    qty_memory_cycles: int = 336         # ~1 week at 30-minute intervals
 
 
 @dataclass(frozen=True)
@@ -423,6 +427,12 @@ class PredictionConfig:
     # the Kalshi strategy idle outside of extreme sentiment regimes.
     require_crypto_fear_greed: bool = False
     use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
+    # Market discovery breadth: pages of 50 markets fetched per series (the
+    # API cursor used to be discarded, capping coverage at 20 markets/series).
+    max_pages_per_series: int = 3
+    # Opt-in: augment the hardcoded series lists with series discovered from
+    # the Kalshi events API so new market series are picked up automatically.
+    discover_series: bool = False
 
 
 @dataclass(frozen=True)
@@ -649,7 +659,7 @@ class AppConfig:
                     )
                 ),
                 prompt_injection_protection_enabled=_env_bool("TRADING_AGENTS_PROMPT_GUARD_ENABLED", False),
-                circuit_breaker_enabled=_env_bool("TRADING_AGENTS_CIRCUIT_BREAKER_ENABLED", False),
+                circuit_breaker_enabled=_env_bool("TRADING_AGENTS_CIRCUIT_BREAKER_ENABLED", True),
                 circuit_breaker_failure_threshold=_env_int("TRADING_AGENTS_CIRCUIT_BREAKER_FAILURE_THRESHOLD", 3),
                 circuit_breaker_cooldown_seconds=_env_int("TRADING_AGENTS_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 300),
                 streaming_enabled=_env_bool("TRADING_AGENTS_STREAMING_ENABLED", False),
@@ -680,6 +690,7 @@ class AppConfig:
                 excluded_coins=_env_list("ROTATION_EXCLUDED_COINS", []),
                 max_coins_to_track=_env_int("ROTATION_MAX_COINS_TO_TRACK", 50),
                 capital_allocation_pct=_env_float("ROTATION_CAPITAL_PCT", 0.60),
+                qty_memory_cycles=_env_int("ROTATION_QTY_MEMORY_CYCLES", 336),
             ),
             predictions=PredictionConfig(
                 enabled=_env_bool("PREDICTION_ENABLED", False),
@@ -698,6 +709,8 @@ class AppConfig:
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
                 require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
                 use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),
+                max_pages_per_series=_env_int("PREDICTION_MAX_PAGES_PER_SERIES", 3),
+                discover_series=_env_bool("PREDICTION_DISCOVER_SERIES", False),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),
