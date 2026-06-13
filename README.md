@@ -323,7 +323,7 @@ INITIAL_CASH=10000
 # Enable latency arb
 LATENCY_ARB_ENABLED=true
 PREDICTION_ENABLED=true
-PREDICTION_MARKET_CATEGORIES=crypto,economics,finance,politics,weather
+PREDICTION_MARKET_CATEGORIES=crypto,economics,finance,politics,weather,sports,entertainment
 PREDICTION_MIN_VOLUME_USD=5000
 PREDICTION_MAX_SPREAD_USD=0.15
 ```
