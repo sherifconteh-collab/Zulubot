@@ -707,7 +707,7 @@ class TradingAgentsService:
             trend_lines += f"  Realized Volatility (annualized): {realized_vol * 100:.0f}%\n"
 
         trend_context = ""
-        if trend_lines:
+        if trend_pct is not None and trend_pct < 0:
             trend_context = (
                 " A price far below its SMA suggests a downtrend; weigh whether "
                 "the fear signal is a true contrarian opportunity or a falling knife."
