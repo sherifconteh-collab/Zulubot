@@ -264,6 +264,41 @@ class TestMarkovRegimeStrategy(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["opens"], [])
 
+    def test_bull_entry_skips_symbol_held_by_other_strategy(self) -> None:
+        """A symbol held by another strategy is skipped with a clear decision
+        instead of silently dropping the signal — and never closed by Markov."""
+        strategy = self._make_strategy(MarkovStrategyConfig(
+            enabled=True,
+            min_history_days=40,
+            entry_signal_threshold=0.05,
+            laplace_alpha=0.05,
+        ))
+        bull_history = _bull_prices(60, daily_gain=0.005)
+        state = _default_state({"BTCUSDT": bull_history})
+        from trading_bot.models import Position
+        state.positions["BTCUSDT"] = Position(
+            symbol="BTCUSDT",
+            asset_type="crypto",
+            strategy="crypto_sentiment_funding",
+            quantity=1.0,
+            entry_price=65_000.0,
+            current_price=65_000.0,
+            opened_at=self.now.isoformat(),
+        )
+
+        result = strategy.run(state, broker=self.broker, risk_manager=self.risk_manager, now=self.now)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertNotIn("BTCUSDT", result["opens"])
+        self.assertIn("ETHUSDT", result["opens"])  # unaffected symbol opens
+        self.assertIn("BTCUSDT", state.positions)  # other strategy's position untouched
+        skip = [
+            d for d in result["decisions"]
+            if d.get("symbol") == "BTCUSDT" and d.get("reason") == "held_by_other_strategy"
+        ]
+        self.assertEqual(len(skip), 1)
+        self.assertEqual(skip[0]["signals"]["holder"], "crypto_sentiment_funding")
+
     def test_regime_flip_closes_existing_position(self) -> None:
         strategy = self._make_strategy(MarkovStrategyConfig(
             enabled=True,
