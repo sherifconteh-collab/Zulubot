@@ -332,6 +332,25 @@ class TradingAgentsServiceTests(unittest.TestCase):
         self.assertIn("Realized Volatility", deep_prompts[0])
         self.assertIn("85%", deep_prompts[0])
 
+    def test_evaluate_crypto_omits_falling_knife_caution_in_uptrend(self) -> None:
+        captured: list[str] = []
+        service = self._make_prompt_capturing_service(captured)
+
+        verdict = service.evaluate_crypto(
+            symbol="XRPUSDT",
+            fear_greed_value=20,
+            funding_rate=-0.0005,
+            price=2.15,
+            trend_pct=0.06,
+            realized_vol=0.85,
+        )
+
+        self.assertIsNotNone(verdict)
+        deep_prompts = [p for p in captured if "Quick assessment" not in p]
+        self.assertTrue(deep_prompts)
+        self.assertIn("6.0% above", deep_prompts[0])
+        self.assertNotIn("falling knife", deep_prompts[0])
+
     def test_evaluate_crypto_omits_trend_lines_when_not_provided(self) -> None:
         captured: list[str] = []
         service = self._make_prompt_capturing_service(captured)
