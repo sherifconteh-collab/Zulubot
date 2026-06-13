@@ -63,7 +63,7 @@ SERIES_BY_CATEGORY: dict[str, list[str]] = {
 
 # Categories whose outcomes are unrelated to crypto market sentiment, so the
 # crypto-driven Markov regime gate should not block entries here.
-REGIME_EXEMPT_CATEGORIES = {"sports", "entertainment"}
+REGIME_EXEMPT_CATEGORIES = {"sports", "entertainment", "weather", "politics", "other"}
 
 
 class CoinbasePredictionStrategy:

@@ -565,8 +565,8 @@ class MarketCoverageTests(unittest.TestCase):
         self.assertEqual(
             CoinbasePredictionStrategy._series_to_category("KXRT"), "entertainment",
         )
-        # Both categories are exempt from the crypto-driven Markov regime gate.
-        self.assertEqual(REGIME_EXEMPT_CATEGORIES, {"sports", "entertainment"})
+        # These categories are exempt from the crypto-driven Markov regime gate.
+        self.assertEqual(REGIME_EXEMPT_CATEGORIES, {"sports", "entertainment", "weather", "politics", "other"})
 
     def test_markov_bear_regime_still_bets_sports_and_entertainment(self) -> None:
         """A bearish crypto Markov regime blocks crypto bets but not sports/ent."""
