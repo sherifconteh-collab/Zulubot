@@ -10,7 +10,11 @@ from trading_bot.broker import PaperBroker
 from trading_bot.config import PredictionConfig, RiskConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
-from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
+from trading_bot.strategies.coinbase_predictions import (
+    REGIME_EXEMPT_CATEGORIES,
+    SERIES_BY_CATEGORY,
+    CoinbasePredictionStrategy,
+)
 
 
 def _make_market(
@@ -550,6 +554,55 @@ class MarketCoverageTests(unittest.TestCase):
         self.assertEqual(result["buys"], ["KX:KXCPI-LOW:yes"])
         position = state.positions["KX:KXCPI-LOW:yes"]
         self.assertEqual(position.meta.get("event_ticker"), "KXCPI-26JAN")
+
+    def test_series_by_category_includes_sports_and_entertainment(self) -> None:
+        """Sports and entertainment categories are registered and mapped."""
+        self.assertIn("sports", SERIES_BY_CATEGORY)
+        self.assertIn("entertainment", SERIES_BY_CATEGORY)
+        self.assertEqual(
+            CoinbasePredictionStrategy._series_to_category("KXNFLGAME"), "sports",
+        )
+        self.assertEqual(
+            CoinbasePredictionStrategy._series_to_category("KXRT"), "entertainment",
+        )
+        # Both categories are exempt from the crypto-driven Markov regime gate.
+        self.assertEqual(REGIME_EXEMPT_CATEGORIES, {"sports", "entertainment"})
+
+    def test_markov_bear_regime_still_bets_sports_and_entertainment(self) -> None:
+        """A bearish crypto Markov regime blocks crypto bets but not sports/ent."""
+        crypto = _make_market(ticker="KXBTC-26DEC", yes_ask=0.20, yes_bid=0.18)
+        sports = _make_market(ticker="KXNFLGAME-26JAN", yes_ask=0.20, yes_bid=0.18)
+        entertainment = _make_market(ticker="KXRT-BRIDE", yes_ask=0.20, yes_bid=0.18)
+        kalshi = PagingKalshiClient({
+            "KXBTC": [([crypto], None)],
+            "KXNFLGAME": [([sports], None)],
+            "KXRT": [([entertainment], None)],
+        })
+        strategy = CoinbasePredictionStrategy(
+            config=PredictionConfig(
+                enabled=True,
+                market_categories=["crypto", "sports", "entertainment"],
+            ),
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        state = self._make_state()
+        # Put the portfolio into a confirmed bear Markov regime.
+        state.markov_regime_state = "bear"
+        state.markov_regime_signal = -0.5
+
+        from unittest.mock import patch
+        with patch("time.sleep"):
+            result = strategy.run(
+                state, broker=self.paper_broker, risk_manager=self.risk_manager, now=self.now,
+            )
+
+        # The gate is recorded, but only the regime-exempt categories trade.
+        reasons = {d.get("reason") for d in result["decisions"]}
+        self.assertIn("markov_bear_regime", reasons)
+        self.assertIn("KX:KXNFLGAME-26JAN:yes", result["buys"])
+        self.assertIn("KX:KXRT-BRIDE:yes", result["buys"])
+        self.assertNotIn("KX:KXBTC-26DEC:yes", result["buys"])
 
     def test_event_already_held_blocks_sibling_outcomes(self) -> None:
         sibling = _make_market(ticker="KXCPI-HIGH", yes_ask=0.20, yes_bid=0.18)
