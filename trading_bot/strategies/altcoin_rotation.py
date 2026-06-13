@@ -104,6 +104,7 @@ class AltcoinRotationStrategy:
 
         # Ensure rotation_data bucket exists on the state object.
         rd = self._get_rotation_data(state)
+        rd["cycle_count"] = rd.get("cycle_count", 0) + 1
 
         # 1. Fetch all Coinbase spot prices.
         try:
@@ -308,11 +309,43 @@ class AltcoinRotationStrategy:
         rd.setdefault("current_coin", None)
         rd.setdefault("ratios", {})
         rd.setdefault("coin_quantities", {})
+        rd.setdefault("cycle_count", 0)
+        rd.setdefault("qty_recorded_cycle", {})
+        # Legacy states have quantities without timestamps; stamp them with
+        # the current cycle so they start aging instead of living forever.
+        for coin in rd["coin_quantities"]:
+            rd["qty_recorded_cycle"].setdefault(coin, rd["cycle_count"])
         return rd
 
     @staticmethod
     def _save_rotation_data(state: PortfolioState, rd: dict[str, Any]) -> None:
         state.rotation_data = rd  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _record_qty(rd: dict[str, Any], coin: str, qty: float) -> None:
+        """Store a best-quantity memory along with the cycle it was set."""
+        rd["coin_quantities"][coin] = qty
+        rd.setdefault("qty_recorded_cycle", {})[coin] = rd.get("cycle_count", 0)
+
+    def _remembered_qty(self, rd: dict[str, Any], coin: str) -> float:
+        """Best-quantity memory for ``coin``, ignoring entries older than
+        ``qty_memory_cycles`` so a price crash can't block re-entry forever."""
+        qty = rd["coin_quantities"].get(coin, 0.0)
+        limit = self.config.qty_memory_cycles
+        if qty <= 0 or limit <= 0:
+            return qty
+        recorded = rd.get("qty_recorded_cycle", {}).get(coin)
+        if recorded is None:
+            return qty
+        age = rd.get("cycle_count", 0) - recorded
+        if age > limit:
+            self.logger.info(
+                "Ignoring stale best-quantity memory for %s "
+                "(%.8f recorded %d cycles ago, limit %d).",
+                coin, qty, age, limit,
+            )
+            return 0.0
+        return qty
 
     # ------------------------------------------------------------------
     # Coin filtering
@@ -426,7 +459,7 @@ class AltcoinRotationStrategy:
         )
         prev_best = rd["coin_quantities"].get(best_coin, 0.0)
         if qty_held > prev_best:
-            rd["coin_quantities"][best_coin] = qty_held
+            self._record_qty(rd, best_coin, qty_held)
 
         return best_coin
 
@@ -531,7 +564,7 @@ class AltcoinRotationStrategy:
 
         # Update rotation data.
         rd["current_coin"] = target_coin
-        rd["coin_quantities"][target_coin] = estimated_qty
+        self._record_qty(rd, target_coin, estimated_qty)
         self._save_rotation_data(state, rd)
 
         self.logger.info(
@@ -617,7 +650,7 @@ class AltcoinRotationStrategy:
             else:
                 usd_proceeds = current_coin_qty * current_price * (1.0 - self.config.fee_pct)
                 new_qty = (usd_proceeds / candidate_price) * (1.0 - self.config.fee_pct)
-                prev_best_qty = rd["coin_quantities"].get(candidate_pid, 0.0)
+                prev_best_qty = self._remembered_qty(rd, candidate_pid)
                 if prev_best_qty > 0 and new_qty < prev_best_qty:
                     self.logger.debug(
                         "Skipping %s: would get %.8f but best was %.8f (going backwards).",
@@ -735,7 +768,7 @@ class AltcoinRotationStrategy:
 
         # --- Update rotation data ---
         rd["current_coin"] = to_coin
-        rd["coin_quantities"][to_coin] = estimated_qty
+        self._record_qty(rd, to_coin, estimated_qty)
         # Reset ratios for the new coin at current prices.
         rd["ratios"][to_coin] = {}
         # (They will be populated on the next _ensure_ratios call.)
@@ -818,8 +851,10 @@ class AltcoinRotationStrategy:
                 extra_qty = (notional / prices.get(current_coin, 1.0)) * (
                     1.0 - self.config.fee_pct
                 )
-                rd["coin_quantities"][current_coin] = (
-                    rd["coin_quantities"].get(current_coin, 0.0) + extra_qty
+                self._record_qty(
+                    rd,
+                    current_coin,
+                    rd["coin_quantities"].get(current_coin, 0.0) + extra_qty,
                 )
                 self.logger.info(
                     "Absorbed %s (+%.8f of %s).", product_id, extra_qty, current_coin,

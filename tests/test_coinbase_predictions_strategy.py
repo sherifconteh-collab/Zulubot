@@ -439,5 +439,145 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(state.positions[symbol].current_price, 0.71, places=2)
 
 
+class PagingKalshiClient(FakeKalshiClient):
+    """Kalshi stub that serves cursor-paginated markets for one series."""
+
+    def __init__(self, pages_by_series: dict[str, list[tuple[list[dict[str, Any]], str | None]]]) -> None:
+        super().__init__([])
+        self.pages_by_series = pages_by_series
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    def get_markets(self, *, series_ticker: str | None = None, cursor: str | None = None, **kwargs: Any):
+        self.calls.append((series_ticker, cursor))
+        pages = self.pages_by_series.get(series_ticker or "")
+        if not pages:
+            return [], None
+        index = 0 if cursor is None else int(cursor)
+        return pages[index]
+
+
+class MarketCoverageTests(unittest.TestCase):
+    """Pagination, category round-robin, and one-position-per-event rules."""
+
+    def setUp(self) -> None:
+        self.logger = logging.getLogger("test_predictions_coverage")
+        self.now = datetime(2026, 3, 28, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        self.paper_broker = PaperBroker(True, self.logger)
+        self.risk_manager = RiskManager(RiskConfig())
+
+    def _make_state(self) -> PortfolioState:
+        return PortfolioState(
+            cash=100_000.0,
+            daily_baseline_equity=100_000.0,
+            daily_baseline_date=self.now.date().isoformat(),
+            peak_equity=100_000.0,
+        )
+
+    def test_discover_markets_follows_pagination_cursor(self) -> None:
+        """All pages of a series are fetched, not just the first."""
+        page1 = _make_market(ticker="KXBTC-PAGE1", volume=10_000.0)
+        page2 = _make_market(ticker="KXBTC-PAGE2", volume=9_000.0)
+        kalshi = PagingKalshiClient({"KXBTC": [([page1], "1"), ([page2], None)]})
+        strategy = CoinbasePredictionStrategy(
+            config=PredictionConfig(enabled=True, market_categories=["crypto"]),
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+
+        from unittest.mock import patch
+        with patch("time.sleep"):
+            markets = strategy._discover_markets()
+
+        tickers = {m["ticker"] for m in markets}
+        self.assertIn("KXBTC-PAGE1", tickers)
+        self.assertIn("KXBTC-PAGE2", tickers)
+        self.assertIn(("KXBTC", "1"), kalshi.calls)
+
+    def test_discover_markets_respects_max_pages_per_series(self) -> None:
+        page1 = _make_market(ticker="KXBTC-PAGE1", volume=10_000.0)
+        page2 = _make_market(ticker="KXBTC-PAGE2", volume=9_000.0)
+        kalshi = PagingKalshiClient({"KXBTC": [([page1], "1"), ([page2], None)]})
+        strategy = CoinbasePredictionStrategy(
+            config=PredictionConfig(
+                enabled=True, market_categories=["crypto"], max_pages_per_series=1,
+            ),
+            kalshi_client=kalshi,  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+
+        from unittest.mock import patch
+        with patch("time.sleep"):
+            markets = strategy._discover_markets()
+
+        tickers = {m["ticker"] for m in markets}
+        self.assertIn("KXBTC-PAGE1", tickers)
+        self.assertNotIn("KXBTC-PAGE2", tickers)
+        self.assertNotIn(("KXBTC", "1"), kalshi.calls)
+
+    def test_round_robin_interleaves_categories_by_volume(self) -> None:
+        markets = [
+            {"_category": "economics", "_volume": 900.0, "ticker": "E1"},
+            {"_category": "economics", "_volume": 800.0, "ticker": "E2"},
+            {"_category": "economics", "_volume": 700.0, "ticker": "E3"},
+            {"_category": "crypto", "_volume": 100.0, "ticker": "C1"},
+            {"_category": "crypto", "_volume": 50.0, "ticker": "C2"},
+        ]
+
+        ordered = CoinbasePredictionStrategy._round_robin_by_category(markets)
+
+        tickers = [m["ticker"] for m in ordered]
+        # Low-volume crypto still gets an early slot instead of being pushed
+        # behind every economics market.
+        self.assertEqual(tickers, ["C1", "E1", "C2", "E2", "E3"])
+
+    def test_one_position_per_multi_outcome_event_takes_best_edge(self) -> None:
+        """Two outcomes of the same event → only the better-edge one is bought."""
+        better = _make_market(ticker="KXCPI-LOW", yes_ask=0.20, yes_bid=0.18)
+        worse = _make_market(ticker="KXCPI-HIGH", yes_ask=0.32, yes_bid=0.30)
+        better["event_ticker"] = "KXCPI-26JAN"
+        worse["event_ticker"] = "KXCPI-26JAN"
+        strategy = CoinbasePredictionStrategy(
+            config=PredictionConfig(enabled=True, market_categories=["crypto"]),
+            kalshi_client=FakeKalshiClient([better, worse]),  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        state = self._make_state()
+
+        result = strategy.run(
+            state, broker=self.paper_broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        self.assertEqual(result["buys"], ["KX:KXCPI-LOW:yes"])
+        position = state.positions["KX:KXCPI-LOW:yes"]
+        self.assertEqual(position.meta.get("event_ticker"), "KXCPI-26JAN")
+
+    def test_event_already_held_blocks_sibling_outcomes(self) -> None:
+        sibling = _make_market(ticker="KXCPI-HIGH", yes_ask=0.20, yes_bid=0.18)
+        sibling["event_ticker"] = "KXCPI-26JAN"
+        strategy = CoinbasePredictionStrategy(
+            config=PredictionConfig(enabled=True, market_categories=["crypto"]),
+            kalshi_client=FakeKalshiClient([sibling]),  # type: ignore[arg-type]
+            logger=self.logger,
+        )
+        state = self._make_state()
+        self.paper_broker.open_position(
+            state,
+            symbol="KX:KXCPI-LOW:yes",
+            asset_type="prediction",
+            strategy="coinbase_predictions",
+            price=0.25,
+            notional=25.0,
+            opened_at=self.now,
+            meta={"ticker": "KXCPI-LOW", "side": "yes", "event_ticker": "KXCPI-26JAN"},
+        )
+
+        result = strategy.run(
+            state, broker=self.paper_broker, risk_manager=self.risk_manager, now=self.now,
+        )
+
+        self.assertEqual(result["buys"], [])
+        self.assertNotIn("KX:KXCPI-HIGH:yes", state.positions)
+
+
 if __name__ == "__main__":
     unittest.main()

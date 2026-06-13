@@ -48,6 +48,29 @@ def _env_list_lower(name: str, default: list[str]) -> list[str]:
     return [part.strip().lower() for part in raw_value.split(",") if part.strip()]
 
 
+def _env_float_map(name: str, default: dict[str, float]) -> dict[str, float]:
+    """Parse "XRPUSDT:2.0,BTCUSDT:1.0" into {"XRPUSDT": 2.0, "BTCUSDT": 1.0}.
+
+    Malformed entries are skipped; an empty/unset variable returns the default.
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    parsed: dict[str, float] = {}
+    for part in raw_value.split(","):
+        if ":" not in part:
+            continue
+        key, _, value = part.partition(":")
+        key = key.strip().upper()
+        if not key:
+            continue
+        try:
+            parsed[key] = float(value.strip())
+        except ValueError:
+            continue
+    return parsed if parsed else default
+
+
 def _default_storage_root() -> Path:
     explicit_root = os.getenv("BOT_STORAGE_DIR")
     if explicit_root:
@@ -122,6 +145,20 @@ class CryptoStrategyConfig:
     # 0.0 disables the respective rule.
     take_profit_pct: float = 0.15   # +15% from entry → take profits
     stop_loss_pct: float = 0.10     # −10% from entry → cut loss
+    # Per-symbol capital weights (e.g. {"XRPUSDT": 2.0}) scale the sized
+    # notional for that symbol. Missing symbols default to 1.0.
+    symbol_weights: dict[str, float] = field(default_factory=dict)
+    # Per-symbol exit overrides; missing symbols fall back to the globals
+    # above. A 0.0 override disables that rule for the symbol.
+    take_profit_overrides: dict[str, float] = field(default_factory=dict)
+    stop_loss_overrides: dict[str, float] = field(default_factory=dict)
+    # Skip buys when the symbol's own price is more than ``trend_tolerance_pct``
+    # below its ``trend_sma_days``-day SMA — avoids buying a coin in a steep
+    # downtrend just because market-wide fear is high. Fails open when there is
+    # insufficient price history.
+    trend_filter_enabled: bool = True
+    trend_sma_days: int = 20
+    trend_tolerance_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -306,7 +343,7 @@ class TradingAgentsConfig:
         "value_investor", "contrarian", "sentiment_analyst",
     )
     prompt_injection_protection_enabled: bool = False
-    circuit_breaker_enabled: bool = False
+    circuit_breaker_enabled: bool = True
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_cooldown_seconds: int = 300
     streaming_enabled: bool = False
@@ -362,6 +399,10 @@ class AltcoinRotationConfig:
     excluded_coins: list[str] = field(default_factory=list)  # coins to never trade
     max_coins_to_track: int = 50         # limit to top 50 by volume
     capital_allocation_pct: float = 0.60 # use 60% of total capital for rotation
+    # "Never go backwards" memory expiry: remembered best coin quantities
+    # older than this many cycles are ignored, so a coin crash can't lock the
+    # bot out of re-entering forever. 0 = never expire (legacy behavior).
+    qty_memory_cycles: int = 336         # ~1 week at 30-minute intervals
 
 
 @dataclass(frozen=True)
@@ -386,6 +427,12 @@ class PredictionConfig:
     # the Kalshi strategy idle outside of extreme sentiment regimes.
     require_crypto_fear_greed: bool = False
     use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
+    # Market discovery breadth: pages of 50 markets fetched per series (the
+    # API cursor used to be discarded, capping coverage at 20 markets/series).
+    max_pages_per_series: int = 3
+    # Opt-in: augment the hardcoded series lists with series discovered from
+    # the Kalshi events API so new market series are picked up automatically.
+    discover_series: bool = False
 
 
 @dataclass(frozen=True)
@@ -549,6 +596,12 @@ class AppConfig:
                 require_negative_funding=_env_bool("CRYPTO_REQUIRE_NEGATIVE_FUNDING", False),
                 take_profit_pct=_env_float("CRYPTO_TAKE_PROFIT_PCT", 0.15),
                 stop_loss_pct=_env_float("CRYPTO_STOP_LOSS_PCT", 0.10),
+                symbol_weights=_env_float_map("CRYPTO_SYMBOL_WEIGHTS", {}),
+                take_profit_overrides=_env_float_map("CRYPTO_TAKE_PROFIT_OVERRIDES", {}),
+                stop_loss_overrides=_env_float_map("CRYPTO_STOP_LOSS_OVERRIDES", {}),
+                trend_filter_enabled=_env_bool("CRYPTO_TREND_FILTER_ENABLED", True),
+                trend_sma_days=_env_int("CRYPTO_TREND_SMA_DAYS", 20),
+                trend_tolerance_pct=_env_float("CRYPTO_TREND_TOLERANCE_PCT", 0.05),
             ),
             coinbase=CoinbaseConfig(
                 api_key=os.getenv("COINBASE_API_KEY", "").strip(),
@@ -606,7 +659,7 @@ class AppConfig:
                     )
                 ),
                 prompt_injection_protection_enabled=_env_bool("TRADING_AGENTS_PROMPT_GUARD_ENABLED", False),
-                circuit_breaker_enabled=_env_bool("TRADING_AGENTS_CIRCUIT_BREAKER_ENABLED", False),
+                circuit_breaker_enabled=_env_bool("TRADING_AGENTS_CIRCUIT_BREAKER_ENABLED", True),
                 circuit_breaker_failure_threshold=_env_int("TRADING_AGENTS_CIRCUIT_BREAKER_FAILURE_THRESHOLD", 3),
                 circuit_breaker_cooldown_seconds=_env_int("TRADING_AGENTS_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 300),
                 streaming_enabled=_env_bool("TRADING_AGENTS_STREAMING_ENABLED", False),
@@ -637,6 +690,7 @@ class AppConfig:
                 excluded_coins=_env_list("ROTATION_EXCLUDED_COINS", []),
                 max_coins_to_track=_env_int("ROTATION_MAX_COINS_TO_TRACK", 50),
                 capital_allocation_pct=_env_float("ROTATION_CAPITAL_PCT", 0.60),
+                qty_memory_cycles=_env_int("ROTATION_QTY_MEMORY_CYCLES", 336),
             ),
             predictions=PredictionConfig(
                 enabled=_env_bool("PREDICTION_ENABLED", False),
@@ -655,6 +709,8 @@ class AppConfig:
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
                 require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
                 use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),
+                max_pages_per_series=_env_int("PREDICTION_MAX_PAGES_PER_SERIES", 3),
+                discover_series=_env_bool("PREDICTION_DISCOVER_SERIES", False),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),

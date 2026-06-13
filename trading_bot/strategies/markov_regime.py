@@ -175,13 +175,28 @@ class MarkovRegimeStrategy:
                 equity = broker.portfolio_equity(state)
                 for symbol in self.config.symbols:
                     if symbol in state.positions:
-                        decisions.append({
-                            "strategy": _STRATEGY_NAME,
-                            "symbol": symbol,
-                            "action": "skip_buy",
-                            "reason": "already_open",
-                            "signals": _signal_dict(markov),
-                        })
+                        holder = state.positions[symbol].strategy
+                        if holder != _STRATEGY_NAME:
+                            self.logger.info(
+                                "Markov: skipping %s buy — position already held by strategy %s",
+                                symbol,
+                                holder,
+                            )
+                            decisions.append({
+                                "strategy": _STRATEGY_NAME,
+                                "symbol": symbol,
+                                "action": "skip_buy",
+                                "reason": "held_by_other_strategy",
+                                "signals": {**_signal_dict(markov), "holder": holder},
+                            })
+                        else:
+                            decisions.append({
+                                "strategy": _STRATEGY_NAME,
+                                "symbol": symbol,
+                                "action": "skip_buy",
+                                "reason": "already_open",
+                                "signals": _signal_dict(markov),
+                            })
                         continue
                     if symbol in just_closed:
                         decisions.append({
