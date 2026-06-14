@@ -419,7 +419,7 @@ class PredictionConfig:
     min_trade_usd: float = 1.0
     min_volume_usd: float = 3_000        # Minimum 24h volume to consider a market tradeable
     max_spread_usd: float = 0.20         # Maximum bid/ask spread allowed per side
-    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather"])
+    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather", "sports", "entertainment"])
     capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
     # Opt-in extra gate for crypto-category markets: require an extreme Fear &
     # Greed reading to align with the price threshold. Default False so crypto
@@ -705,7 +705,7 @@ class AppConfig:
                 min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
                 min_volume_usd=_env_float("PREDICTION_MIN_VOLUME_USD", 3_000),
                 max_spread_usd=_env_float("PREDICTION_MAX_SPREAD_USD", 0.20),
-                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather"]),
+                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather", "sports", "entertainment"]),
                 capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
                 require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
                 use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),

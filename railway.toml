@@ -133,7 +133,7 @@ POLYMARKET_USE_TRADING_AGENTS = "false"
 # Kalshi / Predictions
 PREDICTION_ENABLED = "false"
 PREDICTION_MAX_POSITIONS = "8"
-PREDICTION_MARKET_CATEGORIES = "crypto,economics,finance,politics,weather"
+PREDICTION_MARKET_CATEGORIES = "crypto,economics,finance,politics,weather,sports,entertainment"
 PREDICTION_CHECK_INTERVAL_MINUTES = "15"
 PREDICTION_BUY_YES_THRESHOLD = "0.35"
 PREDICTION_BUY_NO_THRESHOLD = "0.65"
