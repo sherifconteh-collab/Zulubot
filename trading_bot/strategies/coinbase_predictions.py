@@ -43,6 +43,11 @@ ECONOMICS_SERIES = ["KXCPI", "KXCPIYOY", "KXGDP", "KXFED", "KXFOMC", "KXNFP", "K
 FINANCE_SERIES = ["KXINX", "KXSPY", "KXNDX", "KXIWM", "KXGLD", "KXWTI"]
 POLITICS_SERIES = ["KXTRUMP", "KXPOTUS", "KXSENATE", "KXHOUSE"]
 WEATHER_SERIES = ["KXTEMP", "KXHURRICANE"]
+SPORTS_SERIES = [
+    "KXNFLGAME", "KXNBA", "KXNBAGAME", "KXNBASERIES", "KXNBAEAST", "KXNBAWEST",
+    "KXMLBGAME", "KXNHLGAME", "KXNHLSERIES", "KXPGATOUR", "KXUCLGAME", "KXUFCFIGHT",
+]
+ENTERTAINMENT_SERIES = ["KXRT", "KXSPOTIFYD", "KXNETFLIXRANKSHOW"]
 OTHER_SERIES = ["KXNEWPOPE"]
 
 SERIES_BY_CATEGORY: dict[str, list[str]] = {
@@ -51,8 +56,14 @@ SERIES_BY_CATEGORY: dict[str, list[str]] = {
     "finance": FINANCE_SERIES,
     "politics": POLITICS_SERIES,
     "weather": WEATHER_SERIES,
+    "sports": SPORTS_SERIES,
+    "entertainment": ENTERTAINMENT_SERIES,
     "other": OTHER_SERIES,
 }
+
+# Categories whose outcomes are unrelated to crypto market sentiment, so the
+# crypto-driven Markov regime gate should not block entries here.
+REGIME_EXEMPT_CATEGORIES = {"sports", "entertainment", "weather", "politics", "other"}
 
 
 class CoinbasePredictionStrategy:
@@ -142,6 +153,17 @@ class CoinbasePredictionStrategy:
                 state, self.config.use_markov_regime_gate, "coinbase_predictions"
             ):
                 result["decisions"].append(markov_block)
+                # The Markov gate keys off crypto market regime; sports and
+                # entertainment outcomes are unrelated to it, so keep scanning
+                # those rather than skipping the whole cycle.
+                exempt = [
+                    m for m in markets
+                    if m.get("_category") in REGIME_EXEMPT_CATEGORIES
+                ]
+                if exempt:
+                    self._scan_for_entries(
+                        state, exempt, broker, risk_manager, now, fear_greed_value, result,
+                    )
             else:
                 self._scan_for_entries(
                     state, markets, broker, risk_manager, now, fear_greed_value, result,
