@@ -383,7 +383,7 @@ class TradingBotService:
                     now=now,
                 ),
             )
-        if command in {"kalshi_perps", "all"} and self.config.kalshi_perps.enabled:
+        if command == "kalshi_perps" or (command == "all" and self.config.kalshi_perps.enabled):
             module_results["kalshi_perps"] = self._run_module(
                 "kalshi_perps",
                 lambda: self.kalshi_perps_strategy.run(

@@ -185,7 +185,7 @@ class KalshiPerpetualsStrategy:
         old = [(t, p) for t, p in hist if t <= cutoff]
         if not old:
             return None
-        oldest_price = old[0][1]
+        oldest_price = old[-1][1]  # price closest to the window boundary, not the oldest in 2x window
         latest_price = hist[-1][1]
         if oldest_price <= 0:
             return None
@@ -331,7 +331,11 @@ class KalshiPerpetualsStrategy:
         if slots <= 0:
             return opens
 
-        kalshi_cash = state.cash_reserves.get(_CASH_BUCKET, 0.0)
+        # In paper mode the kalshi cash reserve isn't populated; fall back to main cash.
+        if self.live_trading_enabled:
+            kalshi_cash = state.cash_reserves.get(_CASH_BUCKET, 0.0)
+        else:
+            kalshi_cash = state.cash
         total_budget = min(
             state.equity * self.config.capital_allocation_pct,
             kalshi_cash,
@@ -432,7 +436,7 @@ class KalshiPerpetualsStrategy:
             price=price,
             notional=size_usd,
             opened_at=now,
-            cash_bucket=_CASH_BUCKET,
+            cash_bucket=_CASH_BUCKET if self.live_trading_enabled else None,
             meta={
                 "ticker": ticker,
                 "symbol": symbol,

@@ -166,7 +166,8 @@ class CryptoSentimentFundingStrategy:
             for symbol in self.config.symbols:
                 if symbol not in state.positions:
                     continue
-                if symbol in self.protected_symbols:
+                bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+                if symbol in self.protected_symbols or bare in self.protected_symbols:
                     self.logger.info("Protected: skipping F&G sell for %s.", symbol)
                     continue
                 position = state.positions[symbol]
@@ -469,7 +470,8 @@ class CryptoSentimentFundingStrategy:
         global defaults. Only inspects positions opened by this strategy.
         """
         for symbol in list(self.config.symbols):
-            if symbol in self.protected_symbols:
+            bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+            if symbol in self.protected_symbols or bare in self.protected_symbols:
                 continue
             tp = self.config.take_profit_overrides.get(symbol, self.config.take_profit_pct)
             sl = self.config.stop_loss_overrides.get(symbol, self.config.stop_loss_pct)
