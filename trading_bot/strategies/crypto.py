@@ -43,6 +43,7 @@ class CryptoSentimentFundingStrategy:
         ai_service: Any | None = None,
         confirmation_mode: str = "log_only",
         learning_config: LearningConfig | None = None,
+        protected_symbols: frozenset[str] = frozenset(),
     ) -> None:
         self.config = config
         self.alternative_client = alternative_client
@@ -52,6 +53,7 @@ class CryptoSentimentFundingStrategy:
         self.logger = logger.getChild("crypto_strategy")
         self.ai_service = ai_service
         self.confirmation_mode = confirmation_mode
+        self.protected_symbols = protected_symbols
         # Default to a disabled learning layer when not supplied, so direct
         # instantiation in tests doesn't require the full AppConfig.
         self.learning_config = learning_config or LearningConfig(enabled=False)
@@ -163,6 +165,10 @@ class CryptoSentimentFundingStrategy:
         if fear_greed.value > self.config.sell_fear_threshold:
             for symbol in self.config.symbols:
                 if symbol not in state.positions:
+                    continue
+                bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+                if symbol in self.protected_symbols or bare in self.protected_symbols:
+                    self.logger.info("Protected: skipping F&G sell for %s.", symbol)
                     continue
                 position = state.positions[symbol]
                 # Place sell on Coinbase (paper or live)
@@ -464,6 +470,9 @@ class CryptoSentimentFundingStrategy:
         global defaults. Only inspects positions opened by this strategy.
         """
         for symbol in list(self.config.symbols):
+            bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+            if symbol in self.protected_symbols or bare in self.protected_symbols:
+                continue
             tp = self.config.take_profit_overrides.get(symbol, self.config.take_profit_pct)
             sl = self.config.stop_loss_overrides.get(symbol, self.config.stop_loss_pct)
             if tp <= 0 and sl <= 0:

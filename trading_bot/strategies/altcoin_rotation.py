@@ -73,10 +73,12 @@ class AltcoinRotationStrategy:
         logger: logging.Logger,
         ai_service: Any | None = None,
         confirmation_mode: str = "boost",
+        protected_symbols: frozenset[str] = frozenset(),
     ) -> None:
         self.config = config
         self.coinbase_client = coinbase_client
         self.coinbase_broker = coinbase_broker
+        self.protected_symbols = protected_symbols
         self.logger = logger.getChild("altcoin_rotation")
         self.ai_service = ai_service
         # Normalize to lowercase so "Require"/"REQUIRE" work identically to "require"
@@ -694,6 +696,12 @@ class AltcoinRotationStrategy:
             )
             return False
 
+        # Never rotate away from a protected symbol.
+        from_coin_bare = _coin_from_product(from_coin)
+        if from_coin in self.protected_symbols or from_coin_bare in self.protected_symbols:
+            self.logger.info("Protected: skipping rotation swap away from %s.", from_coin)
+            return False
+
         qty_to_sell = rd["coin_quantities"].get(from_coin, 0.0)
         usd_value = qty_to_sell * from_price
         if usd_value < self.config.min_trade_usd:
@@ -810,6 +818,10 @@ class AltcoinRotationStrategy:
             product_id = asset if "-" in asset else _product_from_coin(asset)
             if product_id == current_coin:
                 continue  # That is our rotation coin; skip.
+            # Never absorb (sell) a protected symbol.
+            if asset in self.protected_symbols or product_id in self.protected_symbols:
+                self.logger.info("Protected: skipping absorption of %s.", product_id)
+                continue
 
             price = prices.get(product_id)
             if price is None:

@@ -32,6 +32,20 @@ except ImportError:
     _HAS_CRYPTO = False
 
 
+# Kalshi Crypto Perpetuals series tickers.
+# ⚠️ Verify exact series names against Kalshi's live API before enabling live trading.
+PERP_SERIES: dict[str, str] = {
+    "BTC":  "KXBTCPERP",
+    "ETH":  "KXETHPERP",
+    "SOL":  "KXSOLPERP",
+    "XRP":  "KXXRPPERP",
+    "LINK": "KXLINKPERP",
+    "BCH":  "KXBCHPERP",
+    "HYPE": "KXHYPEPERP",
+    "SHIB": "KXKSHIBPERP",
+}
+
+
 class KalshiClient:
     """Client for the Kalshi prediction market API."""
 
@@ -312,3 +326,77 @@ class KalshiClient:
         result = self._get("/portfolio/balance", auth=True)
         # Balance is in cents
         return float(result.get("balance", 0)) / 100.0
+
+    # ------------------------------------------------------------------
+    # Perpetuals (requires auth for trading; discovery is public)
+    # ⚠️ Exact endpoints need verification against Kalshi Perps API docs.
+    # All methods are designed to use _get()/_post() so the base URL,
+    # path, and payload can be adjusted by changing constants only.
+    # ------------------------------------------------------------------
+
+    def get_perp_markets(
+        self,
+        *,
+        series_ticker: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch open perpetual markets. Returns (markets, next_cursor)."""
+        params: dict[str, Any] = {"limit": limit, "status": "open"}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if cursor:
+            params["cursor"] = cursor
+        result = self._get("/markets", params=params)
+        markets = result.get("markets", [])
+        next_cursor = result.get("cursor")
+        return markets, next_cursor
+
+    def get_perp_market(self, ticker: str) -> dict[str, Any]:
+        """Get a single perpetual market by ticker (for price refresh)."""
+        result = self._get(f"/markets/{ticker}")
+        return result.get("market", result)
+
+    def place_perp_order(
+        self,
+        *,
+        ticker: str,
+        side: str,            # "long" or "short"
+        size_usd: float,
+        leverage: float = 1.0,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Place a leveraged perpetual order on Kalshi.
+
+        ⚠️ The /perp/orders endpoint and payload structure need verification.
+        Adjust ``path`` and ``payload`` once you have the official API spec.
+        """
+        payload: dict[str, Any] = {
+            "ticker": ticker,
+            "side": side.lower(),
+            "size_usd": round(size_usd, 2),
+            "leverage": round(leverage, 2),
+            "client_order_id": client_order_id or str(uuid.uuid4()),
+            "type": "market",
+        }
+        self.logger.info(
+            "Kalshi perp order: %s %s size=$%.2f leverage=%.1fx",
+            side, ticker, size_usd, leverage,
+        )
+        result = self._post("/perp/orders", payload)
+        self.logger.info("Kalshi perp order result: %s", json.dumps(result, indent=2))
+        return result
+
+    def close_perp_position(self, ticker: str, close_side: str) -> dict[str, Any]:
+        """Close an open perpetual position by placing a reverse order at market.
+
+        ⚠️ Adjust the endpoint/payload once the official Kalshi Perps API is confirmed.
+        """
+        payload: dict[str, Any] = {
+            "ticker": ticker,
+            "side": close_side.lower(),
+            "type": "market",
+            "client_order_id": str(uuid.uuid4()),
+        }
+        self.logger.info("Closing perp %s (side=%s)", ticker, close_side)
+        return self._post("/perp/orders", payload)

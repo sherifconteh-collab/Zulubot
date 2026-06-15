@@ -43,11 +43,13 @@ class MarkovRegimeStrategy:
         binance_client: BinanceFuturesClient | None = None,
         coinbase_broker: CoinbaseBroker | None = None,
         logger: logging.Logger,
+        protected_symbols: frozenset[str] = frozenset(),
     ) -> None:
         self.config = config
         self.coinbase_client = coinbase_client
         self.binance_client = binance_client
         self.coinbase_broker = coinbase_broker
+        self.protected_symbols = protected_symbols
         self.logger = logger.getChild("markov_regime")
 
     # ------------------------------------------------------------------ #
@@ -326,6 +328,9 @@ class MarkovRegimeStrategy:
             return just_closed
 
         for symbol in list(self.config.symbols):
+            bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+            if symbol in self.protected_symbols or bare in self.protected_symbols:
+                continue
             position = state.positions.get(symbol)
             if position is None or position.strategy != _STRATEGY_NAME:
                 continue
@@ -372,6 +377,10 @@ class MarkovRegimeStrategy:
         decisions: list[dict[str, Any]],
     ) -> None:
         for symbol in list(self.config.symbols):
+            bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+            if symbol in self.protected_symbols or bare in self.protected_symbols:
+                self.logger.info("Protected: skipping %s close (%s).", symbol, reason)
+                continue
             position = state.positions.get(symbol)
             if position is None or position.strategy != _STRATEGY_NAME:
                 continue
