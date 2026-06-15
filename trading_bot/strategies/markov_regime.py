@@ -328,7 +328,8 @@ class MarkovRegimeStrategy:
             return just_closed
 
         for symbol in list(self.config.symbols):
-            if symbol in self.protected_symbols:
+            bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+            if symbol in self.protected_symbols or bare in self.protected_symbols:
                 continue
             position = state.positions.get(symbol)
             if position is None or position.strategy != _STRATEGY_NAME:
@@ -376,7 +377,8 @@ class MarkovRegimeStrategy:
         decisions: list[dict[str, Any]],
     ) -> None:
         for symbol in list(self.config.symbols):
-            if symbol in self.protected_symbols:
+            bare = symbol.replace("USDT", "").replace("USD", "").replace("-", "")
+            if symbol in self.protected_symbols or bare in self.protected_symbols:
                 self.logger.info("Protected: skipping %s close (%s).", symbol, reason)
                 continue
             position = state.positions.get(symbol)
