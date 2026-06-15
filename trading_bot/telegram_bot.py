@@ -645,6 +645,7 @@ class TradingTelegramBot:
             "polymarket": self._cmd_polymarket,
             "rotation": self._cmd_rotation,
             "predict": self._cmd_predictions,
+            "perps": self._cmd_kalshi_perps,
             "backtest": self._cmd_backtest,
             "ai": self._cmd_ai,
             "history": self._cmd_history,
@@ -679,7 +680,7 @@ class TradingTelegramBot:
             "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
-            "/crypto /stocks /rotation /predict /polymarket /btc5min /markov /options\n"
+            "/crypto /stocks /rotation /predict /perps /polymarket /btc5min /markov /options\n"
             "/backtest [range]\n"
             "\n"
             "<b>Control</b>\n"
@@ -943,6 +944,19 @@ class TradingTelegramBot:
             return
         try:
             result = self._service.run("predictions")
+            result["force_send"] = True
+            await self.send_trade_alert(result)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_kalshi_perps(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            result = await asyncio.to_thread(self._service.run, "kalshi_perps")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:

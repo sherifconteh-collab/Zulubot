@@ -436,6 +436,25 @@ class PredictionConfig:
 
 
 @dataclass(frozen=True)
+class KalshiPerpetualsConfig:
+    """Configuration for the Kalshi Crypto Perpetuals strategy."""
+
+    enabled: bool = False
+    symbols: list[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP"])
+    max_leverage: float = 2.0
+    take_profit_pct: float = 0.05
+    stop_loss_pct: float = 0.03
+    trailing_stop_pct: float = 0.0
+    max_positions: int = 4
+    capital_allocation_pct: float = 0.20
+    check_interval_minutes: int = 15
+    momentum_window_minutes: int = 60
+    momentum_threshold_pct: float = 0.02
+    min_volume_usd: float = 100_000.0
+    min_trade_usd: float = 10.0
+
+
+@dataclass(frozen=True)
 class FreqtradeConfig:
     enabled: bool = False
     api_server_port: int = 8080
@@ -526,6 +545,8 @@ class AppConfig:
     markov: MarkovStrategyConfig
     robinhood: RobinhoodConfig
     options: OptionsStrategyConfig
+    kalshi_perps: KalshiPerpetualsConfig
+    protected_symbols: frozenset[str]
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -801,5 +822,25 @@ class AppConfig:
                 min_volume=_env_int("OPTIONS_MIN_VOLUME", 100),
                 min_open_interest=_env_int("OPTIONS_MIN_OPEN_INTEREST", 500),
                 max_iv=_env_float("OPTIONS_MAX_IV", 1.50),
+            ),
+            kalshi_perps=KalshiPerpetualsConfig(
+                enabled=_env_bool("KALSHI_PERP_ENABLED", False),
+                symbols=_env_list("KALSHI_PERP_SYMBOLS", ["BTC", "ETH", "SOL", "XRP"]),
+                max_leverage=_env_float("KALSHI_PERP_MAX_LEVERAGE", 2.0),
+                take_profit_pct=_env_float("KALSHI_PERP_TAKE_PROFIT_PCT", 0.05),
+                stop_loss_pct=_env_float("KALSHI_PERP_STOP_LOSS_PCT", 0.03),
+                trailing_stop_pct=_env_float("KALSHI_PERP_TRAILING_STOP_PCT", 0.0),
+                max_positions=_env_int("KALSHI_PERP_MAX_POSITIONS", 4),
+                capital_allocation_pct=_env_float("KALSHI_PERP_CAPITAL_PCT", 0.20),
+                check_interval_minutes=_env_int("KALSHI_PERP_INTERVAL_MINUTES", 15),
+                momentum_window_minutes=_env_int("KALSHI_PERP_MOMENTUM_WINDOW_MINUTES", 60),
+                momentum_threshold_pct=_env_float("KALSHI_PERP_MOMENTUM_THRESHOLD_PCT", 0.02),
+                min_volume_usd=_env_float("KALSHI_PERP_MIN_VOLUME_USD", 100_000.0),
+                min_trade_usd=_env_float("KALSHI_PERP_MIN_TRADE_USD", 10.0),
+            ),
+            protected_symbols=frozenset(
+                s.strip().upper()
+                for s in os.getenv("PROTECTED_SYMBOLS", "").split(",")
+                if s.strip()
             ),
         )

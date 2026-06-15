@@ -34,6 +34,7 @@ from trading_bot.strategies.latency_arb import LatencyArbStrategy
 from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
 from trading_bot.strategies.options import OptionsStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
+from trading_bot.strategies.kalshi_perpetuals import KalshiPerpetualsStrategy
 from trading_bot.strategies.stocks import StockValueStrategy
 
 try:
@@ -160,6 +161,7 @@ class TradingBotService:
             ai_service=self.ai_service,
             confirmation_mode=config.trading_agents.confirmation_mode,
             learning_config=config.learning,
+            protected_symbols=config.protected_symbols,
         )
 
         # Polymarket clients and strategy (conditional on enabled)
@@ -193,6 +195,7 @@ class TradingBotService:
             logger=logger,
             ai_service=self.ai_service,
             confirmation_mode=config.trading_agents.confirmation_mode,
+            protected_symbols=config.protected_symbols,
         )
 
         # Kalshi prediction markets strategy
@@ -210,6 +213,15 @@ class TradingBotService:
             ai_service=self.ai_service,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
             learning_config=config.learning,
+        )
+
+        # Kalshi Crypto Perpetuals strategy
+        self.kalshi_perps_strategy = KalshiPerpetualsStrategy(
+            config=config.kalshi_perps,
+            kalshi_client=self.kalshi_client,
+            protected_symbols=config.protected_symbols,
+            logger=logger,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
@@ -236,6 +248,7 @@ class TradingBotService:
             binance_client=self.binance_client,
             coinbase_broker=self.coinbase_broker,
             logger=logger,
+            protected_symbols=config.protected_symbols,
         )
 
         # Robinhood client + options strategy
@@ -364,6 +377,16 @@ class TradingBotService:
             module_results["predictions"] = self._run_module(
                 "predictions",
                 lambda: self.prediction_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        if command in {"kalshi_perps", "all"} and self.config.kalshi_perps.enabled:
+            module_results["kalshi_perps"] = self._run_module(
+                "kalshi_perps",
+                lambda: self.kalshi_perps_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
