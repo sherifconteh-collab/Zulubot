@@ -132,11 +132,58 @@ class LeverageAppliedTests(unittest.TestCase):
             state, broker, market, "BTC", "long", 100.0, 500.0, 2.0, _NOW
         )
 
+        # Cash debit is margin-only (size_usd), not leverage-scaled: leveraging
+        # the notional here would lock up leverage_x the intended capital,
+        # since broker.open_position couples quantity to the cash debited.
         pos_key = "KP:KXBTCPERP-T1:LONG"
         position = state.positions[pos_key]
-        # size_usd=500, leverage=2.0 -> notional=1000 -> quantity=10
-        self.assertAlmostEqual(position.quantity, 10.0, places=4)
-        self.assertAlmostEqual(state.cash, 99_000.0, places=2)
+        self.assertAlmostEqual(position.quantity, 5.0, places=4)
+        self.assertAlmostEqual(state.cash, 99_500.0, places=2)
+
+    def test_leverage_scales_marked_pnl_not_quantity(self) -> None:
+        state = _make_state(cash=100_000.0)
+        broker = PaperBroker(True, logging.getLogger("test_broker"))
+        strategy = _make_strategy()
+        market = {"ticker": "KXBTCPERP-T1", "_symbol": "BTC", "_price": 100.0}
+
+        strategy._open_position(
+            state, broker, market, "BTC", "long", 100.0, 500.0, 2.0, _NOW
+        )
+
+        # +10% move with 2x leverage should produce PnL of margin * leverage *
+        # move_pct = 500 * 2 * 0.10 = $100, applied via a synthetic mark price
+        # (quantity itself is unlevered so the margin-only cash debit stays
+        # consistent with the position's market value).
+        adverse_markets = [{"ticker": "KXBTCPERP-T1", "_price": 110.0}]
+        closes = strategy._manage_positions(state, broker, adverse_markets, _NOW)
+
+        self.assertEqual(closes, [])
+        position = state.positions["KP:KXBTCPERP-T1:LONG"]
+        self.assertAlmostEqual(position.unrealized_pnl, 100.0, places=2)
+
+
+class LiveModeEquityBucketTests(unittest.TestCase):
+    def test_live_allocation_uses_kalshi_bucket_equity_not_whole_account(self) -> None:
+        # Large non-Kalshi balance in state.cash; small funded Kalshi bucket.
+        state = _make_state(cash=1_000_000.0)
+        state.cash_reserves["kalshi"] = 1_000.0
+        broker = PaperBroker(True, logging.getLogger("test_broker"))
+        config = _make_config(capital_allocation_pct=0.20, max_positions=1)
+        strategy = KalshiPerpetualsStrategy(
+            config=config,
+            kalshi_client=MagicMock(),
+            logger=logging.getLogger("test_kalshi_perps_live"),
+            live_trading_enabled=True,
+        )
+        strategy.kalshi_client.place_perp_order.return_value = {}
+        markets = [{"ticker": "KXBTCPERP-T1", "_symbol": "BTC", "_price": 100.0, "_max_leverage": 1.0}]
+
+        with patch.object(strategy, "_evaluate_signal", return_value=("long", 1.0)):
+            opens = strategy._scan_for_entries(state, broker, markets, _NOW)
+
+        # 20% of the $1,000 Kalshi bucket (not the $1,000,000 whole account)
+        self.assertEqual(len(opens), 1)
+        self.assertAlmostEqual(opens[0]["notional_usd"], 200.0, places=2)
 
 
 class PerpSeriesTickerTests(unittest.TestCase):

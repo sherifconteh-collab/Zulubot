@@ -231,15 +231,18 @@ class KalshiPerpetualsStrategy:
             # PnL from our perspective
             if side == "long":
                 move_pct = (current_price - entry_price) / entry_price
-                mark_price = current_price
             else:
                 move_pct = (entry_price - current_price) / entry_price
-                # broker.Position has no short semantics (unrealized_pnl and
-                # market_value assume price rising = gain), so mark with a
-                # synthetic price that encodes our actual short PnL direction —
-                # the same trick used in _close_position for the real close.
-                mark_price = entry_price * (1 + move_pct)
 
+            # broker.Position has no short or leverage semantics (unrealized_pnl
+            # and market_value are plain quantity * price), so mark with a
+            # synthetic price that encodes our actual leveraged PnL direction —
+            # the same trick used in _close_position for the real close. Cash
+            # was only debited the margin amount on open, so quantity reflects
+            # margin/price, not leveraged exposure; the synthetic price makes
+            # up the difference.
+            leverage = meta.get("leverage", 1.0)
+            mark_price = entry_price * (1 + leverage * move_pct)
             broker.mark_positions(state, {pos_key: mark_price}, now=now)
 
             # Update high-water-mark for trailing stop
@@ -290,13 +293,15 @@ class KalshiPerpetualsStrategy:
                 self.logger.error("Live close failed for perp %s: %s", ticker, exc)
                 return None
 
-        # For paper broker PnL: map short gain to a synthetic close price so
-        # broker.close_position computes (close_price - entry_price) * qty correctly.
+        # For paper broker PnL: map short/leveraged gain to a synthetic close
+        # price so broker.close_position computes (close_price - entry_price)
+        # * qty correctly (see the matching comment in _manage_positions).
+        leverage = (position.meta or {}).get("leverage", 1.0)
         if side == "long":
-            broker_close_price = current_price
+            pnl_pct = (current_price - entry_price) / entry_price
         else:
-            short_pnl_pct = (entry_price - current_price) / entry_price
-            broker_close_price = entry_price * (1 + short_pnl_pct)
+            pnl_pct = (entry_price - current_price) / entry_price
+        broker_close_price = entry_price * (1 + leverage * pnl_pct)
 
         broker.close_position(state, symbol=pos_key, price=broker_close_price, reason=reason)
         self.logger.info(
@@ -336,13 +341,20 @@ class KalshiPerpetualsStrategy:
         if slots <= 0:
             return opens
 
-        # In paper mode the kalshi cash reserve isn't populated; fall back to main cash.
+        # In live mode, size relative to the Kalshi-bucket's own equity (cash +
+        # its open positions) — using whole-account equity here would let a
+        # large non-Kalshi balance make capital_allocation_pct exceed the
+        # entire Kalshi bucket via the min() below, silently defeating the cap.
+        # In paper mode there's no real per-venue bucket; kalshi_cash falls
+        # back to the shared state.cash, so whole-account equity is consistent.
         if self.live_trading_enabled:
             kalshi_cash = state.cash_reserves.get(_CASH_BUCKET, 0.0)
+            equity_basis = broker.portfolio_equity_for_bucket(state, cash_bucket=_CASH_BUCKET)
         else:
             kalshi_cash = state.cash
+            equity_basis = broker.portfolio_equity(state)
         total_budget = min(
-            broker.portfolio_equity(state) * self.config.capital_allocation_pct,
+            equity_basis * self.config.capital_allocation_pct,
             kalshi_cash,
         )
         per_slot = total_budget / slots if slots > 0 else 0.0
@@ -434,17 +446,18 @@ class KalshiPerpetualsStrategy:
                 self.logger.error("Live open failed for perp %s %s: %s", side, ticker, exc)
                 return None
 
-        # Apply leverage to the paper notional so simulated exposure (and thus
-        # PnL) scales with leverage the way the live perp position would.
-        notional_usd = size_usd * leverage
-
+        # Debit only the margin (size_usd) from cash — broker.open_position
+        # couples quantity to the cash debited, so leveraging the notional
+        # here would lock up leverage_x the intended capital. Leveraged
+        # exposure/PnL is instead applied via a synthetic mark/close price
+        # (see _manage_positions / _close_position).
         broker.open_position(
             state,
             symbol=pos_key,
             asset_type=_ASSET_TYPE,
             strategy=_STRATEGY_NAME,
             price=price,
-            notional=notional_usd,
+            notional=size_usd,
             opened_at=now,
             cash_bucket=cash_bucket,
             meta={
