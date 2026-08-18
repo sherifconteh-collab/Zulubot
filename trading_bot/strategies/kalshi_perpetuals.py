@@ -32,6 +32,7 @@ from trading_bot.risk import RiskManager
 _STRATEGY_NAME = "kalshi_perps"
 _ASSET_TYPE = "perp"
 _CASH_BUCKET = "kalshi"
+_LIQUIDATION_MOVE_PCT = -1.0  # 100% of margin lost = wiped out
 
 
 class KalshiPerpetualsStrategy:
@@ -164,6 +165,27 @@ class KalshiPerpetualsStrategy:
         return self.config.max_leverage
 
     # ------------------------------------------------------------------ #
+    # Leveraged/short PnL representation                                   #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _synthetic_price(entry_price: float, leveraged_move_pct: float) -> float:
+        """Encode leveraged/short PnL as a price broker.Position can consume.
+
+        broker.Position has no leverage or short semantics — unrealized_pnl
+        and market_value are plain (price - entry_price) * quantity — so we
+        fabricate a price whose plain-long PnL matches our actual leveraged
+        PnL. Clamped so a position can never be marked/closed past a total
+        loss of the margin committed: a raw ``entry_price * (1 + move)``
+        would hit zero or go negative for a big enough adverse move (move
+        <= -1/leverage), which PaperBroker.mark_positions silently ignores
+        (leaving stale PnL) and which close_position would otherwise turn
+        into a negative-price, unbounded-loss close.
+        """
+        floor = -1.0 + 1e-6
+        return entry_price * (1 + max(leveraged_move_pct, floor))
+
+    # ------------------------------------------------------------------ #
     # Price history + momentum                                             #
     # ------------------------------------------------------------------ #
 
@@ -242,7 +264,8 @@ class KalshiPerpetualsStrategy:
             # margin/price, not leveraged exposure; the synthetic price makes
             # up the difference.
             leverage = meta.get("leverage", 1.0)
-            mark_price = entry_price * (1 + leverage * move_pct)
+            leveraged_move = leverage * move_pct
+            mark_price = self._synthetic_price(entry_price, leveraged_move)
             broker.mark_positions(state, {pos_key: mark_price}, now=now)
 
             # Update high-water-mark for trailing stop
@@ -255,7 +278,14 @@ class KalshiPerpetualsStrategy:
             tp = self.config.take_profit_pct
             sl = self.config.stop_loss_pct
             ts = self.config.trailing_stop_pct
-            if tp > 0 and move_pct >= tp:
+            if leveraged_move <= _LIQUIDATION_MOVE_PCT:
+                # Adverse move wiped out the margin (>= 100% leveraged loss) —
+                # force-close regardless of configured tp/sl so we never carry
+                # a position whose synthetic price has been clamped to the
+                # near-zero floor (stale/pinned PnL) or feed a non-positive
+                # price into close_position.
+                reason = "liquidation"
+            elif tp > 0 and move_pct >= tp:
                 reason = "take_profit"
             elif sl > 0 and move_pct <= -sl:
                 reason = "stop_loss"
@@ -301,7 +331,7 @@ class KalshiPerpetualsStrategy:
             pnl_pct = (current_price - entry_price) / entry_price
         else:
             pnl_pct = (entry_price - current_price) / entry_price
-        broker_close_price = entry_price * (1 + leverage * pnl_pct)
+        broker_close_price = self._synthetic_price(entry_price, leverage * pnl_pct)
 
         broker.close_position(state, symbol=pos_key, price=broker_close_price, reason=reason)
         self.logger.info(

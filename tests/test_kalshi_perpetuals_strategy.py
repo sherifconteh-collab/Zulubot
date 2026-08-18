@@ -121,6 +121,40 @@ class ShortMarkToMarketTests(unittest.TestCase):
         self.assertLess(position.unrealized_pnl, 0.0)
 
 
+class LiquidationClampTests(unittest.TestCase):
+    def test_wipeout_move_force_closes_instead_of_negative_price(self) -> None:
+        state = _make_state(cash=100_000.0)
+        broker = PaperBroker(True, logging.getLogger("test_broker"))
+        # Disable the configured stop/take-profit/trailing thresholds so only
+        # the liquidation floor can trigger a close.
+        config = _make_config(stop_loss_pct=0.0, take_profit_pct=0.0, trailing_stop_pct=0.0)
+        strategy = KalshiPerpetualsStrategy(
+            config=config,
+            kalshi_client=MagicMock(),
+            logger=logging.getLogger("test_kalshi_perps_liq"),
+            live_trading_enabled=False,
+        )
+        market = {"ticker": "KXBTCPERP-T1", "_symbol": "BTC", "_price": 100.0}
+
+        # leverage=6x, margin=$500 -> a -20% raw move is a -120% leveraged
+        # move, past total loss of margin. A naive entry_price*(1+move)
+        # synthetic price would be negative here.
+        strategy._open_position(
+            state, broker, market, "BTC", "long", 100.0, 500.0, 6.0, _NOW
+        )
+        pos_key = "KP:KXBTCPERP-T1:LONG"
+
+        wipeout_markets = [{"ticker": "KXBTCPERP-T1", "_price": 80.0}]
+        closes = strategy._manage_positions(state, broker, wipeout_markets, _NOW)
+
+        self.assertEqual(len(closes), 1)
+        self.assertEqual(closes[0]["reason"], "liquidation")
+        self.assertNotIn(pos_key, state.positions)
+        # Lost ~all of the $500 margin, but cash never went negative/runaway.
+        self.assertGreater(state.cash, 99_499.0)
+        self.assertLess(state.cash, 99_500.5)
+
+
 class LeverageAppliedTests(unittest.TestCase):
     def test_leverage_scales_paper_notional(self) -> None:
         state = _make_state(cash=100_000.0)
