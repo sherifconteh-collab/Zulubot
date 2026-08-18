@@ -228,14 +228,19 @@ class KalshiPerpetualsStrategy:
             if current_price <= 0:
                 continue
 
-            # Update paper position price (long semantics; short PnL tracked separately)
-            broker.mark_positions(state, {pos_key: current_price}, now=now)
-
             # PnL from our perspective
             if side == "long":
                 move_pct = (current_price - entry_price) / entry_price
+                mark_price = current_price
             else:
                 move_pct = (entry_price - current_price) / entry_price
+                # broker.Position has no short semantics (unrealized_pnl and
+                # market_value assume price rising = gain), so mark with a
+                # synthetic price that encodes our actual short PnL direction —
+                # the same trick used in _close_position for the real close.
+                mark_price = entry_price * (1 + move_pct)
+
+            broker.mark_positions(state, {pos_key: mark_price}, now=now)
 
             # Update high-water-mark for trailing stop
             hwm = meta.get("hwm", 0.0)
@@ -337,7 +342,7 @@ class KalshiPerpetualsStrategy:
         else:
             kalshi_cash = state.cash
         total_budget = min(
-            state.equity * self.config.capital_allocation_pct,
+            broker.portfolio_equity(state) * self.config.capital_allocation_pct,
             kalshi_cash,
         )
         per_slot = total_budget / slots if slots > 0 else 0.0
@@ -414,6 +419,7 @@ class KalshiPerpetualsStrategy:
     ) -> dict[str, Any] | None:
         ticker = market.get("ticker", "")
         pos_key = f"KP:{ticker}:{side.upper()}"
+        cash_bucket = _CASH_BUCKET if self.live_trading_enabled else None
 
         if self.live_trading_enabled:
             try:
@@ -428,15 +434,19 @@ class KalshiPerpetualsStrategy:
                 self.logger.error("Live open failed for perp %s %s: %s", side, ticker, exc)
                 return None
 
+        # Apply leverage to the paper notional so simulated exposure (and thus
+        # PnL) scales with leverage the way the live perp position would.
+        notional_usd = size_usd * leverage
+
         broker.open_position(
             state,
             symbol=pos_key,
             asset_type=_ASSET_TYPE,
             strategy=_STRATEGY_NAME,
             price=price,
-            notional=size_usd,
+            notional=notional_usd,
             opened_at=now,
-            cash_bucket=_CASH_BUCKET if self.live_trading_enabled else None,
+            cash_bucket=cash_bucket,
             meta={
                 "ticker": ticker,
                 "symbol": symbol,
@@ -445,7 +455,7 @@ class KalshiPerpetualsStrategy:
                 "entry_price": price,
                 "hwm": 0.0,
                 "venue": "kalshi",
-                "cash_bucket": _CASH_BUCKET,
+                "cash_bucket": cash_bucket,
             },
         )
         self.logger.info(
