@@ -220,6 +220,40 @@ class LiveModeEquityBucketTests(unittest.TestCase):
         self.assertAlmostEqual(opens[0]["notional_usd"], 200.0, places=2)
 
 
+class BudgetAcrossScansTests(unittest.TestCase):
+    def test_repeated_scans_respect_total_allocation_cap(self) -> None:
+        state = _make_state(cash=10_000.0)
+        broker = PaperBroker(True, logging.getLogger("test_broker"))
+        config = _make_config(capital_allocation_pct=0.20, max_positions=4, max_leverage=1.0)
+        strategy = KalshiPerpetualsStrategy(
+            config=config,
+            kalshi_client=MagicMock(),
+            logger=logging.getLogger("test_kalshi_perps_budget"),
+            live_trading_enabled=False,
+        )
+        symbols = ["BTC", "ETH", "SOL", "XRP"]
+
+        # Simulate one symbol signaling per scan, across 4 separate scans —
+        # each scan re-derives the budget from scratch, so it must subtract
+        # margin already committed by earlier scans' positions.
+        with patch.object(strategy, "_evaluate_signal", return_value=("long", 1.0)):
+            for symbol in symbols:
+                markets = [
+                    {"ticker": f"KX{symbol}PERP-T1", "_symbol": symbol, "_price": 100.0, "_max_leverage": 1.0}
+                ]
+                strategy._scan_for_entries(state, broker, markets, _NOW)
+
+        total_committed = sum(
+            pos.quantity * pos.entry_price
+            for pos in state.positions.values()
+            if pos.strategy == "kalshi_perps"
+        )
+        # 20% of the original $10,000 equity — not the ~42% you get from
+        # re-deriving the full budget every scan and dividing only by the
+        # shrinking remaining-slots count.
+        self.assertLessEqual(total_committed, 2_000.0 + 1e-6)
+
+
 class PerpSeriesTickerTests(unittest.TestCase):
     def test_shib_series_ticker_matches_naming_convention(self) -> None:
         self.assertEqual(PERP_SERIES["SHIB"], "KXSHIBPERP")

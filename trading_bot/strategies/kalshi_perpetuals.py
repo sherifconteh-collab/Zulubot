@@ -359,14 +359,18 @@ class KalshiPerpetualsStrategy:
         now: datetime,
     ) -> list[dict[str, Any]]:
         opens: list[dict[str, Any]] = []
-        open_symbols: set[str] = {
-            (pos.meta or {}).get("symbol", "").upper()
-            for pos in state.positions.values()
-            if pos.strategy == _STRATEGY_NAME
-        }
-        existing_count = sum(
-            1 for pos in state.positions.values() if pos.strategy == _STRATEGY_NAME
-        )
+        open_symbols: set[str] = set()
+        existing_count = 0
+        existing_committed = 0.0
+        for pos in state.positions.values():
+            if pos.strategy != _STRATEGY_NAME:
+                continue
+            open_symbols.add((pos.meta or {}).get("symbol", "").upper())
+            existing_count += 1
+            # quantity * entry_price is the margin actually debited on open
+            # (see _open_position — cash is only ever debited the margin
+            # amount, never the leveraged notional).
+            existing_committed += pos.quantity * pos.entry_price
         slots = self.config.max_positions - existing_count
         if slots <= 0:
             return opens
@@ -383,10 +387,15 @@ class KalshiPerpetualsStrategy:
         else:
             kalshi_cash = state.cash
             equity_basis = broker.portfolio_equity(state)
-        total_budget = min(
-            equity_basis * self.config.capital_allocation_pct,
-            kalshi_cash,
-        )
+        # Subtract margin already committed to open kalshi_perps positions so
+        # capital_allocation_pct caps total exposure across scans. Without
+        # this, re-deriving the full budget every scan and dividing only by
+        # the *remaining* slots lets cumulative spend blow well past the cap
+        # as slots fill up (e.g. 5% + 6.7% + 10% + 20% = ~42% over 4 scans
+        # for a 20%/4-slot config, instead of 20% total).
+        target_budget = equity_basis * self.config.capital_allocation_pct
+        remaining_budget = max(target_budget - existing_committed, 0.0)
+        total_budget = min(remaining_budget, kalshi_cash)
         per_slot = total_budget / slots if slots > 0 else 0.0
         if per_slot < self.config.min_trade_usd:
             return opens
