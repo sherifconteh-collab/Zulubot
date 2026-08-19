@@ -42,7 +42,7 @@ PERP_SERIES: dict[str, str] = {
     "LINK": "KXLINKPERP",
     "BCH":  "KXBCHPERP",
     "HYPE": "KXHYPEPERP",
-    "SHIB": "KXKSHIBPERP",
+    "SHIB": "KXSHIBPERP",
 }
 
 
