@@ -8,7 +8,8 @@ Strategy overview
 3. For each matched game build a win-probability estimate by blending:
      * the vig-free sportsbook moneyline ESPN shows for the game,
      * ESPN's own matchup predictor,
-     * a log5 team-record model with a home-field prior.
+     * a log5 team-record model with a home-field prior (only when no
+       sportsbook line exists, since the line already prices records).
 4. Compare the estimate to Kalshi's ask on both YES and NO. Bet only when the
    edge clears ``min_edge_pct`` and every sanity filter passes.
 5. Size with fractional Kelly, capped per bet and in total sports exposure.
@@ -22,8 +23,9 @@ Notes
 -----
 * Two-way model only: leagues where a draw is possible (soccer) are not
   supported by the default series map.
-* Sportsbook lines are the sharpest public input; records alone are not
-  enough to beat Kalshi's price, so ``require_market_signal`` defaults on.
+* Sportsbook lines are the sharpest public input; ESPN's predictor and team
+  records alone are not enough to beat Kalshi's price, so
+  ``require_market_signal`` (a sportsbook line is mandatory) defaults on.
 """
 
 from __future__ import annotations
@@ -76,13 +78,31 @@ def _event_code(event_ticker: str) -> str:
     return m.group(1) if m else ""
 
 
+def _parse_iso(raw: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _game_time_fits(market: dict[str, Any], game: EspnGame) -> bool:
+    """True when the market's expected expiry is 0-10h after the game's start."""
+    expiry = _parse_iso(market.get("expected_expiration_time") or market.get("occurrence_datetime"))
+    if expiry is None:
+        return False
+    return 0 <= (expiry - game.start_time).total_seconds() <= 10 * 3600
+
+
 def match_market_to_game(
     market: dict[str, Any],
     games: list[EspnGame],
 ) -> tuple[EspnGame, str] | None:
     """Return (game, "home"|"away") for the team a market's YES side backs.
 
-    Returns None when the market cannot be matched to exactly one game and one team.
+    Kalshi titles are just "<Team> wins", so games are matched by the team
+    abbreviations in the event ticker ("...-26OCT12BUFLAR") or, failing that,
+    by the YES team's name plus kickoff/expiry timing.
+    Returns None when the market cannot be matched to exactly one game and team.
     """
     ticker = str(market.get("ticker", "")).upper()
     event_ticker = str(market.get("event_ticker", "")).upper()
@@ -92,16 +112,31 @@ def match_market_to_game(
     ).lower()
     code = _event_code(event_ticker)
 
-    hits: list[EspnGame] = []
-    for game in games:
-        by_name = _team_in_text(game.home, blob) and _team_in_text(game.away, blob)
-        h, a = game.home.abbreviation, game.away.abbreviation
-        by_code = bool(code) and h and a and code in (a + h, h + a)
-        if by_name or by_code:
-            hits.append(game)
-    if len(hits) != 1:
+    def hits(predicate) -> list[EspnGame]:
+        return [g for g in games if predicate(g)]
+
+    def by_code(g: EspnGame) -> bool:
+        h, a = g.home.abbreviation, g.away.abbreviation
+        return bool(code and h and a and code in (a + h, h + a))
+
+    def by_both_names(g: EspnGame) -> bool:
+        return _team_in_text(g.home, blob) and _team_in_text(g.away, blob)
+
+    def by_yes_team_and_time(g: EspnGame) -> bool:
+        return bool(yes_sub) and (
+            _team_in_text(g.home, yes_sub) or _team_in_text(g.away, yes_sub)
+        ) and _game_time_fits(market, g)
+
+    found: list[EspnGame] = []
+    for predicate in (by_code, by_both_names, by_yes_team_and_time):
+        found = hits(predicate)
+        if len(found) > 1:  # e.g. consecutive series games: use kickoff/expiry timing
+            found = [g for g in found if _game_time_fits(market, g)]
+        if found:
+            break
+    if len(found) != 1:
         return None
-    game = hits[0]
+    game = found[0]
 
     home_hit = _team_in_text(game.home, yes_sub) if yes_sub else False
     away_hit = _team_in_text(game.away, yes_sub) if yes_sub else False
@@ -170,12 +205,18 @@ def estimate_home_win_prob(
     if game.predictor_home_prob is not None:
         components["espn_predictor"] = game.predictor_home_prob
         weights["espn_predictor"] = config.weight_espn_predictor
-    rec = record_home_prob(game, config.home_advantage)
-    if rec is not None:
-        components["record"] = rec
-        weights["record"] = config.weight_record
+    # Records are already priced into a sportsbook line; blending them in would only
+    # shrink a sharp number toward .500 and manufacture fake edges on underdogs.
+    # They are a fallback for games with no line.
+    if book is None:
+        rec = record_home_prob(game, config.home_advantage)
+        if rec is not None:
+            components["record"] = rec
+            weights["record"] = config.weight_record
 
-    if config.require_market_signal and "sportsbook" not in components and "espn_predictor" not in components:
+    # ESPN's predictor and records are not sharper than Kalshi's own price; only a
+    # sportsbook line is a credible independent reference to bet against.
+    if config.require_market_signal and "sportsbook" not in components:
         return None
     total_weight = sum(weights.values())
     if not components or total_weight <= 0:
@@ -279,12 +320,20 @@ class KalshiSportsStrategy:
         return mapping
 
     def _fetch_games(self, league: str, now: datetime) -> list[EspnGame]:
-        end = now + timedelta(hours=self.config.max_hours_ahead)
-        # Query a day either side of UTC so late-evening US games aren't clipped.
-        dates = f"{(now - timedelta(days=1)):%Y%m%d}-{(end + timedelta(days=1)):%Y%m%d}"
-        games = self.espn.get_scoreboard(league, date=dates)
-        unique = {g.game_id: g for g in games}
-        return list(unique.values())
+        """Scoreboard for each day in the window (ESPN rejects multi-day ranges)."""
+        days = math.ceil(self.config.max_hours_ahead / 24.0) + 1
+        games: dict[str, EspnGame] = {}
+        errors: list[Exception] = []
+        for offset in range(days + 1):
+            day = f"{now + timedelta(days=offset):%Y%m%d}"
+            try:
+                for game in self.espn.get_scoreboard(league, date=day):
+                    games[game.game_id] = game
+            except Exception as exc:
+                errors.append(exc)
+        if errors and not games:
+            raise errors[0]
+        return list(games.values())
 
     def _fetch_markets(self, series: str) -> list[dict[str, Any]]:
         markets: list[dict[str, Any]] = []
@@ -345,6 +394,13 @@ class KalshiSportsStrategy:
                 if current is None or evaluation["edge"] > current["edge"]:
                     best_per_game[key] = evaluation
 
+        # Both team markets of a game yield the same pick; keep the better one for display.
+        unique: dict[tuple[str, str], dict[str, Any]] = {}
+        for pred in result["predictions"]:
+            key = (pred["league"], pred["game"], pred["start"])
+            if key not in unique or pred["edge"] > unique[key]["edge"]:
+                unique[key] = pred
+        result["predictions"] = sorted(unique.values(), key=lambda p: p["edge"], reverse=True)
         return sorted(best_per_game.values(), key=lambda c: c["edge"], reverse=True)
 
     def _evaluate_market(
@@ -396,7 +452,7 @@ class KalshiSportsStrategy:
         prediction.update({"pick": pick_team.display_name, "side": side, "edge": round(edge, 4)})
         result["predictions"].append(prediction)
 
-        volume = int(float(market.get("volume", 0) or 0))
+        volume = int(float(market.get("volume_fp") or market.get("volume") or 0))
         reason = None
         if edge < cfg.min_edge_pct:
             reason = "edge_below_min"

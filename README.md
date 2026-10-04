@@ -582,8 +582,8 @@ python -m unittest discover -s tests -p "test_*.py"
 Each cycle (default 30 min) it:
 1. Pulls upcoming games from ESPN (schedule, records, sportsbook moneylines, ESPN's matchup predictor).
 2. Matches open Kalshi markets to those games and teams.
-3. Blends vig-free sportsbook odds (60%), ESPN's predictor (25%) and a log5 records model with home-field prior (15%) into a win probability.
+3. Builds a win probability from the vig-free sportsbook line (60%) blended with ESPN's matchup predictor (25%). Games with no sportsbook line are skipped by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`); a log5 records model is only a fallback when that guard is turned off.
 4. Buys YES or NO only when `model probability - ask >= KALSHI_SPORTS_MIN_EDGE`, subject to liquidity/spread/price filters, one bet per game, fractional-Kelly sizing, a per-bet cap and a total exposure cap.
 5. Holds to settlement and closes at $1/$0 when Kalshi resolves the market.
 
-Telegram: `/sports` runs a scan and shows the top model picks with edge. The series tickers in `clients_espn.DEFAULT_KALSHI_SERIES` and the ESPN JSON shapes were written from public documentation, not verified against live responses; check them with a paper run (and `KALSHI_SPORTS_SERIES` if a series name differs) before going live. Soccer is unsupported (three-way outcomes). Sports betting carries real risk of loss; a positive modelled edge is not a guarantee.
+Telegram: `/sports` runs a scan and shows the top model picks with edge. Verified against live ESPN and Kalshi responses (NFL/NBA/MLB/NHL series tickers and payload shapes) on 2026-10-04; if Kalshi renames a series, override it with `KALSHI_SPORTS_SERIES`. Soccer is unsupported (three-way outcomes). Sports betting carries real risk of loss; a positive modelled edge is not a guarantee.

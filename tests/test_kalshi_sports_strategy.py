@@ -125,8 +125,22 @@ class MathTests(unittest.TestCase):
     def test_blend_uses_sportsbook_and_predictor(self):
         game = _game(home_moneyline=-200.0, away_moneyline=170.0, predictor_home_prob=0.70)
         prob, comps = estimate_home_win_prob(game, _config())
-        self.assertEqual(set(comps), {"sportsbook", "espn_predictor", "record"})
+        self.assertEqual(set(comps), {"sportsbook", "espn_predictor"})
         self.assertTrue(0.55 < prob < 0.75)
+
+    def test_record_not_blended_into_a_sportsbook_line(self):
+        # Underdog by the book; a better record must not drag the model toward 50%.
+        game = _game(home=_team("1", "A", "Aces", "ACE", "9-1"), away=_team("2", "B", "Bees", "BEE", "1-9"),
+                     home_moneyline=300.0, away_moneyline=-380.0)
+        prob, comps = estimate_home_win_prob(game, _config(require_market_signal=False))
+        self.assertEqual(set(comps), {"sportsbook"})
+        self.assertAlmostEqual(prob, devig_two_way(300.0, -380.0))
+
+    def test_record_used_with_predictor_when_no_line(self):
+        game = _game(home_moneyline=None, away_moneyline=None, predictor_home_prob=0.6)
+        self.assertIsNone(estimate_home_win_prob(game, _config()))
+        _, comps = estimate_home_win_prob(game, _config(require_market_signal=False))
+        self.assertEqual(set(comps), {"espn_predictor", "record"})
 
     def test_kelly_capped(self):
         cfg = _config(kelly_fraction=1.0, max_position_pct=0.03)
@@ -174,6 +188,19 @@ class MatchingTests(unittest.TestCase):
         market = _market("", title="", yes_sub_title="")
         market["ticker"] = "KXNFLGAME-26OCT04BUFBAL-BAL"
         self.assertEqual(match_market_to_game(market, [game]), (game, "home"))
+
+    def test_match_kalshi_real_shape_titles(self):
+        # Real Kalshi titles are just "<Team> wins"; matching must use the event ticker.
+        game = _game(home=_team("1", "Los Angeles", "Rams", "LAR"), away=_team("2", "Buffalo", "Bills", "BUF"))
+        market = {"ticker": "KXNFLGAME-26OCT12BUFLAR-LAR", "event_ticker": "KXNFLGAME-26OCT12BUFLAR",
+                  "title": "Los Angeles R wins", "yes_sub_title": "Los Angeles R", "no_sub_title": "Los Angeles R"}
+        self.assertEqual(match_market_to_game(market, [game]), (game, "home"))
+
+    def test_series_games_disambiguated_by_time(self):
+        g1 = _game(game_id="1", start_time=_NOW + timedelta(hours=5))
+        g2 = _game(game_id="2", start_time=_NOW + timedelta(hours=29))
+        market = _market("Baltimore", expected_expiration_time=(g2.start_time + timedelta(hours=3)).isoformat())
+        self.assertEqual(match_market_to_game(market, [g1, g2]), (g2, "home"))
 
     def test_unrelated_market_not_matched(self):
         market = _market(title="Kansas City at Denver Winner?", yes_sub_title="Denver",

@@ -482,7 +482,7 @@ class KalshiSportsConfig:
     weight_sportsbook: float = 0.60
     weight_espn_predictor: float = 0.25
     weight_record: float = 0.15
-    # Require sportsbook odds or ESPN's predictor; records alone are too weak to beat the market.
+    # Require a sportsbook line for the game; ESPN's predictor/records alone can't beat Kalshi's price.
     require_market_signal: bool = True
     min_kalshi_volume: int = 100             # contracts traded; skip illiquid markets
     max_spread: float = 0.06                 # skip if ask - bid is wider than this
