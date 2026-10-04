@@ -35,6 +35,8 @@ from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
 from trading_bot.strategies.options import OptionsStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.kalshi_perpetuals import KalshiPerpetualsStrategy
+from trading_bot.strategies.kalshi_sports import KalshiSportsStrategy
+from trading_bot.clients_espn import EspnClient
 from trading_bot.strategies.stocks import StockValueStrategy
 
 try:
@@ -224,6 +226,20 @@ class TradingBotService:
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
+        # Kalshi sports strategy (ESPN schedule/odds/projections -> Kalshi game-winner markets)
+        self.espn_client = EspnClient(
+            timeout_seconds=config.request_timeout_seconds,
+            logger=logger,
+            retry_config=config.http_retry,
+        )
+        self.kalshi_sports_strategy = KalshiSportsStrategy(
+            config=config.kalshi_sports,
+            kalshi_client=self.kalshi_client,
+            espn_client=self.espn_client,
+            logger=logger,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+        )
+
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
         self.price_feed = CoinbasePriceFeed(
             client=self.coinbase_client,
@@ -387,6 +403,16 @@ class TradingBotService:
             module_results["kalshi_perps"] = self._run_module(
                 "kalshi_perps",
                 lambda: self.kalshi_perps_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        if command == "kalshi_sports" or (command == "all" and self.config.kalshi_sports.enabled):
+            module_results["kalshi_sports"] = self._run_module(
+                "kalshi_sports",
+                lambda: self.kalshi_sports_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
@@ -963,6 +989,14 @@ class TradingBotService:
             if not positions:
                 return
 
+            # Contracts the bot placed itself (KX:/KS:/...) are already tracked;
+            # importing them again as "KL:" manual positions would double-count.
+            tracked = {
+                (str(p.meta.get("ticker", "")), str(p.meta.get("side", "")).upper())
+                for p in state.positions.values()
+                if p.asset_type == "prediction" and p.meta.get("source") != "kalshi_sync"
+            }
+
             synced = 0
             for pos in positions:
                 ticker = pos.get("ticker", "")
@@ -978,6 +1012,8 @@ class TradingBotService:
                         continue
 
                     symbol = f"KL:{ticker}:{side}"
+                    if (ticker, side) in tracked and symbol not in state.positions:
+                        continue
                     if symbol in state.positions:
                         # Update quantity for existing tracked position
                         state.positions[symbol].quantity = float(count)
@@ -1093,7 +1129,7 @@ class TradingBotService:
                         quantity=position.quantity,
                         reason=reason,
                     )
-                elif position.asset_type == "prediction" and symbol.startswith("KX:"):
+                elif position.asset_type == "prediction" and symbol.startswith(("KX:", "KS:")):
                     ticker = str(position.meta.get("ticker", ""))
                     side = str(position.meta.get("side", "yes")).lower()
                     contracts = max(1, int(position.quantity))

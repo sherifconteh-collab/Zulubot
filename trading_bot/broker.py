@@ -187,7 +187,12 @@ class PaperBroker:
             self.logger.info("Skipping close for %s because no position exists.", symbol)
             return None
 
-        close_price = price or state.last_prices.get(symbol, position.current_price or position.entry_price)
+        # `price=0.0` is meaningful (a prediction contract that settled worthless),
+        # so only fall back when no price was given at all.
+        if price is not None:
+            close_price = price
+        else:
+            close_price = state.last_prices.get(symbol, position.current_price or position.entry_price)
         entry_price = position.entry_price
         proceeds = position.quantity * close_price
         realized_pnl = (close_price - entry_price) * position.quantity
