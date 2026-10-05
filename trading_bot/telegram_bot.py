@@ -113,6 +113,36 @@ def _on_off(enabled: bool) -> str:
     return "ON" if enabled else "OFF"
 
 
+def _format_sports_pick(pred: dict[str, Any]) -> str:
+    """One scan line: a bet shows the side and edge; a game with no edge reads "no bet"."""
+    game = html.escape(str(pred.get("game", "")))
+    yes_team = html.escape(str(pred.get("yes_team", "")))
+    prob = (
+        f"{yes_team} win prob {float(pred.get('p_yes', 0)):.1%} "
+        f"\u00b1{float(pred.get('sd', 0)):.1%}"
+    )
+    move = pred.get("line_move_to_yes")
+    move_txt = "" if move is None else f" | line {float(move):+.1%} toward {yes_team}"
+    net = pred.get("net_edge")
+    if net is None:
+        return f"\u2022 {game} \u2014 <b>no bet</b>\n   {prob}{move_txt}"
+    side = str(pred.get("side", "")).lower()
+    ask = float(pred.get("yes_ask" if side == "yes" else "no_ask", 0))
+    return (
+        f"\u2022 <b>BET: {html.escape(str(pred.get('pick', '?')))}</b> ({game})\n"
+        f"   {prob} | {side.upper()} ask {ask:.2f} | net edge {float(net):+.1%}{move_txt}"
+    )
+
+
+def _format_sports_picks(predictions: list[dict[str, Any]], limit: int = 10) -> list[str]:
+    """Bets first (best edge first), then the closest no-bet games."""
+    ordered = sorted(
+        predictions or [],
+        key=lambda p: (p.get("net_edge") is None, -float(p.get("edge", 0) or 0)),
+    )
+    return [_format_sports_pick(p) for p in ordered[:limit]]
+
+
 def _format_lead_line(lead: dict[str, Any]) -> str:
     """One-line representation of a lead for the Telegram leads alert."""
     symbol = html.escape(str(lead.get("symbol", "?")))
@@ -369,12 +399,13 @@ class TradingTelegramBot:
                 f"Matched: {int(module_data.get('markets_matched', 0) or 0)}/"
                 f"{int(module_data.get('markets_scanned', 0) or 0)}"
             )
-            for pred in sorted(
-                module_data.get("predictions") or [], key=lambda p: p.get("edge", 0), reverse=True
-            )[:3]:
+            bets = [p for p in module_data.get("predictions") or [] if p.get("net_edge") is not None]
+            if not bets:
+                lines.append("   No bets this scan.")
+            for pred in sorted(bets, key=lambda p: p.get("edge", 0), reverse=True)[:3]:
                 lines.append(
-                    f"   \u2022 {html.escape(str(pred.get('pick', '?')))} "
-                    f"({html.escape(str(pred.get('game', '')))}) edge {float(pred.get('edge', 0)):+.1%}"
+                    f"   \u2022 BET {html.escape(str(pred.get('pick', '?')))} "
+                    f"({html.escape(str(pred.get('game', '')))}) net edge {float(pred.get('net_edge', 0)):+.1%}"
                 )
             resolved = module_data.get("resolved_closed", [])
             if resolved:
@@ -1018,21 +1049,13 @@ class TradingTelegramBot:
                     f"stake scale {float(bank.get('stake_scale', 1)):.0%} | "
                     f"open ${float(bank.get('open_exposure', 0)):.2f} of ${float(bank.get('exposure_budget', 0)):.2f}"
                 )
-            preds = sorted(module.get("predictions") or [], key=lambda p: p.get("edge", 0), reverse=True)
-            for pred in preds[:10]:
-                move = pred.get("line_move_to_yes")
-                move_txt = "" if move is None else f" | line {float(move):+.1%} toward {html.escape(str(pred.get('yes_team', '')))}"
-                net = pred.get("net_edge")
-                lines.append(
-                    f"\u2022 <b>{html.escape(str(pred.get('pick', '?')))}</b> "
-                    f"({html.escape(str(pred.get('game', '')))})\n"
-                    f"   {html.escape(str(pred.get('yes_team', '')))} win prob "
-                    f"{float(pred.get('p_yes', 0)):.1%} \u00b1{float(pred.get('sd', 0)):.1%}"
-                    f" | {html.escape(str(pred.get('side', '')).upper())} ask "
-                    f"{float(pred.get('yes_ask' if pred.get('side') == 'yes' else 'no_ask', 0)):.2f}"
-                    + (f" | net edge {float(net):+.1%}" if net is not None else " | no edge after fees")
-                    + move_txt
-                )
+            preds = module.get("predictions") or []
+            bets = [p for p in preds if p.get("net_edge") is not None]
+            lines.append(
+                f"{len(bets)} bet{'s' if len(bets) != 1 else ''} worth placing"
+                if bets else "No bets right now: prices match the books after fees."
+            )
+            lines.extend(_format_sports_picks(preds))
             if not preds:
                 lines.append("No predictable games found right now.")
             for parlay in (module.get("parlays") or [])[:2]:
