@@ -588,6 +588,8 @@ There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
 6. Holds to settlement and closes at Kalshi's settlement value ($1, $0, or $0.50 on a tie). Paper PnL includes the fee.
 7. Every match must agree on kickoff time as well as teams, so a playoff series or home-and-home pair can't be priced off another day's game.
 
+**Kill switch:** sports bets are independent, self-settling wagers, so by default (`KALSHI_SPORTS_IGNORE_GLOBAL_HALT=true`) a global kill switch or daily halt tripped by other strategies does not stop sports betting, does not close open sports bets, and does not leave the scheduler paused for sports. Sports keeps its own limits (per-bet cap, total exposure budget, max open bets). Set the flag to `false` to make sports obey the global switch again. A manual `/pause` still pauses everything, sports included.
+
 **Parlays:** Kalshi combos are quoted on request (RFQ), not traded on an order book, so the bot never places them. Instead each scan suggests 2-4 leg parlays built only from legs it already finds profitable, from different games (independent), with the fair probability and the *maximum price worth paying*; place them in Kalshi's parlay builder. Betting the same legs separately with Kelly grows a bankroll faster than a parlay unless Kalshi's quote is below that price. `KALSHI_SPORTS_PARLAY_MAX_LEGS=0` turns suggestions off.
 
 A sportsbook line is required by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`): ESPN's predictor and records alone are not sharper than Kalshi's price. Telegram: `/sports` runs a scan and shows picks with probability ± uncertainty, net edge after fees, and line movement.

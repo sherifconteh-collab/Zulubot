@@ -420,9 +420,20 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result2["resolved_closed"], [])
         self.assertIn(result["buys"][0], state.positions)
 
-    def test_kill_switch_blocks_entries(self):
-        game = _game(home_moneyline=-190.0, away_moneyline=160.0)
+    def test_sports_keeps_betting_through_global_kill_switch_by_default(self):
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
         strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
+        state = PortfolioState(cash=10_000.0)
+        state.kill_switch_engaged = True
+        state.halt_new_trades_for_day = True
+        _, _, result = _run(strat, state)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["buys"]), 1)
+
+    def test_kill_switch_can_still_be_honoured_when_configured(self):
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+        strat, _ = _strategy(_config(ignore_global_halt=False), [game],
+                             [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
         state = PortfolioState(cash=10_000.0)
         state.kill_switch_engaged = True
         _, _, result = _run(strat, state)

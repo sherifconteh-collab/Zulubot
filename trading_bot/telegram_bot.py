@@ -582,7 +582,11 @@ class TradingTelegramBot:
 
         if self._paused:
             lines.append("")
-            lines.append("Paused — monitoring only.")
+            sports_on = bool(getattr(getattr(self._service, "config", None), "kalshi_sports", None)
+                             and self._service.config.kalshi_sports.enabled
+                             and self._service.config.kalshi_sports.ignore_global_halt
+                             and risk.get("kill_switch_active"))
+            lines.append("Paused — monitoring only." + (" Sports betting still active." if sports_on else ""))
 
         await self.send_message("\n".join(lines))
 

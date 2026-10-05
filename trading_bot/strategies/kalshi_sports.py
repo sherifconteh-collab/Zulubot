@@ -411,7 +411,9 @@ class KalshiSportsStrategy:
             self._manage_open_positions(state, broker, result)
             self._score_past_forecasts()
 
-            if state.kill_switch_engaged or state.halt_new_trades_for_day:
+            if not self.config.ignore_global_halt and (
+                state.kill_switch_engaged or state.halt_new_trades_for_day
+            ):
                 result["status"] = "halted"
                 result["decisions"].append({
                     "strategy": "kalshi_sports",

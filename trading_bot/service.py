@@ -1069,7 +1069,7 @@ class TradingBotService:
         closed: list[str] = []
         for symbol in symbols:
             position = state.positions.get(symbol)
-            if position is None:
+            if position is None or self._exempt_from_global_halt(position):
                 continue
             self.broker.close_position(
                 state, symbol=symbol, reason="trailing_stop", price=position.current_price,
@@ -1097,6 +1097,13 @@ class TradingBotService:
             )
         return snapshot
 
+    def _exempt_from_global_halt(self, position: Position) -> bool:
+        """Sports bets settle on their own and are not closed by the global kill switch."""
+        return (
+            position.strategy == "kalshi_sports"
+            and self.config.kalshi_sports.ignore_global_halt
+        )
+
     def _liquidate_all_positions(self, state: PortfolioState, *, reason: str) -> dict[str, list[str]]:
         closed: list[str] = []
         failed: list[str] = []
@@ -1104,6 +1111,9 @@ class TradingBotService:
         for symbol in list(state.positions.keys()):
             position = state.positions.get(symbol)
             if position is None:
+                continue
+            if self._exempt_from_global_halt(position):
+                self.logger.info("Keeping %s through %s: sports bets hold to settlement.", symbol, reason)
                 continue
 
             close_price = state.last_prices.get(symbol, position.current_price or position.entry_price)
