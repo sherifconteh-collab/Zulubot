@@ -472,7 +472,7 @@ class KalshiSportsConfig:
     # No fixed edge/price/volume cutoffs: stakes scale with net edge vs uncertainty
     # (see trading_bot/sports_model.py). These are risk limits and cost inputs only.
     kelly_fraction: float = 0.25             # fraction of (uncertainty-shrunk) Kelly to stake
-    max_position_pct: float = 0.03           # per-bet cap, % of equity
+    max_position_pct: float = 0.10           # per-bet cap, % of equity
     capital_allocation_pct: float = 0.15     # total cap on open sports exposure
     max_open_bets: int = 6
     min_trade_usd: float = 1.0               # smallest stake worth the fee/attention
@@ -889,7 +889,7 @@ class AppConfig:
                 max_hours_ahead=_env_float("KALSHI_SPORTS_MAX_HOURS_AHEAD", 48.0),
                 min_minutes_to_start=_env_float("KALSHI_SPORTS_MIN_MINUTES_TO_START", 5.0),
                 kelly_fraction=_env_float("KALSHI_SPORTS_KELLY_FRACTION", 0.25),
-                max_position_pct=_env_float("KALSHI_SPORTS_MAX_POSITION_PCT", 0.03),
+                max_position_pct=_env_float("KALSHI_SPORTS_MAX_POSITION_PCT", 0.10),
                 capital_allocation_pct=_env_float("KALSHI_SPORTS_CAPITAL_PCT", 0.15),
                 max_open_bets=_env_int("KALSHI_SPORTS_MAX_OPEN_BETS", 6),
                 min_trade_usd=_env_float("KALSHI_SPORTS_MIN_TRADE_USD", 1.0),
