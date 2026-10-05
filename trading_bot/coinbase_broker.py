@@ -125,8 +125,12 @@ class CoinbaseBroker:
         strategy: str,
         now: datetime,
         meta: dict[str, Any] | None = None,
-    ) -> Position | None:
-        """Place a market buy on Coinbase (or simulate in paper mode)."""
+    ) -> bool:
+        """Place a market buy on Coinbase (or simulate in paper mode).
+
+        Returns True when the order was accepted (always True in paper mode) and False
+        when the live order failed, so callers never book a position that doesn't exist.
+        """
         product_id = self.coinbase_client.to_coinbase_symbol(binance_symbol)
 
         if self.paper_mode:
@@ -134,7 +138,7 @@ class CoinbaseBroker:
                 "[PAPER] Would place market BUY %s notional=$%.2f on Coinbase product=%s",
                 binance_symbol, notional_usd, product_id,
             )
-            return None  # Paper broker handles the actual position tracking
+            return True  # Paper broker handles the actual position tracking
 
         client_order_id = str(uuid.uuid4())
         order_payload = {
@@ -155,10 +159,11 @@ class CoinbaseBroker:
         try:
             result = self._post("/api/v3/brokerage/orders", order_payload)
             self.logger.info("Coinbase order response: %s", json.dumps(result, indent=2))
-            return self._log_order_result(result, binance_symbol, "BUY")
+            self._log_order_result(result, binance_symbol, "BUY")
+            return bool(result.get("success", False))
         except Exception as exc:
             self.logger.error("Coinbase BUY order failed for %s: %s", product_id, exc)
-            return None
+            return False
 
     def place_market_sell(
         self,
@@ -294,7 +299,9 @@ class CoinbaseBroker:
             result = self._post("/api/v3/brokerage/orders", order_payload)
             self.logger.info("BUY response: %s", json.dumps(result, indent=2))
             self._log_order_result(result, product_id, "BUY")
-            return result
+            # Only a successful order counts: a rejected one comes back as a 200 with
+            # success=false and must not be treated as a fill by callers.
+            return result if result.get("success", False) else None
         except Exception as exc:
             self.logger.error("BUY order failed for %s: %s", product_id, exc)
             return None

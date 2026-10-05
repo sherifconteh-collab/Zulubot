@@ -52,7 +52,7 @@ from trading_bot.clients_espn import (
     devig_two_way,
     line_movement,
 )
-from trading_bot.clients_kalshi import KalshiClient
+from trading_bot.clients_kalshi import KalshiClient, order_fill_count
 from trading_bot.clients_polymarket_sports import PolyGame, PolyQuote
 from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState
@@ -847,6 +847,31 @@ class KalshiSportsStrategy:
         if quantity < 1:
             return None
 
+        # Live: place the order first and book only what actually filled, so an
+        # unfilled or partly filled order never leaves a phantom bet in state.
+        order_id = ""
+        if self.live_trading_enabled:
+            try:
+                order = self.kalshi.place_order(
+                    ticker=ticker,
+                    side=side,
+                    action="buy",
+                    count=quantity,
+                    price_cents=round(ask * 100),
+                    time_in_force="immediate_or_cancel",
+                    client_order_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:
+                self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
+                return None
+            order_id = str(order.get("order", {}).get("order_id", ""))
+            filled = order_fill_count(order)
+            if filled is not None:
+                if filled < 1:
+                    self.logger.info("Kalshi sports order for %s did not fill; no bet booked.", ticker)
+                    return None
+                quantity = min(quantity, filled)
+
         meta = {
             "ticker": ticker,
             "event_ticker": str(market.get("event_ticker", "")),
@@ -865,6 +890,8 @@ class KalshiSportsStrategy:
             "sources": cand["posterior"].to_dict()["sources"],
             "odds_provider": game.odds_provider,
         }
+        if order_id:
+            meta["kalshi_order_id"] = order_id
         position = broker.open_position(
             state,
             symbol=symbol,
@@ -887,23 +914,6 @@ class KalshiSportsStrategy:
             decision.p * 100, decision.sd * 100, decision.net_edge * 100,
         )
 
-        if self.live_trading_enabled and filled >= 1:
-            try:
-                ask_cents = min(99, max(1, round(ask * 100)))
-                order = self.kalshi.place_order(
-                    ticker=ticker,
-                    side=side,
-                    action="buy",
-                    count=filled,
-                    yes_price=ask_cents if side == "yes" else 100 - ask_cents,
-                    client_order_id=str(uuid.uuid4()),
-                )
-                state.positions[symbol].meta["kalshi_order_id"] = order.get("order", {}).get("order_id", "")
-            except Exception as exc:
-                self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
-                # Roll the paper position back so we don't track a bet that never placed.
-                broker.close_position(state, symbol=symbol, price=entry_price, reason="order_failed", cash_bucket=bucket)
-                return None
         return position
 
     # ------------------------------------------------------------------

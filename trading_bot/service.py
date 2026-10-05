@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -14,7 +16,7 @@ from trading_bot.clients import (
     FinancialModelingPrepClient,
     FreeMarketIntelligenceClient,
 )
-from trading_bot.clients_kalshi import KalshiClient
+from trading_bot.clients_kalshi import KalshiClient, order_fill_count
 from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGammaClient
 from trading_bot.clients_robinhood import RobinhoodClient
 from trading_bot.coinbase_broker import CoinbaseBroker
@@ -44,6 +46,20 @@ try:
     from trading_bot.integrations.trading_agents import TradingAgentsService
 except ImportError:
     TradingAgentsService = None  # type: ignore[assignment,misc]
+
+
+def _locked(method):
+    """Serialise a service method that loads, mutates and saves portfolio state."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            return method(self, *args, **kwargs)
+        with lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class TradingBotService:
@@ -138,7 +154,8 @@ class TradingBotService:
             api_key=config.coinbase.api_key,
             api_secret=config.coinbase.api_secret,
             coinbase_client=self.coinbase_client,
-            paper_mode=config.paper_mode,
+            # Without COINBASE_TRADING_ENABLED, Coinbase is read-only: never send it an order.
+            paper_mode=config.paper_mode or not config.coinbase.trading_enabled,
             logger=logger,
             retry_config=config.http_retry,
         )
@@ -300,9 +317,18 @@ class TradingBotService:
         )
 
         # Kalshi balance cache (avoids network call on every summary)
+        # Every public method below loads state, mutates it and saves it. Telegram commands run
+        # some of them on worker threads while the scheduler runs others, so without this lock
+        # two cycles could load the same state and both place the same bet.
+        self._state_lock = threading.RLock()
         self._kalshi_balance_cache: float | None = None
         self._kalshi_balance_cache_ts: float = 0.0
         self._kalshi_balance_cache_ttl: float = 120.0  # 2-minute TTL
+
+    @property
+    def coinbase_trading_active(self) -> bool:
+        """True when crypto strategies may trade: simulated (paper) or Coinbase trading enabled."""
+        return self.config.paper_mode or self.config.coinbase.trading_enabled
 
     def _skipped_module(self, reason: str) -> dict[str, Any]:
         return {
@@ -312,6 +338,7 @@ class TradingBotService:
             "closes": [],
         }
 
+    @_locked
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
@@ -322,9 +349,7 @@ class TradingBotService:
 
         # Sync real balances when in live mode
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
 
         self.refresh_open_positions(state, now=now)
 
@@ -362,7 +387,11 @@ class TradingBotService:
             else:
                 self.logger.warning("Stocks module skipped in live mode: live stock execution is not implemented.")
                 module_results["stocks"] = self._skipped_module("live_stock_execution_unavailable")
-        if command in {"crypto", "all"}:
+        if command in {"crypto", "rotation", "all"} and not self.coinbase_trading_active:
+            self.logger.info("Crypto/rotation skipped: Coinbase is data-only (COINBASE_TRADING_ENABLED=false).")
+        if command in {"crypto", "all"} and not self.coinbase_trading_active:
+            module_results["crypto"] = self._skipped_module("coinbase_trading_disabled")
+        elif command in {"crypto", "all"}:
             module_results["crypto"] = self._run_module(
                 "crypto",
                 lambda: self.crypto_strategy.run(
@@ -372,7 +401,9 @@ class TradingBotService:
                     now=now,
                 ),
             )
-        if command in {"rotation", "all"}:
+        if command in {"rotation", "all"} and not self.coinbase_trading_active:
+            module_results["rotation"] = self._skipped_module("coinbase_trading_disabled")
+        elif command in {"rotation", "all"}:
             module_results["rotation"] = self._run_module(
                 "rotation",
                 lambda: self.rotation_strategy.run(
@@ -487,28 +518,26 @@ class TradingBotService:
         self.logger.info("Run summary: %s", summary)
         return summary
 
+    @_locked
     def status(self) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
         self.refresh_open_positions(state, now=now)
         risk = self._evaluate_risk(state, now)
         self._persist_ai_budget(state)
         self.state_store.save(state)
         return self._build_summary(state, pre_risk=risk, post_risk=risk, modules={})
 
+    @_locked
     def engage_kill_switch(self, *, reason: str = "manual_kill_switch") -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
         self.refresh_open_positions(state, now=now)
 
         pre_risk = self._evaluate_risk(state, now)
@@ -542,14 +571,13 @@ class TradingBotService:
         """Return the most recent per-strategy leads (for /leads command)."""
         return {strategy: list(leads) for strategy, leads in self._last_leads.items()}
 
+    @_locked
     def clear_kill_switch(self, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
         self.refresh_open_positions(state, now=now)
 
         equity = self.broker.portfolio_equity(state)
@@ -926,8 +954,40 @@ class TradingBotService:
             except Exception as exc:
                 self.logger.warning("Unable to refresh prediction prices: %s", exc)
 
+    def _sync_live_accounts(self, state: PortfolioState) -> None:
+        """Sync every live balance, then seed the risk baseline on the same equity basis."""
+        self._live_sync_failed = False
+        self._sync_coinbase_balance(state)
+        self._sync_kalshi_balance(state)
+        self._sync_kalshi_positions(state)
+        self._seed_live_peak(state)
+
+    def _seed_live_peak(self, state: PortfolioState) -> None:
+        """Reset a stale peak/baseline (old paper state, wrong initial cash).
+
+        The comparison uses ``broker.portfolio_equity`` (wallet cash + Kalshi cash + tracked
+        positions), exactly what the drawdown check measures. Seeding from another number,
+        such as Coinbase's total including coins the bot doesn't track, makes the very first
+        check read as a huge drawdown. Never touches an engaged kill switch.
+        """
+        if state.kill_switch_engaged:
+            return
+        equity = self.broker.portfolio_equity(state)
+        if equity > 0 and (
+            state.peak_equity <= 0
+            or state.peak_equity == self.config.initial_cash
+            or state.peak_equity > equity * 5  # peak is impossibly high vs reality
+        ):
+            self.logger.info("Resetting peak equity from $%.2f to live equity $%.2f", state.peak_equity, equity)
+            state.peak_equity = equity
+            state.daily_baseline_equity = equity
+
     def _sync_coinbase_balance(self, state: PortfolioState) -> None:
         """Sync portfolio cash and equity from real Coinbase balances."""
+        if not self.config.coinbase.trading_enabled:
+            # Coinbase is data-only: none of its balance is ours to trade or count as equity.
+            state.cash = 0.0
+            return
         try:
             total_usd, breakdown = self.coinbase_broker.get_total_balance()
             usd_cash = breakdown.get("USD", 0.0) + breakdown.get("USDC", 0.0)
@@ -935,29 +995,12 @@ class TradingBotService:
             # Set cash to real Coinbase USD/USDC balance
             state.cash = usd_cash
 
-            # Use Coinbase total (includes all crypto) as the real equity
-            # This is more accurate than summing positions which may lag
-            real_equity = total_usd if total_usd > 0 else usd_cash
-
-            # Reset peak/baseline if they look stale (from old paper-mode state
-            # or different initial_cash) to prevent false kill-switch triggers
-            if real_equity > 0 and (
-                state.peak_equity <= 0
-                or state.peak_equity == self.config.initial_cash
-                or state.peak_equity > real_equity * 5  # peak is impossibly high vs reality
-            ):
-                self.logger.info(
-                    "Resetting peak equity from $%.2f to real equity $%.2f",
-                    state.peak_equity, real_equity,
-                )
-                state.peak_equity = real_equity
-                state.daily_baseline_equity = real_equity
-
             self.logger.info(
                 "Coinbase balance synced: cash=$%.2f total=$%.2f assets=%s",
                 usd_cash, total_usd, {k: f"${v:.2f}" for k, v in breakdown.items()},
             )
         except Exception as exc:
+            self._live_sync_failed = True
             self.logger.warning("Failed to sync Coinbase balance: %s. Using cached state.", exc)
             # In live mode, never show fake money — if sync fails and cash
             # looks like the default initial_cash, zero it out.
@@ -976,8 +1019,73 @@ class TradingBotService:
             self._kalshi_balance_cache_ts = time.monotonic()
             self.logger.info("Kalshi balance synced: cash=$%.2f", balance)
         except Exception as exc:
+            self._live_sync_failed = True
             self.logger.warning("Failed to sync Kalshi balance: %s. Using cached balance.", exc)
             state.cash_reserves.setdefault(self._KALSHI_CASH_BUCKET, 0.0)
+
+    _RECONCILE_GRACE_SECONDS = 600
+    _KALSHI_SETTLED = {"settled", "finalized", "determined"}
+
+    def _reconcile_bot_kalshi_positions(self, state: PortfolioState, held: dict[tuple[str, str], int]) -> None:
+        """Make the bot's own live Kalshi bets match what the account actually holds.
+
+        A bet that never filled (or was closed elsewhere) would otherwise sit in state as
+        phantom value until the market settles. Bets whose market has settled are left for
+        their strategy to close and record. Recent bets get a grace period.
+        """
+        now = datetime.now(self.config.timezone)
+        for symbol, pos in list(state.positions.items()):
+            if (
+                pos.asset_type != "prediction"
+                or pos.meta.get("venue") != "kalshi"
+                or pos.meta.get("source") == "kalshi_sync"
+            ):
+                continue
+            ticker = str(pos.meta.get("ticker", ""))
+            key = (ticker, str(pos.meta.get("side", "")).upper())
+            if not ticker or not key[1]:
+                continue
+            actual = held.get(key, 0)
+            if actual >= pos.quantity:
+                continue
+            try:
+                opened = datetime.fromisoformat(pos.opened_at)
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=now.tzinfo)
+                if (now - opened).total_seconds() < self._RECONCILE_GRACE_SECONDS:
+                    continue
+                if str(self.kalshi_client.get_market(ticker).get("status", "")).lower() in self._KALSHI_SETTLED:
+                    continue  # settled: the owning strategy closes and records it
+            except Exception as exc:
+                self.logger.debug("Reconcile check skipped for %s: %s", symbol, exc)
+                continue
+            if actual > 0:
+                self.logger.warning("Kalshi holds %d of %.0f recorded for %s; shrinking.", actual, pos.quantity, symbol)
+                self.broker.resize_position(state, symbol, float(actual), refund=False)
+            else:
+                self.logger.warning("Kalshi holds none of %s (unfilled or closed elsewhere); removing.", symbol)
+                self.broker.resize_position(state, symbol, 0.0, refund=False)
+
+    @staticmethod
+    def _kalshi_position_counts(pos: dict[str, Any]) -> tuple[int, int]:
+        """(yes_contracts, no_contracts) from a Kalshi market_position.
+
+        Kalshi reports one signed ``position``: positive = YES, negative = NO.
+        The count may arrive as ``position_fp`` (a string) in newer payloads; the
+        legacy ``yes_count``/``no_count`` fields are honoured when present.
+        """
+        raw = pos.get("position_fp", pos.get("position"))
+        try:
+            signed = int(round(float(raw))) if raw not in (None, "") else 0
+        except (TypeError, ValueError):
+            signed = 0
+        yes_count, no_count = max(signed, 0), max(-signed, 0)
+        try:
+            yes_count = max(yes_count, int(float(pos.get("yes_count") or 0)))
+            no_count = max(no_count, int(float(pos.get("no_count") or 0)))
+        except (TypeError, ValueError):
+            pass
+        return yes_count, no_count
 
     def _sync_kalshi_positions(self, state: PortfolioState) -> None:  # noqa: C901
         """Fetch live Kalshi positions and upsert them into PortfolioState.
@@ -989,8 +1097,36 @@ class TradingBotService:
         if not self.kalshi_client.can_trade:
             return
         try:
-            positions = self.kalshi_client.get_positions()
-            if not positions:
+            positions = self.kalshi_client.get_positions()  # raises on API failure: never prune then
+
+            # What the account really holds right now: {(ticker, "YES"|"NO"): contracts}.
+            held: dict[tuple[str, str], int] = {}
+            for pos in positions or []:
+                ticker = pos.get("ticker", "")
+                if not ticker:
+                    continue
+                yes_count, no_count = self._kalshi_position_counts(pos)
+                if yes_count > 0:
+                    held[(ticker, "YES")] = yes_count
+                if no_count > 0:
+                    held[(ticker, "NO")] = no_count
+
+            # Drop imported positions that are no longer held (settled, sold, expired).
+            # Without this they linger forever at their last mark, inflating equity on
+            # top of the cash already credited to the wallet and distorting drawdown.
+            for symbol, existing in list(state.positions.items()):
+                if existing.meta.get("source") != "kalshi_sync":
+                    continue
+                key = (str(existing.meta.get("ticker", "")), str(existing.meta.get("side", "")).upper())
+                if key not in held:
+                    self.logger.info("Kalshi position %s no longer held; removing from state.", symbol)
+                    del state.positions[symbol]
+                    state.last_prices.pop(symbol, None)
+                    state.last_price_timestamps.pop(symbol, None)
+
+            self._reconcile_bot_kalshi_positions(state, held)
+
+            if not held:
                 return
 
             # Contracts the bot placed itself (KX:/KS:/...) are already tracked;
@@ -1002,56 +1138,47 @@ class TradingBotService:
             }
 
             synced = 0
-            for pos in positions:
-                ticker = pos.get("ticker", "")
-                if not ticker:
+            for (ticker, side), count in held.items():
+                if count <= 0:
                     continue
 
-                # Determine YES/NO side and quantity
-                yes_count = int(pos.get("position", pos.get("yes_count", 0)) or 0)
-                no_count = int(pos.get("no_count", 0) or 0)
+                symbol = f"KL:{ticker}:{side}"
+                if (ticker, side) in tracked and symbol not in state.positions:
+                    continue
+                if symbol in state.positions:
+                    # Update quantity for existing tracked position
+                    state.positions[symbol].quantity = float(count)
+                    continue
 
-                for side, count in (("YES", yes_count), ("NO", no_count)):
-                    if count <= 0:
-                        continue
+                # New position not tracked by the bot — try to get a real price
+                entry_price = 0.50
+                try:
+                    market = self.kalshi_client.get_market(ticker)
+                    # Handles both ``*_dollars`` and legacy cent fields.
+                    price = self._kalshi_position_price(market, side.lower())
+                    if 0 < price < 1:
+                        entry_price = price
+                except Exception:
+                    pass  # Fall back to 0.50 placeholder
 
-                    symbol = f"KL:{ticker}:{side}"
-                    if (ticker, side) in tracked and symbol not in state.positions:
-                        continue
-                    if symbol in state.positions:
-                        # Update quantity for existing tracked position
-                        state.positions[symbol].quantity = float(count)
-                        continue
-
-                    # New position not tracked by the bot — try to get a real price
-                    entry_price = 0.50
-                    try:
-                        market = self.kalshi_client.get_market(ticker)
-                        # Handles both ``*_dollars`` and legacy cent fields.
-                        price = self._kalshi_position_price(market, side.lower())
-                        if 0 < price < 1:
-                            entry_price = price
-                    except Exception:
-                        pass  # Fall back to 0.50 placeholder
-
-                    synced_at = datetime.now(self.config.timezone).isoformat()
-                    state.positions[symbol] = Position(
-                        symbol=symbol,
-                        asset_type="prediction",
-                        strategy="kalshi_manual",
-                        quantity=float(count),
-                        entry_price=entry_price,
-                        current_price=entry_price,
-                        opened_at=synced_at,
-                        meta={
-                            "ticker": ticker,
-                            "side": side.lower(),
-                            "source": "kalshi_sync",
-                            "venue": "kalshi",
-                            "cash_bucket": self._KALSHI_CASH_BUCKET,
-                        },
-                    )
-                    synced += 1
+                synced_at = datetime.now(self.config.timezone).isoformat()
+                state.positions[symbol] = Position(
+                    symbol=symbol,
+                    asset_type="prediction",
+                    strategy="kalshi_manual",
+                    quantity=float(count),
+                    entry_price=entry_price,
+                    current_price=entry_price,
+                    opened_at=synced_at,
+                    meta={
+                        "ticker": ticker,
+                        "side": side.lower(),
+                        "source": "kalshi_sync",
+                        "venue": "kalshi",
+                        "cash_bucket": self._KALSHI_CASH_BUCKET,
+                    },
+                )
+                synced += 1
 
             if synced:
                 self.logger.info("Synced %d new Kalshi positions from account.", synced)
@@ -1079,7 +1206,10 @@ class TradingBotService:
 
     def _evaluate_risk(self, state: PortfolioState, now: datetime) -> RiskSnapshot:
         equity = self.broker.portfolio_equity(state)
-        snapshot = self.risk_manager.evaluate(state, equity, now)
+        sync_failed = bool(getattr(self, "_live_sync_failed", False)) and not self.config.paper_mode
+        if sync_failed:
+            self.logger.warning("A live balance sync failed this cycle; not allowing a kill-switch trigger on partial data.")
+        snapshot = self.risk_manager.evaluate(state, equity, now, allow_kill_switch=not sync_failed)
         if snapshot.kill_switch_triggered_now:
             self.logger.error(
                 "Kill switch triggered at equity=%.2f total_drawdown=%.2f%%. Closing all positions.",
@@ -1126,18 +1256,17 @@ class TradingBotService:
                         quantity=position.quantity,
                         reason=reason,
                     )
-                elif position.asset_type == "prediction" and symbol.startswith(("KX:", "KS:")):
+                elif position.asset_type == "prediction" and symbol.startswith(("KX:", "KS:", "KAL:")):
                     ticker = str(position.meta.get("ticker", ""))
                     side = str(position.meta.get("side", "yes")).lower()
                     contracts = max(1, int(position.quantity))
                     if self.kalshi_client.can_trade and ticker:
                         try:
-                            self.kalshi_client.place_order(
-                                ticker=ticker,
-                                side=side,
-                                action="sell",
-                                count=contracts,
-                            )
+                            order = self.kalshi_client.sell_to_close(ticker=ticker, side=side, count=contracts)
+                            sold = order_fill_count(order)
+                            if sold is not None and sold < contracts:
+                                self.logger.error("Kill-switch sell for %s filled %d of %d.", symbol, sold, contracts)
+                                live_close_ok = False
                         except Exception as exc:
                             self.logger.error("Kalshi kill-switch sell failed for %s: %s", symbol, exc)
                             live_close_ok = False

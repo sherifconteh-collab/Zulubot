@@ -165,6 +165,9 @@ class CryptoStrategyConfig:
 class CoinbaseConfig:
     api_key: str = ""
     api_secret: str = ""
+    # Coinbase is a price/data source by default. Orders are only sent when this is true
+    # (and PAPER_MODE=false); otherwise the crypto/rotation strategies do not run live.
+    trading_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -458,7 +461,7 @@ class KalshiPerpetualsConfig:
 class KalshiSportsConfig:
     """Configuration for the Kalshi sports (game-winner) strategy."""
 
-    enabled: bool = False
+    enabled: bool = True
     # League keys to scan (see clients_espn.LEAGUES); leagues with no open Kalshi markets are skipped.
     leagues: list[str] = field(default_factory=lambda: [
         "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
@@ -672,6 +675,7 @@ class AppConfig:
             coinbase=CoinbaseConfig(
                 api_key=os.getenv("COINBASE_API_KEY", "").strip(),
                 api_secret=os.getenv("COINBASE_API_SECRET", "").strip(),
+                trading_enabled=_env_bool("COINBASE_TRADING_ENABLED", False),
             ),
             telegram=TelegramConfig(
                 bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
@@ -884,7 +888,7 @@ class AppConfig:
                 min_trade_usd=_env_float("KALSHI_PERP_MIN_TRADE_USD", 10.0),
             ),
             kalshi_sports=KalshiSportsConfig(
-                enabled=_env_bool("KALSHI_SPORTS_ENABLED", False),
+                enabled=_env_bool("KALSHI_SPORTS_ENABLED", True),
                 leagues=_env_list_lower("KALSHI_SPORTS_LEAGUES", [
                     "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
                     "epl", "laliga", "bundesliga", "seriea", "ligue1", "mls", "ligamx", "ucl", "uel"]),
