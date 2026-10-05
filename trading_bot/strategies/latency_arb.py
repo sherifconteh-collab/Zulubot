@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any
 
 from trading_bot.broker import PaperBroker
-from trading_bot.clients_kalshi import KalshiClient, parse_top_of_book
+from trading_bot.clients_kalshi import KalshiClient, order_fill_count, parse_top_of_book
 from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.config import LatencyArbConfig
 from trading_bot.charting import render_candlestick_chart_data_uri
@@ -583,6 +583,31 @@ class LatencyArbStrategy:
                 return False
             actual_notional = quantity * ask_price
 
+        # Live: order first, book only what filled (never a position we don't hold).
+        order_id = ""
+        if self.live_trading_enabled:
+            try:
+                order_result = self.kalshi.place_order(
+                    ticker=ticker,
+                    side=side,
+                    action="buy",
+                    count=quantity,
+                    price_cents=round(ask_price * 100),
+                    time_in_force="immediate_or_cancel",
+                    client_order_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:
+                self.logger.error("Live Kalshi order failed for %s: %s", ticker, exc)
+                return False
+            order_id = order_result.get("order", {}).get("order_id", "")
+            filled = order_fill_count(order_result)
+            if filled is not None:
+                if filled < 1:
+                    self.logger.info("Kalshi order for %s did not fill; not booking.", ticker)
+                    return False
+                quantity = min(quantity, filled)
+                actual_notional = quantity * ask_price
+
         meta = {
             "ticker": ticker,
             "side": side,
@@ -594,6 +619,8 @@ class LatencyArbStrategy:
             "venue": "kalshi",
             **ai_meta,
         }
+        if order_id:
+            meta["kalshi_order_id"] = order_id
 
         # Paper tracking (always)
         position = self.broker.open_position(
@@ -628,25 +655,6 @@ class LatencyArbStrategy:
             side.upper(), ticker, ask_price, filled_quantity,
             filled_quantity * ask_price, momentum_pct,
         )
-
-        # Live execution
-        if self.live_trading_enabled:
-            try:
-                yes_price_cents = int(ask_price * 100)
-                order_result = self.kalshi.place_order(
-                    ticker=ticker,
-                    side=side,
-                    action="buy",
-                    count=filled_quantity,
-                    yes_price=yes_price_cents if side == "yes" else (100 - yes_price_cents),
-                    client_order_id=str(uuid.uuid4()),
-                )
-                order_id = order_result.get("order", {}).get("order_id", "")
-                state.positions[symbol].meta["kalshi_order_id"] = order_id
-                self.logger.info("Live Kalshi order placed: %s", order_id)
-            except Exception as exc:
-                self.logger.error("Live Kalshi order failed for %s: %s", ticker, exc)
-                # Keep the paper position for tracking; live failed
 
         return True
 

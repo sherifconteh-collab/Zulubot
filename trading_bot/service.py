@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -44,6 +46,20 @@ try:
     from trading_bot.integrations.trading_agents import TradingAgentsService
 except ImportError:
     TradingAgentsService = None  # type: ignore[assignment,misc]
+
+
+def _locked(method):
+    """Serialise a service method that loads, mutates and saves portfolio state."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            return method(self, *args, **kwargs)
+        with lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class TradingBotService:
@@ -300,6 +316,10 @@ class TradingBotService:
         )
 
         # Kalshi balance cache (avoids network call on every summary)
+        # Every public method below loads state, mutates it and saves it. Telegram commands run
+        # some of them on worker threads while the scheduler runs others, so without this lock
+        # two cycles could load the same state and both place the same bet.
+        self._state_lock = threading.RLock()
         self._kalshi_balance_cache: float | None = None
         self._kalshi_balance_cache_ts: float = 0.0
         self._kalshi_balance_cache_ttl: float = 120.0  # 2-minute TTL
@@ -312,6 +332,7 @@ class TradingBotService:
             "closes": [],
         }
 
+    @_locked
     def run(self, command: str, *, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
@@ -485,6 +506,7 @@ class TradingBotService:
         self.logger.info("Run summary: %s", summary)
         return summary
 
+    @_locked
     def status(self) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
@@ -497,6 +519,7 @@ class TradingBotService:
         self.state_store.save(state)
         return self._build_summary(state, pre_risk=risk, post_risk=risk, modules={})
 
+    @_locked
     def engage_kill_switch(self, *, reason: str = "manual_kill_switch") -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
@@ -536,6 +559,7 @@ class TradingBotService:
         """Return the most recent per-strategy leads (for /leads command)."""
         return {strategy: list(leads) for strategy, leads in self._last_leads.items()}
 
+    @_locked
     def clear_kill_switch(self, force: bool = False) -> dict[str, Any]:
         now = datetime.now(self.config.timezone)
         state = self.state_store.load()
