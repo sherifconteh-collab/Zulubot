@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any
 
 from trading_bot.broker import PaperBroker
-from trading_bot.clients_kalshi import KalshiClient
+from trading_bot.clients_kalshi import KalshiClient, order_fill_count
 from trading_bot.config import LearningConfig, PredictionConfig
 from trading_bot.models import PortfolioState
 from trading_bot import performance_memory
@@ -443,17 +443,25 @@ class CoinbasePredictionStrategy:
         ticker = position.meta.get("ticker", "")
         side = position.meta.get("side", "yes")
 
-        # Sell on Kalshi if we can trade
+        # Sell on Kalshi if we can trade. Only close the books when the contracts really
+        # left: a failed or unfilled sell leaves the position open to retry next cycle.
         if self.live_trading_enabled and ticker:
             try:
-                self.kalshi.place_order(
-                    ticker=ticker,
-                    side=side,
-                    action="sell",
-                    count=int(position.quantity),
-                )
+                order = self.kalshi.sell_to_close(ticker=ticker, side=side, count=int(position.quantity))
             except Exception as exc:
-                self.logger.warning("Kalshi sell failed for %s: %s", ticker, exc)
+                self.logger.warning("Kalshi sell failed for %s: %s; keeping position open.", ticker, exc)
+                return
+            sold = order_fill_count(order)
+            if sold is not None and sold < 1:
+                self.logger.warning("Kalshi sell for %s did not fill; keeping position open.", ticker)
+                return
+            held = int(position.quantity)
+            if sold is not None and sold < held:
+                # Partial fill: shrink the position to what is still held and retry later.
+                broker.resize_position(state, symbol, held - sold, refund_price=price)
+                self.logger.warning("Kalshi sell for %s filled %d of %d; remainder stays open.",
+                                    ticker, sold, held)
+                return
 
         closed = broker.close_position(
             state,
@@ -657,21 +665,29 @@ class CoinbasePredictionStrategy:
             actual_notional = quantity * price
             symbol = f"KX:{ticker}:{side}"
 
-            # Execute on Kalshi (live)
+            # Execute on Kalshi (live): marketable IOC limit at the price we decided on,
+            # then book only the contracts that filled.
             if self.live_trading_enabled:
                 try:
-                    yes_price_cents = int(price * 100) if side == "yes" else None
                     order = self.kalshi.place_order(
                         ticker=ticker,
                         side=side,
                         action="buy",
                         count=quantity,
-                        yes_price=yes_price_cents,
+                        price_cents=round(price * 100),
+                        time_in_force="immediate_or_cancel",
                     )
                     self.logger.info("Kalshi order placed: %s", order)
                 except Exception as exc:
                     self.logger.warning("Kalshi buy failed for %s: %s", ticker, exc)
                     continue
+                filled = order_fill_count(order)
+                if filled is not None:
+                    if filled < 1:
+                        self.logger.info("Kalshi buy for %s did not fill; skipping.", ticker)
+                        continue
+                    quantity = min(quantity, filled)
+                    actual_notional = quantity * price
             else:
                 self.logger.info(
                     "Paper-only: would buy %s %s x%d @ $%.2f (no Kalshi credentials)",

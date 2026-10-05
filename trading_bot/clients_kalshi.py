@@ -102,6 +102,34 @@ def parse_top_of_book(book: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def order_fill_count(result: dict[str, Any]) -> int | None:
+    """Contracts filled according to an order response, or None if it can't be told.
+
+    Looks at ``fill_count`` and the taker/maker split, in plain or ``*_fp`` (string)
+    form. None means the response had no recognisable fill fields.
+    """
+    order = result.get("order", result) if isinstance(result, dict) else {}
+
+    def num(*keys: str) -> float | None:
+        for key in keys:
+            raw = order.get(key)
+            if raw not in (None, ""):
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    total = num("fill_count", "fill_count_fp")
+    if total is not None:
+        return int(round(total))
+    taker = num("taker_fill_count", "taker_fill_count_fp")
+    maker = num("maker_fill_count", "maker_fill_count_fp")
+    if taker is None and maker is None:
+        return None
+    return int(round((taker or 0.0) + (maker or 0.0)))
+
+
 class KalshiClient:
     """Client for the Kalshi prediction market API."""
 
@@ -207,6 +235,21 @@ class KalshiClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _delete(self, path: str) -> dict[str, Any]:
+        if not self.can_trade:
+            raise RuntimeError("Kalshi trading requires API credentials (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY)")
+        resp = request_with_retry(
+            self.session,
+            "DELETE",
+            f"{self.BASE_URL}{path}",
+            headers=self._auth_headers("DELETE", f"/trade-api/v2{path}"),
+            timeout_seconds=self.timeout,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
 
     # ------------------------------------------------------------------
     # Public market data (no auth needed)
@@ -345,43 +388,86 @@ class KalshiClient:
         side: str,  # "yes" or "no"
         action: str = "buy",  # "buy" or "sell"
         count: int = 1,
-        yes_price: int | None = None,  # cents (1-99), None for market order
+        yes_price: int | None = None,  # cents (1-99): price of the YES side
+        price_cents: int | None = None,  # cents (1-99): price of the contract *being traded*
+        time_in_force: str | None = None,  # e.g. "immediate_or_cancel"
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
-        """Place an order on Kalshi.
+        """Place a limit order on Kalshi.
+
+        Kalshi only accepts priced limit orders, so a price is required. Pass either
+        ``price_cents`` (the price of the side you are trading: a NO order at 45 means
+        paying 45 cents per NO contract) or ``yes_price`` (always the YES-side price).
 
         Args:
             ticker: Market ticker (e.g., "KXBTC-26APR0117")
             side: "yes" or "no"
             action: "buy" or "sell"
             count: Number of contracts
-            yes_price: Limit price in cents (1-99). Omit for IOC at best.
+            price_cents: Limit price for the traded side, in cents (1-99).
+            yes_price: Alternative: limit price on the YES side, in cents.
+            time_in_force: "immediate_or_cancel" fills what it can now and cancels the rest.
             client_order_id: Optional tracking ID.
 
         Returns:
-            Order result dict from Kalshi.
+            Order result dict from Kalshi (see ``order_fill_count``).
         """
+        side = side.lower()
+        if price_cents is None and yes_price is None:
+            raise ValueError("Kalshi orders need a limit price (price_cents or yes_price).")
         payload: dict[str, Any] = {
             "ticker": ticker,
-            "side": side.lower(),
+            "side": side,
             "action": action.lower(),
-            "count": count,
+            "count": int(count),
             "client_order_id": client_order_id or str(uuid.uuid4()),
             "type": "limit",
         }
-        if yes_price is not None:
-            payload["yes_price"] = yes_price
+        if price_cents is not None:
+            cents = int(min(99, max(1, price_cents)))
+            payload["yes_price" if side == "yes" else "no_price"] = cents
         else:
-            # Use IOC to get filled immediately at market price
-            payload["time_in_force"] = "immediate_or_cancel"
+            payload["yes_price"] = int(min(99, max(1, yes_price)))  # type: ignore[arg-type]
+        if time_in_force:
+            payload["time_in_force"] = time_in_force
 
         self.logger.info(
-            "Kalshi order: %s %s %s x%d @ %s cents",
-            action, side, ticker, count, yes_price or "market",
+            "Kalshi order: %s %s %s x%d @ %s cents (%s)",
+            action, side, ticker, count,
+            payload.get("yes_price", payload.get("no_price")), time_in_force or "gtc",
         )
         result = self._post("/portfolio/orders", payload)
         self.logger.info("Kalshi order result: %s", json.dumps(result, indent=2))
         return result
+
+    def sell_to_close(
+        self,
+        *,
+        ticker: str,
+        side: str,
+        count: int,
+        slippage_cents: int = 3,
+    ) -> dict[str, Any]:
+        """Sell contracts now: an immediate-or-cancel limit just below the best bid.
+
+        Raises RuntimeError when there is no bid to sell into.
+        """
+        top = self.get_top_of_book(ticker)
+        bid = top.get(f"{side.lower()}_bid", 0.0)
+        if bid <= 0:
+            raise RuntimeError(f"No {side} bid on {ticker}; cannot sell right now.")
+        return self.place_order(
+            ticker=ticker,
+            side=side,
+            action="sell",
+            count=count,
+            price_cents=max(1, round(bid * 100) - slippage_cents),
+            time_in_force="immediate_or_cancel",
+        )
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """Cancel a resting order."""
+        return self._delete(f"/portfolio/orders/{order_id}")
 
     def get_positions(self) -> list[dict[str, Any]]:
         """Get current portfolio positions."""
