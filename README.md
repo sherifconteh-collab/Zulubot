@@ -348,3 +348,4 @@ OPTIONS_CHECK_INTERVAL_MINUTES=60
 OPTIONS_MIN_VOLUME=100          # skip contracts with volume below this
 OPTIONS_MIN_OPEN_INTEREST=500   # skip contracts with OI below this
 OPTIONS_MAX_IV=1.50             # skip contracts with implied volatility above 150%
+- **Coinbase is data-only by default.** `COINBASE_TRADING_ENABLED=false` (the default) means the bot never sends Coinbase an order, skips the Coinbase balance sync (cash is treated as 0), and does not run the crypto/rotation strategies live; prices from Coinbase still feed the Kalshi strategies. All live trading happens on Kalshi. Set it to `true` only if you really trade crypto on Coinbase.

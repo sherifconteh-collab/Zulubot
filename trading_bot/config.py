@@ -165,6 +165,9 @@ class CryptoStrategyConfig:
 class CoinbaseConfig:
     api_key: str = ""
     api_secret: str = ""
+    # Coinbase is a price/data source by default. Orders are only sent when this is true
+    # (and PAPER_MODE=false); otherwise the crypto/rotation strategies do not run live.
+    trading_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -672,6 +675,7 @@ class AppConfig:
             coinbase=CoinbaseConfig(
                 api_key=os.getenv("COINBASE_API_KEY", "").strip(),
                 api_secret=os.getenv("COINBASE_API_SECRET", "").strip(),
+                trading_enabled=_env_bool("COINBASE_TRADING_ENABLED", False),
             ),
             telegram=TelegramConfig(
                 bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
