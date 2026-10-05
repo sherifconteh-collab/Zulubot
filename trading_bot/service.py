@@ -322,9 +322,7 @@ class TradingBotService:
 
         # Sync real balances when in live mode
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
 
         self.refresh_open_positions(state, now=now)
 
@@ -492,9 +490,7 @@ class TradingBotService:
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
         self.refresh_open_positions(state, now=now)
         risk = self._evaluate_risk(state, now)
         self._persist_ai_budget(state)
@@ -506,9 +502,7 @@ class TradingBotService:
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
         self.refresh_open_positions(state, now=now)
 
         pre_risk = self._evaluate_risk(state, now)
@@ -547,9 +541,7 @@ class TradingBotService:
         state = self.state_store.load()
         self._hydrate_ai_budget(state)
         if not self.config.paper_mode:
-            self._sync_coinbase_balance(state)
-            self._sync_kalshi_balance(state)
-            self._sync_kalshi_positions(state)
+            self._sync_live_accounts(state)
         self.refresh_open_positions(state, now=now)
 
         equity = self.broker.portfolio_equity(state)
@@ -926,6 +918,34 @@ class TradingBotService:
             except Exception as exc:
                 self.logger.warning("Unable to refresh prediction prices: %s", exc)
 
+    def _sync_live_accounts(self, state: PortfolioState) -> None:
+        """Sync every live balance, then seed the risk baseline on the same equity basis."""
+        self._live_sync_failed = False
+        self._sync_coinbase_balance(state)
+        self._sync_kalshi_balance(state)
+        self._sync_kalshi_positions(state)
+        self._seed_live_peak(state)
+
+    def _seed_live_peak(self, state: PortfolioState) -> None:
+        """Reset a stale peak/baseline (old paper state, wrong initial cash).
+
+        The comparison uses ``broker.portfolio_equity`` (wallet cash + Kalshi cash + tracked
+        positions), exactly what the drawdown check measures. Seeding from another number,
+        such as Coinbase's total including coins the bot doesn't track, makes the very first
+        check read as a huge drawdown. Never touches an engaged kill switch.
+        """
+        if state.kill_switch_engaged:
+            return
+        equity = self.broker.portfolio_equity(state)
+        if equity > 0 and (
+            state.peak_equity <= 0
+            or state.peak_equity == self.config.initial_cash
+            or state.peak_equity > equity * 5  # peak is impossibly high vs reality
+        ):
+            self.logger.info("Resetting peak equity from $%.2f to live equity $%.2f", state.peak_equity, equity)
+            state.peak_equity = equity
+            state.daily_baseline_equity = equity
+
     def _sync_coinbase_balance(self, state: PortfolioState) -> None:
         """Sync portfolio cash and equity from real Coinbase balances."""
         try:
@@ -935,29 +955,12 @@ class TradingBotService:
             # Set cash to real Coinbase USD/USDC balance
             state.cash = usd_cash
 
-            # Use Coinbase total (includes all crypto) as the real equity
-            # This is more accurate than summing positions which may lag
-            real_equity = total_usd if total_usd > 0 else usd_cash
-
-            # Reset peak/baseline if they look stale (from old paper-mode state
-            # or different initial_cash) to prevent false kill-switch triggers
-            if real_equity > 0 and (
-                state.peak_equity <= 0
-                or state.peak_equity == self.config.initial_cash
-                or state.peak_equity > real_equity * 5  # peak is impossibly high vs reality
-            ):
-                self.logger.info(
-                    "Resetting peak equity from $%.2f to real equity $%.2f",
-                    state.peak_equity, real_equity,
-                )
-                state.peak_equity = real_equity
-                state.daily_baseline_equity = real_equity
-
             self.logger.info(
                 "Coinbase balance synced: cash=$%.2f total=$%.2f assets=%s",
                 usd_cash, total_usd, {k: f"${v:.2f}" for k, v in breakdown.items()},
             )
         except Exception as exc:
+            self._live_sync_failed = True
             self.logger.warning("Failed to sync Coinbase balance: %s. Using cached state.", exc)
             # In live mode, never show fake money — if sync fails and cash
             # looks like the default initial_cash, zero it out.
@@ -976,6 +979,7 @@ class TradingBotService:
             self._kalshi_balance_cache_ts = time.monotonic()
             self.logger.info("Kalshi balance synced: cash=$%.2f", balance)
         except Exception as exc:
+            self._live_sync_failed = True
             self.logger.warning("Failed to sync Kalshi balance: %s. Using cached balance.", exc)
             state.cash_reserves.setdefault(self._KALSHI_CASH_BUCKET, 0.0)
 
@@ -1162,7 +1166,10 @@ class TradingBotService:
 
     def _evaluate_risk(self, state: PortfolioState, now: datetime) -> RiskSnapshot:
         equity = self.broker.portfolio_equity(state)
-        snapshot = self.risk_manager.evaluate(state, equity, now)
+        sync_failed = bool(getattr(self, "_live_sync_failed", False)) and not self.config.paper_mode
+        if sync_failed:
+            self.logger.warning("A live balance sync failed this cycle; not allowing a kill-switch trigger on partial data.")
+        snapshot = self.risk_manager.evaluate(state, equity, now, allow_kill_switch=not sync_failed)
         if snapshot.kill_switch_triggered_now:
             self.logger.error(
                 "Kill switch triggered at equity=%.2f total_drawdown=%.2f%%. Closing all positions.",

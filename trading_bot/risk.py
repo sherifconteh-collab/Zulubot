@@ -62,7 +62,16 @@ class RiskManager:
         self.config = config
         self._vol_config = vol_config or VolatilityConfig()
 
-    def evaluate(self, state: PortfolioState, equity: float, now: datetime) -> RiskSnapshot:
+    def evaluate(
+        self,
+        state: PortfolioState,
+        equity: float,
+        now: datetime,
+        *,
+        allow_kill_switch: bool = True,
+    ) -> RiskSnapshot:
+        """Update drawdown state. ``allow_kill_switch=False`` is for cycles where the equity
+        inputs are known to be incomplete (a failed balance sync), so bad data can't liquidate."""
         session_date = now.date().isoformat()
         if state.daily_baseline_date != session_date:
             state.daily_baseline_date = session_date
@@ -84,7 +93,7 @@ class RiskManager:
             state.halt_new_trades_for_day = True
 
         kill_switch_triggered_now = False
-        if total_drawdown >= self.config.kill_switch_drawdown and not state.kill_switch_engaged:
+        if allow_kill_switch and total_drawdown >= self.config.kill_switch_drawdown and not state.kill_switch_engaged:
             state.kill_switch_engaged = True
             kill_switch_triggered_now = True
 
