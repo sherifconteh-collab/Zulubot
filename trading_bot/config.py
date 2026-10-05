@@ -458,7 +458,7 @@ class KalshiPerpetualsConfig:
 class KalshiSportsConfig:
     """Configuration for the Kalshi sports (game-winner) strategy."""
 
-    enabled: bool = False
+    enabled: bool = True
     # League keys to scan (see clients_espn.LEAGUES); leagues with no open Kalshi markets are skipped.
     leagues: list[str] = field(default_factory=lambda: [
         "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
@@ -884,7 +884,7 @@ class AppConfig:
                 min_trade_usd=_env_float("KALSHI_PERP_MIN_TRADE_USD", 10.0),
             ),
             kalshi_sports=KalshiSportsConfig(
-                enabled=_env_bool("KALSHI_SPORTS_ENABLED", False),
+                enabled=_env_bool("KALSHI_SPORTS_ENABLED", True),
                 leagues=_env_list_lower("KALSHI_SPORTS_LEAGUES", [
                     "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
                     "epl", "laliga", "bundesliga", "seriea", "ligue1", "mls", "ligamx", "ucl", "uel"]),
