@@ -172,14 +172,16 @@ class CryptoSentimentFundingStrategy:
                     continue
                 position = state.positions[symbol]
                 # Place sell on Coinbase (paper or live)
-                if self.coinbase_broker is not None:
-                    self.coinbase_broker.place_market_sell(
-                        state,
-                        binance_symbol=symbol,
-                        quantity=position.quantity,
-                        strategy="crypto_sentiment_funding",
-                        reason="fear_and_greed_sell_threshold",
-                    )
+                if self.coinbase_broker is not None and not self.coinbase_broker.place_market_sell(
+                    state,
+                    binance_symbol=symbol,
+                    quantity=position.quantity,
+                    strategy="crypto_sentiment_funding",
+                    reason="fear_and_greed_sell_threshold",
+                ):
+                    # Live sell failed: the coins are still held, so keep the position and retry.
+                    self.logger.error("Live sell failed for %s; keeping position open.", symbol)
+                    continue
                 broker.close_position(
                     state,
                     symbol=symbol,
@@ -368,18 +370,20 @@ class CryptoSentimentFundingStrategy:
 
                     price = execution_prices[symbol]
                     # Place buy on Coinbase (paper or live)
-                    if self.coinbase_broker is not None:
-                        self.coinbase_broker.place_market_buy(
-                            state,
-                            binance_symbol=symbol,
-                            notional_usd=notional,
-                            strategy="crypto_sentiment_funding",
-                            now=now,
-                            meta={
-                                "fear_and_greed": fear_greed.value,
-                                "funding_rate": snapshot.funding_rate,
-                            },
-                        )
+                    if self.coinbase_broker is not None and not self.coinbase_broker.place_market_buy(
+                        state,
+                        binance_symbol=symbol,
+                        notional_usd=notional,
+                        strategy="crypto_sentiment_funding",
+                        now=now,
+                        meta={
+                            "fear_and_greed": fear_greed.value,
+                            "funding_rate": snapshot.funding_rate,
+                        },
+                    ):
+                        # Live buy failed: don't book a position we don't hold.
+                        self.logger.error("Live buy failed for %s; not opening a position.", symbol)
+                        continue
                     position = broker.open_position(
                         state,
                         symbol=symbol,
@@ -493,14 +497,15 @@ class CryptoSentimentFundingStrategy:
             if hit_reason is None:
                 continue
 
-            if self.coinbase_broker is not None:
-                self.coinbase_broker.place_market_sell(
-                    state,
-                    binance_symbol=symbol,
-                    quantity=position.quantity,
-                    strategy="crypto_sentiment_funding",
-                    reason=hit_reason,
-                )
+            if self.coinbase_broker is not None and not self.coinbase_broker.place_market_sell(
+                state,
+                binance_symbol=symbol,
+                quantity=position.quantity,
+                strategy="crypto_sentiment_funding",
+                reason=hit_reason,
+            ):
+                self.logger.error("Live %s sell failed for %s; keeping position open.", hit_reason, symbol)
+                continue
             broker.close_position(
                 state,
                 symbol=symbol,
