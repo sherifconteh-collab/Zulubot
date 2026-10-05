@@ -1024,6 +1024,14 @@ class TradingTelegramBot:
                 )
             if not preds:
                 lines.append("No predictable games found right now.")
+            for parlay in (module.get("parlays") or [])[:2]:
+                legs = " + ".join(html.escape(str(l.get("pick", "?"))) for l in parlay.get("legs", []))
+                lines.append(
+                    f"\U0001f9fe <b>{len(parlay.get('legs', []))}-leg parlay idea</b>: {legs}\n"
+                    f"   fair {float(parlay.get('fair_prob', 0)):.1%} \u00b1{float(parlay.get('uncertainty_sd', 0)):.1%}"
+                    f" | pay at most ${float(parlay.get('max_price', 0)):.2f}"
+                    f" (decimal {float(parlay.get('fair_decimal_odds', 0)):.2f}). Manual only."
+                )
             for sym in module.get("buys") or []:
                 lines.append(f"BUY  {html.escape(str(sym))}")
             if module.get("error"):

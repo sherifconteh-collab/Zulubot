@@ -577,7 +577,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## Kalshi Sports Betting
 
-`KalshiSportsStrategy` bets on Kalshi game-winner markets (NFL, NBA, MLB, NHL by default; college football/basketball via `KALSHI_SPORTS_LEAGUES`). Enable with `KALSHI_SPORTS_ENABLED=true`; it paper-trades unless `PAPER_MODE=false` and Kalshi credentials are set.
+`KalshiSportsStrategy` bets on Kalshi game-winner markets across NFL, college football (FBS and FCS), men's and women's college basketball, NBA, WNBA, MLB, NHL and soccer (EPL, La Liga, Bundesliga, Serie A, Ligue 1, MLS, Liga MX, Champions/Europa League; World Cup optional). Pick leagues with `KALSHI_SPORTS_LEAGUES`; leagues with no open Kalshi markets (offseason) are skipped without calling ESPN. Soccer uses three-way (home/draw/away) devigged odds and the separate "Tie" markets. Enable with `KALSHI_SPORTS_ENABLED=true`; it paper-trades unless `PAPER_MODE=false` and Kalshi credentials are set.
 
 There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
 1. Pulls upcoming games from ESPN (schedule, DraftKings opening/closing moneylines, ESPN's matchup predictor, records) and matches open Kalshi markets to them.
@@ -586,6 +586,9 @@ There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
 4. Skips games where sources contradict each other beyond chance (a 99% chi-square test: usually a mismatched team or a stale quote) and drops a lone outlier source.
 5. Values YES and NO **net of Kalshi's taker fee**, then sizes with Kelly shrunk by edge-vs-uncertainty, so noisy or thin edges get tiny stakes and strong, well-supported ones get larger ones. Stakes are capped by the size resting at the ask, a per-bet % of equity and a total exposure budget. One bet per game.
 6. Holds to settlement and closes at Kalshi's settlement value ($1, $0, or $0.50 on a tie). Paper PnL includes the fee.
+7. Every match must agree on kickoff time as well as teams, so a playoff series or home-and-home pair can't be priced off another day's game.
+
+**Parlays:** Kalshi combos are quoted on request (RFQ), not traded on an order book, so the bot never places them. Instead each scan suggests 2-4 leg parlays built only from legs it already finds profitable, from different games (independent), with the fair probability and the *maximum price worth paying*; place them in Kalshi's parlay builder. Betting the same legs separately with Kelly grows a bankroll faster than a parlay unless Kalshi's quote is below that price. `KALSHI_SPORTS_PARLAY_MAX_LEGS=0` turns suggestions off.
 
 A sportsbook line is required by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`): ESPN's predictor and records alone are not sharper than Kalshi's price. Telegram: `/sports` runs a scan and shows picks with probability ± uncertainty, net edge after fees, and line movement.
 

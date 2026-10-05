@@ -459,15 +459,15 @@ class KalshiSportsConfig:
     """Configuration for the Kalshi sports (game-winner) strategy."""
 
     enabled: bool = False
-    # ESPN "sport/league" paths to scan. Each must have a Kalshi series below.
-    leagues: list[str] = field(
-        default_factory=lambda: ["football/nfl", "basketball/nba", "baseball/mlb", "hockey/nhl"]
-    )
-    # Extra Kalshi series tickers to scan, "ESPN_PATH=SERIES" (e.g. "football/nfl=KXNFLGAME").
-    # Empty -> built-in defaults in clients_espn.DEFAULT_KALSHI_SERIES.
+    # League keys to scan (see clients_espn.LEAGUES); leagues with no open Kalshi markets are skipped.
+    leagues: list[str] = field(default_factory=lambda: [
+        "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
+        "epl", "laliga", "bundesliga", "seriea", "ligue1", "mls", "ligamx", "ucl", "uel",
+    ])
+    # Extra Kalshi series per league, "key=SERIES" (e.g. "nfl=KXNFLGAME"); adds to the built-in ones.
     series_overrides: list[str] = field(default_factory=list)
     check_interval_minutes: int = 30
-    max_hours_ahead: float = 36.0            # only bet games starting within this window
+    max_hours_ahead: float = 48.0            # only bet games starting within this window
     min_minutes_to_start: float = 5.0        # don't enter right at kickoff
     # No fixed edge/price/volume cutoffs: stakes scale with net edge vs uncertainty
     # (see trading_bot/sports_model.py). These are risk limits and cost inputs only.
@@ -480,6 +480,10 @@ class KalshiSportsConfig:
     fee_rate: float = 0.07                   # Kalshi taker fee: rate * p * (1 - p) per contract
     # Require a sportsbook line for the game; ESPN's predictor/records alone can't beat Kalshi's price.
     require_market_signal: bool = True
+    # Parlay *suggestions* (never auto-placed): combine up to this many model-approved
+    # legs from different games. 0 disables. Kalshi combos are quoted on request, not
+    # via an order book, so they are placed manually in Kalshi's parlay builder.
+    parlay_max_legs: int = 4
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
     take_profit_pct: float = 0.0
@@ -872,10 +876,12 @@ class AppConfig:
             ),
             kalshi_sports=KalshiSportsConfig(
                 enabled=_env_bool("KALSHI_SPORTS_ENABLED", False),
-                leagues=_env_list_lower("KALSHI_SPORTS_LEAGUES", ["football/nfl", "basketball/nba", "baseball/mlb", "hockey/nhl"]),
+                leagues=_env_list_lower("KALSHI_SPORTS_LEAGUES", [
+                    "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
+                    "epl", "laliga", "bundesliga", "seriea", "ligue1", "mls", "ligamx", "ucl", "uel"]),
                 series_overrides=_env_list_lower("KALSHI_SPORTS_SERIES", []),
                 check_interval_minutes=_env_int("KALSHI_SPORTS_INTERVAL_MINUTES", 30),
-                max_hours_ahead=_env_float("KALSHI_SPORTS_MAX_HOURS_AHEAD", 36.0),
+                max_hours_ahead=_env_float("KALSHI_SPORTS_MAX_HOURS_AHEAD", 48.0),
                 min_minutes_to_start=_env_float("KALSHI_SPORTS_MIN_MINUTES_TO_START", 5.0),
                 kelly_fraction=_env_float("KALSHI_SPORTS_KELLY_FRACTION", 0.25),
                 max_position_pct=_env_float("KALSHI_SPORTS_MAX_POSITION_PCT", 0.03),
@@ -885,6 +891,7 @@ class AppConfig:
                 home_advantage=_env_float("KALSHI_SPORTS_HOME_ADVANTAGE", 0.55),
                 fee_rate=_env_float("KALSHI_SPORTS_FEE_RATE", 0.07),
                 require_market_signal=_env_bool("KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL", True),
+                parlay_max_legs=_env_int("KALSHI_SPORTS_PARLAY_MAX_LEGS", 4),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),

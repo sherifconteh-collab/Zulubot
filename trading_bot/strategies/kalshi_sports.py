@@ -43,10 +43,12 @@ from trading_bot.broker import PaperBroker
 from pathlib import Path
 
 from trading_bot.clients_espn import (
-    DEFAULT_KALSHI_SERIES,
+    LEAGUES,
     EspnClient,
     EspnGame,
     EspnTeam,
+    LeagueSpec,
+    devig_three_way,
     devig_two_way,
     line_movement,
 )
@@ -60,6 +62,7 @@ from trading_bot.sports_model import (
     combine,
     evaluate_side,
     microprice,
+    parlay_value,
 )
 
 _CASH_BUCKET = "kalshi"
@@ -98,23 +101,39 @@ def _parse_iso(raw: Any) -> datetime | None:
 
 
 def _game_time_fits(market: dict[str, Any], game: EspnGame) -> bool:
-    """True when the market's expected expiry is 0-10h after the game's start."""
+    """True when the market's expected expiry is 0-10h after the game's start.
+
+    False when the market carries no expiry: without it we can't tell which day's
+    game it belongs to, so it is not traded.
+    """
     expiry = _parse_iso(market.get("expected_expiration_time") or market.get("occurrence_datetime"))
     if expiry is None:
         return False
     return 0 <= (expiry - game.start_time).total_seconds() <= 10 * 3600
 
 
+def is_tie_market(market: dict[str, Any]) -> bool:
+    ticker = str(market.get("ticker", "")).upper()
+    return (
+        str(market.get("yes_sub_title", "") or "").strip().lower() == "tie"
+        or ticker.endswith("-TIE")
+        or "tie is the result" in str(market.get("title", "")).lower()
+    )
+
+
 def match_market_to_game(
     market: dict[str, Any],
     games: list[EspnGame],
+    event_games: dict[str, EspnGame] | None = None,
 ) -> tuple[EspnGame, str] | None:
-    """Return (game, "home"|"away") for the team a market's YES side backs.
+    """Return (game, "home"|"away"|"draw") for the outcome a market's YES side backs.
 
     Kalshi titles are just "<Team> wins", so games are matched by the team
     abbreviations in the event ticker ("...-26OCT12BUFLAR") or, failing that,
-    by the YES team's name plus kickoff/expiry timing.
-    Returns None when the market cannot be matched to exactly one game and team.
+    by the YES team's name plus kickoff/expiry timing. "Tie" markets carry no
+    team name at all, so they are resolved through the event their sibling
+    team markets already matched (``event_games``) or the ticker code.
+    Returns None when the market cannot be matched to exactly one game and outcome.
     """
     ticker = str(market.get("ticker", "")).upper()
     event_ticker = str(market.get("event_ticker", "")).upper()
@@ -124,8 +143,22 @@ def match_market_to_game(
     ).lower()
     code = _event_code(event_ticker)
 
+    if is_tie_market(market):
+        if event_games and event_ticker in event_games:
+            return event_games[event_ticker], "draw"
+        pool = [
+            g for g in games
+            if code and g.home.abbreviation and g.away.abbreviation
+            and code in (g.away.abbreviation + g.home.abbreviation, g.home.abbreviation + g.away.abbreviation)
+            and _game_time_fits(market, g)
+        ]
+        return (pool[0], "draw") if len(pool) == 1 else None
+
+    # Every match must also agree on *when* the game is: playoff series and
+    # home-and-home pairs reuse the same teams on different days, and pairing a
+    # market with another day's game would price it off the wrong odds.
     def hits(predicate) -> list[EspnGame]:
-        return [g for g in games if predicate(g)]
+        return [g for g in games if _game_time_fits(market, g) and predicate(g)]
 
     def by_code(g: EspnGame) -> bool:
         h, a = g.home.abbreviation, g.away.abbreviation
@@ -142,8 +175,6 @@ def match_market_to_game(
     found: list[EspnGame] = []
     for predicate in (by_code, by_both_names, by_yes_team_and_time):
         found = hits(predicate)
-        if len(found) > 1:  # e.g. consecutive series games: use kickoff/expiry timing
-            found = [g for g in found if _game_time_fits(market, g)]
         if found:
             break
     if len(found) != 1:
@@ -227,22 +258,28 @@ def record_home_prob(game: EspnGame, home_advantage: float) -> float | None:
     return odds / (1 + odds)
 
 
+def sportsbook_outcome_probs(game: EspnGame) -> dict[str, float] | None:
+    """Vig-free {home, away[, draw]} probabilities from the game's moneylines."""
+    if game.three_way:
+        probs = devig_three_way(game.home_moneyline, game.draw_moneyline, game.away_moneyline)
+        return None if probs is None else dict(zip(("home", "draw", "away"), probs))
+    book = devig_two_way(game.home_moneyline, game.away_moneyline)
+    return None if book is None else {"home": book, "away": 1.0 - book}
+
+
 def build_signals(
     game: EspnGame,
-    team_side: str,
+    outcome: str,
     market: dict[str, Any],
     config: KalshiSportsConfig,
     calibration: SourceCalibration,
 ) -> list[Signal]:
-    """Independent estimates of P(YES) for a market (YES = the team on ``team_side``)."""
+    """Independent estimates of P(YES) for a market (YES = ``outcome``: home, away or draw)."""
     signals: list[Signal] = []
 
-    def as_yes(p_home: float) -> float:
-        return p_home if team_side == "home" else 1.0 - p_home
-
-    book = devig_two_way(game.home_moneyline, game.away_moneyline)
-    if book is not None:
-        signals.append(Signal("sportsbook", as_yes(book), calibration.sd("sportsbook")))
+    book = sportsbook_outcome_probs(game)
+    if book is not None and outcome in book:
+        signals.append(Signal("sportsbook", book[outcome], calibration.sd("sportsbook")))
 
     yes_bid, yes_ask = _kalshi_price(market, "yes_bid"), _kalshi_price(market, "yes_ask")
     micro = microprice(
@@ -253,21 +290,31 @@ def build_signals(
         sd = max(calibration.sd("kalshi_book"), (yes_ask - yes_bid) / 2.0)
         signals.append(Signal("kalshi_book", micro, sd))
 
-    if game.predictor_home_prob is not None:
-        signals.append(Signal("espn_predictor", as_yes(game.predictor_home_prob), calibration.sd("espn_predictor")))
-
-    # Records are already priced into a sportsbook line; blending them in would
-    # only shrink a sharp number toward .500. They are a fallback for no-line games.
-    if book is None:
-        rec = record_home_prob(game, config.home_advantage)
-        if rec is not None:
-            signals.append(Signal("record", as_yes(rec), calibration.sd("record")))
+    # ESPN's predictor and the records model are two-way only (no draw probability).
+    if not game.three_way and outcome in ("home", "away"):
+        if game.predictor_home_prob is not None:
+            p = game.predictor_home_prob if outcome == "home" else 1.0 - game.predictor_home_prob
+            signals.append(Signal("espn_predictor", p, calibration.sd("espn_predictor")))
+        # Records are already priced into a sportsbook line; blending them in would
+        # only shrink a sharp number toward .500. They are a fallback for no-line games.
+        if book is None:
+            rec = record_home_prob(game, config.home_advantage)
+            if rec is not None:
+                signals.append(Signal("record", rec if outcome == "home" else 1.0 - rec,
+                                      calibration.sd("record")))
     return signals
 
 
 # ---------------------------------------------------------------------------
 # Strategy
 # ---------------------------------------------------------------------------
+
+class _Label:
+    """Stand-in for a team when a contract side has no single team (draw / not-a-team)."""
+
+    def __init__(self, name: str) -> None:
+        self.display_name = name
+
 
 class KalshiSportsStrategy:
     """Bets on Kalshi game-winner markets using ESPN schedule, odds and projections."""
@@ -310,6 +357,7 @@ class KalshiSportsStrategy:
             "markets_scanned": 0,
             "markets_matched": 0,
             "predictions": [],
+            "parlays": [],
             "decisions": [],
             "can_trade_live": self.live_trading_enabled,
         }
@@ -333,6 +381,7 @@ class KalshiSportsStrategy:
                 return result
 
             candidates = self._build_candidates(now, result)
+            result["parlays"] = self._suggest_parlays(candidates)
             if result["games_scanned"] == 0 and result["markets_scanned"] == 0:
                 result["status"] = "no_data"
             self._execute_candidates(state, broker, candidates, now, result)
@@ -360,15 +409,23 @@ class KalshiSportsStrategy:
     # Discovery + prediction
     # ------------------------------------------------------------------
 
-    def _series_map(self) -> dict[str, str]:
-        mapping = {lg: DEFAULT_KALSHI_SERIES[lg] for lg in self.config.leagues if lg in DEFAULT_KALSHI_SERIES}
+    def _league_specs(self) -> list[tuple[LeagueSpec, list[str]]]:
+        """Configured leagues with their Kalshi series (built-ins plus overrides)."""
+        extra: dict[str, list[str]] = {}
         for entry in self.config.series_overrides:
-            league, _, series = entry.partition("=")
-            if league.strip() and series.strip():
-                mapping[league.strip()] = series.strip().upper()
-        return mapping
+            key, _, series = entry.partition("=")
+            if key.strip() and series.strip():
+                extra.setdefault(key.strip().lower(), []).append(series.strip().upper())
+        specs: list[tuple[LeagueSpec, list[str]]] = []
+        for key in self.config.leagues:
+            spec = LEAGUES.get(key.lower())
+            if spec is None:
+                self.logger.warning("Unknown sports league '%s' (known: %s)", key, ", ".join(sorted(LEAGUES)))
+                continue
+            specs.append((spec, list(spec.kalshi_series) + extra.get(spec.key, [])))
+        return specs
 
-    def _fetch_games(self, league: str, now: datetime) -> list[EspnGame]:
+    def _fetch_games(self, spec: LeagueSpec, now: datetime) -> list[EspnGame]:
         """Scoreboard for each day in the window (ESPN rejects multi-day ranges)."""
         days = math.ceil(self.config.max_hours_ahead / 24.0) + 1
         games: dict[str, EspnGame] = {}
@@ -376,7 +433,9 @@ class KalshiSportsStrategy:
         for offset in range(days + 1):
             day = f"{now + timedelta(days=offset):%Y%m%d}"
             try:
-                for game in self.espn.get_scoreboard(league, date=day):
+                for game in self.espn.get_scoreboard(
+                    spec.espn_path, date=day, groups=spec.groups, three_way=spec.three_way,
+                ):
                     games[game.game_id] = game
             except Exception as exc:
                 errors.append(exc)
@@ -400,14 +459,18 @@ class KalshiSportsStrategy:
         """Score every matched market; return tradeable candidates (best edge per game)."""
         best_per_game: dict[str, dict[str, Any]] = {}
 
-        for league, series in self._series_map().items():
+        for spec, series_list in self._league_specs():
             try:
-                games = self._fetch_games(league, now)
-                markets = self._fetch_markets(series)
+                markets: list[dict[str, Any]] = []
+                for series in series_list:
+                    markets.extend(self._fetch_markets(series))
+                if not markets:  # out of season: don't spend ESPN calls on it
+                    continue
+                games = self._fetch_games(spec, now)
             except Exception as exc:
-                self.logger.warning("Sports data fetch failed for %s: %s", league, exc)
+                self.logger.warning("Sports data fetch failed for %s: %s", spec.key, exc)
                 result["decisions"].append({
-                    "strategy": "kalshi_sports", "symbol": league,
+                    "strategy": "kalshi_sports", "symbol": spec.key,
                     "action": "skip", "reason": "data_fetch_failed",
                     "signals": {"error": str(exc)[:120]},
                 })
@@ -422,20 +485,27 @@ class KalshiSportsStrategy:
                 <= (g.start_time - now).total_seconds()
                 <= self.config.max_hours_ahead * 3600
             ]
+            # Team markets first; "Tie" markets then ride on their sibling's event match.
             matched: list[tuple[dict[str, Any], EspnGame, str]] = []
-            for market in markets:
+            event_games: dict[str, EspnGame] = {}
+            for market in (m for m in markets if not is_tie_market(m)):
                 found = match_market_to_game(market, upcoming)
+                if found is not None:
+                    matched.append((market, found[0], found[1]))
+                    event_games[str(market.get("event_ticker", "")).upper()] = found[0]
+            for market in (m for m in markets if is_tie_market(m)):
+                found = match_market_to_game(market, upcoming, event_games)
                 if found is not None:
                     matched.append((market, found[0], found[1]))
             result["markets_matched"] += len(matched)
 
             enriched: set[str] = set()
-            for market, game, team_side in matched:
+            for market, game, outcome in matched:
                 if game.game_id not in enriched:
                     self.espn.enrich_game(game)
                     enriched.add(game.game_id)
 
-                evaluation = self._evaluate_market(market, game, team_side, result)
+                evaluation = self._evaluate_market(market, game, outcome, result)
                 if evaluation is None:
                     continue
                 key = f"{game.league}:{game.game_id}"
@@ -456,7 +526,7 @@ class KalshiSportsStrategy:
         self,
         market: dict[str, Any],
         game: EspnGame,
-        team_side: str,
+        team_side: str,  # "home" | "away" | "draw": the outcome YES backs
         result: dict[str, Any],
     ) -> dict[str, Any] | None:
         cfg = self.config
@@ -476,11 +546,17 @@ class KalshiSportsStrategy:
                            sources={s.name: round(s.p, 3) for s in post.used})
             return None
 
-        backed = game.home if team_side == "home" else game.away
-        other = game.away if team_side == "home" else game.home
+        # Display names for the two sides of the contract. With draws possible, NO on
+        # "X wins" means "X doesn't win", not "the other team wins".
+        if team_side == "draw":
+            backed, other = _Label("Draw"), _Label("No draw")
+        else:
+            backed = game.home if team_side == "home" else game.away
+            other = _Label(f"Not {backed.display_name}") if game.three_way else (
+                game.away if team_side == "home" else game.home)
         yes_ask = _kalshi_price(market, "yes_ask")
         no_ask = _kalshi_price(market, "no_ask")
-        move = line_movement(game)
+        move = line_movement(game) if team_side in ("home", "away") else None
         if move is not None and team_side == "away":
             move = -move  # express movement toward the YES team
 
@@ -542,6 +618,36 @@ class KalshiSportsStrategy:
             "depth": depth,
             "edge": decision.stake_fraction * decision.net_edge,  # expected growth: ranking key
         }
+
+    def _suggest_parlays(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Parlay ideas built only from legs that already have a positive net edge.
+
+        Candidates are one-per-game, so legs are independent. A parlay of
+        negative-edge legs can't be profitable, so none are suggested then. Betting
+        the legs separately with Kelly grows the bankroll faster than the same legs
+        in a parlay unless Kalshi's quoted parlay price is below ``max_price``.
+        """
+        cfg = self.config
+        legs = sorted(candidates, key=lambda c: c["edge"], reverse=True)
+        suggestions: list[dict[str, Any]] = []
+        for size in range(2, min(cfg.parlay_max_legs, len(legs)) + 1):
+            chosen = legs[:size]
+            value = parlay_value(
+                [(c["decision"].p, c["decision"].sd) for c in chosen], fee_rate=cfg.fee_rate,
+            )
+            suggestions.append({
+                "legs": [
+                    {"ticker": c["market"].get("ticker", ""), "game": c["game"].label,
+                     "pick": c["pick"], "side": c["decision"].side,
+                     "win_prob": round(c["decision"].p, 4), "kalshi_ask": round(c["decision"].price, 4)}
+                    for c in chosen
+                ],
+                "fair_prob": round(value["fair"], 4),
+                "uncertainty_sd": round(value["sd"], 4),
+                "max_price": round(value["max_price"], 4),
+                "fair_decimal_odds": round(value["fair_decimal_odds"], 2),
+            })
+        return suggestions
 
     def _log_skip(self, result: dict[str, Any], ticker: str, reason: str, **signals: Any) -> None:
         result["decisions"].append({

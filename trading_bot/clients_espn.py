@@ -23,16 +23,45 @@ import requests
 from trading_bot.clients import request_with_retry
 from trading_bot.config import HttpRetryConfig
 
-# ESPN "sport/league" path -> Kalshi game-winner series ticker.
-# ⚠️ Verify against Kalshi's live /series listing; override with KALSHI_SPORTS_SERIES.
-DEFAULT_KALSHI_SERIES: dict[str, str] = {
-    "football/nfl": "KXNFLGAME",
-    "football/college-football": "KXNCAAFGAME",
-    "basketball/nba": "KXNBAGAME",
-    "basketball/mens-college-basketball": "KXNCAAMBGAME",
-    "baseball/mlb": "KXMLBGAME",
-    "hockey/nhl": "KXNHLGAME",
-}
+@dataclass(frozen=True)
+class LeagueSpec:
+    """One bettable league: where ESPN lists it and which Kalshi series trade it."""
+
+    key: str
+    espn_path: str                    # "<sport>/<league>" under site.api.espn.com
+    kalshi_series: tuple[str, ...]    # game-winner series tickers
+    groups: str | None = None         # ESPN `groups` filter (college divisions)
+    three_way: bool = False           # draws possible (soccer): three markets per game
+
+
+# ⚠️ Series tickers verified against Kalshi's live /series listing (Oct 2026); override or
+# extend with KALSHI_SPORTS_SERIES="key=SERIES,...". Leagues out of season simply return
+# no markets and are skipped without touching ESPN.
+LEAGUES: dict[str, LeagueSpec] = {s.key: s for s in (
+    LeagueSpec("nfl", "football/nfl", ("KXNFLGAME",)),
+    LeagueSpec("ncaaf", "football/college-football", ("KXNCAAFGAME", "KXNCAAFBOWLGAME"), groups="80"),
+    LeagueSpec("ncaaf-fcs", "football/college-football", ("KXNCAAFCSGAME",), groups="81"),
+    LeagueSpec("ncaamb", "basketball/mens-college-basketball", ("KXNCAAMBGAME",), groups="50"),
+    LeagueSpec("ncaawb", "basketball/womens-college-basketball", ("KXNCAAWBGAME",), groups="50"),
+    LeagueSpec("nba", "basketball/nba", ("KXNBAGAME",)),
+    LeagueSpec("wnba", "basketball/wnba", ("KXWNBAGAME",)),
+    LeagueSpec("mlb", "baseball/mlb", ("KXMLBGAME",)),
+    LeagueSpec("nhl", "hockey/nhl", ("KXNHLGAME",)),
+    LeagueSpec("epl", "soccer/eng.1", ("KXEPLGAME",), three_way=True),
+    LeagueSpec("laliga", "soccer/esp.1", ("KXLALIGAGAME",), three_way=True),
+    LeagueSpec("bundesliga", "soccer/ger.1", ("KXBUNDESLIGAGAME",), three_way=True),
+    LeagueSpec("seriea", "soccer/ita.1", ("KXSERIEAGAME",), three_way=True),
+    LeagueSpec("ligue1", "soccer/fra.1", ("KXLIGUE1GAME",), three_way=True),
+    LeagueSpec("mls", "soccer/usa.1", ("KXMLSGAME",), three_way=True),
+    LeagueSpec("ligamx", "soccer/mex.1", ("KXLIGAMXGAME",), three_way=True),
+    LeagueSpec("ucl", "soccer/uefa.champions", ("KXUCLGAME",), three_way=True),
+    LeagueSpec("uel", "soccer/uefa.europa", ("KXUELGAME",), three_way=True),
+    LeagueSpec("worldcup", "soccer/fifa.world", ("KXWCGAME",), three_way=True),
+)}
+DEFAULT_LEAGUES: list[str] = [
+    "nfl", "ncaaf", "ncaaf-fcs", "ncaamb", "ncaawb", "nba", "wnba", "mlb", "nhl",
+    "epl", "laliga", "bundesliga", "seriea", "ligue1", "mls", "ligamx", "ucl", "uel",
+]
 
 
 @dataclass(frozen=True)
@@ -72,6 +101,9 @@ class EspnGame:
     # Opening moneylines (None if unavailable); close-vs-open shows where bettors pushed the line
     home_open_moneyline: float | None = None
     away_open_moneyline: float | None = None
+    # Draw moneyline (three-way sports only)
+    draw_moneyline: float | None = None
+    three_way: bool = False
     # ESPN predictor: P(home wins), 0-1
     predictor_home_prob: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -104,6 +136,19 @@ def devig_two_way(home_odds: float | None, away_odds: float | None) -> float | N
     if total <= 0:
         return None
     return p_home / total
+
+
+def devig_three_way(
+    home_odds: float | None, draw_odds: float | None, away_odds: float | None,
+) -> tuple[float, float, float] | None:
+    """Vig-free (P(home), P(draw), P(away)) from three American moneylines."""
+    probs = [american_to_prob(o) for o in (home_odds, draw_odds, away_odds)]
+    if any(p is None for p in probs):
+        return None
+    total = sum(probs)  # type: ignore[arg-type]
+    if total <= 0:
+        return None
+    return tuple(p / total for p in probs)  # type: ignore[return-value]
 
 
 def parse_record(summary: str) -> tuple[float | None, int]:
@@ -185,6 +230,10 @@ def _moneylines_from_odds(odds_entry: dict[str, Any]) -> tuple[float | None, flo
     return None, None
 
 
+def _draw_moneyline(odds_entry: dict[str, Any]) -> float | None:
+    return _to_float((odds_entry.get("drawOdds") or {}).get("moneyLine"))
+
+
 def _open_moneylines(odds_entry: dict[str, Any]) -> tuple[float | None, float | None]:
     ml = odds_entry.get("moneyline") or {}
     return (
@@ -202,7 +251,7 @@ def line_movement(game: "EspnGame") -> float | None:
     return now - then
 
 
-def parse_scoreboard(payload: dict[str, Any], league: str) -> list[EspnGame]:
+def parse_scoreboard(payload: dict[str, Any], league: str, three_way: bool = False) -> list[EspnGame]:
     """Turn an ESPN scoreboard payload into ``EspnGame`` objects."""
     games: list[EspnGame] = []
     for event in payload.get("events", []) or []:
@@ -221,13 +270,14 @@ def parse_scoreboard(payload: dict[str, Any], league: str) -> list[EspnGame]:
                 continue
             state = str(((event.get("status") or comp.get("status") or {}).get("type") or {}).get("state", "pre"))
 
-            home_ml = away_ml = home_open = away_open = None
+            home_ml = away_ml = home_open = away_open = draw_ml = None
             provider = ""
             for odds_entry in comp.get("odds") or []:
                 home_ml, away_ml = _moneylines_from_odds(odds_entry)
                 if home_ml is not None and away_ml is not None:
                     provider = str((odds_entry.get("provider") or {}).get("name", ""))
                     home_open, away_open = _open_moneylines(odds_entry)
+                    draw_ml = _draw_moneyline(odds_entry)
                     break
 
             games.append(EspnGame(
@@ -242,6 +292,8 @@ def parse_scoreboard(payload: dict[str, Any], league: str) -> list[EspnGame]:
                 odds_provider=provider,
                 home_open_moneyline=home_open,
                 away_open_moneyline=away_open,
+                draw_moneyline=draw_ml,
+                three_way=three_way,
             ))
         except Exception:  # one malformed event must not drop the whole slate
             continue
@@ -264,17 +316,17 @@ def parse_predictor(payload: dict[str, Any]) -> float | None:
 
 def parse_summary_moneylines(
     payload: dict[str, Any],
-) -> tuple[float | None, float | None, str, float | None, float | None]:
+) -> tuple[float | None, float | None, str, float | None, float | None, float | None]:
     """Fallback odds source: the summary's ``pickcenter`` list.
 
-    Returns (home_ml, away_ml, provider, home_open_ml, away_open_ml).
+    Returns (home_ml, away_ml, provider, home_open_ml, away_open_ml, draw_ml).
     """
     for entry in payload.get("pickcenter") or []:
         home, away = _moneylines_from_odds(entry)
         if home is not None and away is not None:
             h_open, a_open = _open_moneylines(entry)
-            return home, away, str((entry.get("provider") or {}).get("name", "")), h_open, a_open
-    return None, None, "", None, None
+            return home, away, str((entry.get("provider") or {}).get("name", "")), h_open, a_open, _draw_moneyline(entry)
+    return None, None, "", None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +361,16 @@ class EspnClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_scoreboard(self, league: str, date: str | None = None) -> list[EspnGame]:
-        """Games for a league. ``date`` is ``YYYYMMDD``; default is ESPN's current slate."""
+    def get_scoreboard(
+        self, league: str, date: str | None = None, *, groups: str | None = None, three_way: bool = False,
+    ) -> list[EspnGame]:
+        """Games for a league. ``date`` is ``YYYYMMDD``; ``groups`` filters college divisions."""
         params: dict[str, Any] = {"limit": 300}
         if date:
             params["dates"] = date
-        return parse_scoreboard(self._get(f"{league}/scoreboard", params=params), league)
+        if groups:
+            params["groups"] = groups
+        return parse_scoreboard(self._get(f"{league}/scoreboard", params=params), league, three_way)
 
     def enrich_game(self, game: EspnGame) -> EspnGame:
         """Fill in ESPN's predictor (and fallback odds) via the game summary."""
@@ -325,8 +381,9 @@ class EspnClient:
             return game
         game.predictor_home_prob = parse_predictor(payload)
         if game.home_moneyline is None or game.away_moneyline is None:
-            home, away, provider, h_open, a_open = parse_summary_moneylines(payload)
+            home, away, provider, h_open, a_open, draw = parse_summary_moneylines(payload)
             if home is not None and away is not None:
                 game.home_moneyline, game.away_moneyline, game.odds_provider = home, away, provider
                 game.home_open_moneyline, game.away_open_moneyline = h_open, a_open
+                game.draw_moneyline = draw
         return game

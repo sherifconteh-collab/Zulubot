@@ -189,6 +189,25 @@ def evaluate_side(post: Posterior, side: str, p_side: float, ask: float, *, fee_
     )
 
 
+def parlay_value(legs: list[tuple[float, float]], *, fee_rate: float) -> dict[str, float]:
+    """Fair value of a parlay from independent legs given as (win prob, sd).
+
+    ``fair`` is the product of leg probabilities; ``max_price`` is the most worth
+    paying for the combined contract once Kalshi's fee is covered. Legs are
+    assumed independent, which holds for different games but not same-game combos.
+    """
+    fair = 1.0
+    rel_var = 0.0
+    for p, sd in legs:
+        fair *= p
+        rel_var += (sd / p) ** 2
+    sd_fair = fair * math.sqrt(rel_var)
+    max_price = fair
+    for _ in range(3):  # fee depends on the price: iterate to a fixed point
+        max_price = max(fair - kalshi_fee(max_price, fee_rate), 0.0)
+    return {"fair": fair, "sd": sd_fair, "max_price": max_price, "fair_decimal_odds": 1.0 / fair}
+
+
 # ---------------------------------------------------------------------------
 # Learning from results
 # ---------------------------------------------------------------------------

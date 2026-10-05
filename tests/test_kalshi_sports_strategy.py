@@ -26,6 +26,7 @@ from trading_bot.sports_model import (
     evaluate_side,
     kalshi_fee,
     microprice,
+    parlay_value,
 )
 from trading_bot.strategies.kalshi_sports import (
     KalshiSportsStrategy,
@@ -70,13 +71,15 @@ def _market(side_team="Buffalo", yes_ask=0.40, no_ask=0.62, **overrides) -> dict
         "no_bid_dollars": str(no_ask - 0.03),
         "volume": 5000,
         "status": "active",
+        # Kalshi expects settlement a few hours after kickoff (default game starts _NOW+5h)
+        "expected_expiration_time": (_NOW + timedelta(hours=8)).isoformat(),
     }
     m.update(overrides)
     return m
 
 
 def _config(**overrides) -> KalshiSportsConfig:
-    defaults = dict(enabled=True, leagues=["football/nfl"], min_trade_usd=1.0)
+    defaults = dict(enabled=True, leagues=["nfl"], min_trade_usd=1.0)
     defaults.update(overrides)
     return KalshiSportsConfig(**defaults)
 
@@ -256,8 +259,20 @@ class MatchingTests(unittest.TestCase):
         # Real Kalshi titles are just "<Team> wins"; matching must use the event ticker.
         game = _game(home=_team("1", "Los Angeles", "Rams", "LAR"), away=_team("2", "Buffalo", "Bills", "BUF"))
         market = {"ticker": "KXNFLGAME-26OCT12BUFLAR-LAR", "event_ticker": "KXNFLGAME-26OCT12BUFLAR",
+                  "expected_expiration_time": (_NOW + timedelta(hours=8)).isoformat(),
                   "title": "Los Angeles R wins", "yes_sub_title": "Los Angeles R", "no_sub_title": "Los Angeles R"}
         self.assertEqual(match_market_to_game(market, [game]), (game, "home"))
+
+    def test_same_teams_on_a_different_day_is_not_matched(self):
+        # Playoff series: the Oct-9 market must never pair with the Oct-7 game.
+        game_oct7 = _game(start_time=_NOW + timedelta(hours=5))
+        market_oct9 = _market("Baltimore", expected_expiration_time=(_NOW + timedelta(hours=53)).isoformat())
+        self.assertIsNone(match_market_to_game(market_oct9, [game_oct7]))
+
+    def test_market_without_expiry_is_not_matched(self):
+        market = _market("Baltimore")
+        market.pop("expected_expiration_time")
+        self.assertIsNone(match_market_to_game(market, [_game()]))
 
     def test_series_games_disambiguated_by_time(self):
         g1 = _game(game_id="1", start_time=_NOW + timedelta(hours=5))
@@ -441,6 +456,108 @@ class StrategyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _soccer_game(**overrides) -> EspnGame:
+    defaults = dict(
+        game_id="900", league="soccer/eng.1",
+        home=_team("1", "Everton", "Everton", "EVE", "2-3-0"),
+        away=_team("2", "Chelsea", "Chelsea", "CHE", "2-1-2"),
+        home_moneyline=175.0, draw_moneyline=275.0, away_moneyline=130.0, three_way=True,
+    )
+    defaults.update(overrides)
+    return _game(**defaults)
+
+
+def _soccer_market(suffix, sub, yes_ask, no_ask, **kw):
+    m = {
+        "ticker": f"KXEPLGAME-26OCT04CHEEVE-{suffix}", "event_ticker": "KXEPLGAME-26OCT04CHEEVE",
+        "title": "Tie is the result" if suffix == "TIE" else f"{sub} wins", "yes_sub_title": sub,
+        "yes_ask_dollars": str(yes_ask), "yes_bid_dollars": str(yes_ask - 0.01),
+        "no_ask_dollars": str(no_ask), "no_bid_dollars": str(no_ask - 0.01),
+        "expected_expiration_time": (_NOW + timedelta(hours=8)).isoformat(), "status": "active",
+    }
+    m.update(kw)
+    return m
+
+
+class SoccerTests(unittest.TestCase):
+    def test_three_way_devig_sums_to_one(self):
+        from trading_bot.clients_espn import devig_three_way
+        h, d, a = devig_three_way(175, 275, 130)
+        self.assertAlmostEqual(h + d + a, 1.0)
+        self.assertGreater(a, h)  # Chelsea favoured
+
+    def test_tie_market_matches_via_sibling_event(self):
+        game = _soccer_game()
+        team = _soccer_market("EVE", "Everton", 0.30, 0.71)
+        tie = _soccer_market("TIE", "Tie", 0.27, 0.74)
+        self.assertEqual(match_market_to_game(team, [game]), (game, "home"))
+        self.assertEqual(match_market_to_game(tie, [game]), (game, "draw"))  # via ticker code
+        self.assertEqual(match_market_to_game(tie, [], {tie["event_ticker"]: game}), (game, "draw"))
+
+    def test_signals_use_correct_outcome_probability(self):
+        game = _soccer_game()
+        cal = SourceCalibration()
+        def p(outcome, market):
+            return {s.name: s.p for s in build_signals(game, outcome, market, _config(), cal)}["sportsbook"]
+        home = p("home", _soccer_market("EVE", "Everton", 0.3, 0.7))
+        draw = p("draw", _soccer_market("TIE", "Tie", 0.27, 0.74))
+        away = p("away", _soccer_market("CHE", "Chelsea", 0.4, 0.6))
+        self.assertAlmostEqual(home + draw + away, 1.0)
+        self.assertNotIn("record", {s.name for s in build_signals(game, "home", _soccer_market("EVE", "Everton", .3, .7), _config(), cal)})
+
+    def test_soccer_bet_labels_not_the_other_team(self):
+        # Draw priced far too cheaply vs the line -> bet YES on the draw.
+        game = _soccer_game()
+        markets = [_soccer_market("EVE", "Everton", 0.30, 0.71), _soccer_market("CHE", "Chelsea", 0.40, 0.61),
+                   _soccer_market("TIE", "Tie", 0.20, 0.81)]
+        strat, _ = _strategy(_config(), [game], markets)
+        state, _, result = _run(strat)
+        self.assertEqual(result["markets_matched"], 3)
+        self.assertEqual(len(result["buys"]), 1)
+        pred = result["predictions"][0]
+        self.assertIn(pred["pick"], ("Draw", "No draw", "Not Everton", "Not Chelsea", "Everton", "Chelsea"))
+        self.assertTrue(result["buys"][0].startswith("KS:KXEPLGAME-26OCT04CHEEVE-"))
+
+    def test_no_draw_odds_means_no_soccer_bet(self):
+        game = _soccer_game(draw_moneyline=None)
+        strat, _ = _strategy(_config(), [game], [_soccer_market("EVE", "Everton", 0.20, 0.81)])
+        _, _, result = _run(strat)
+        self.assertEqual(result["buys"], [])
+
+
+class ParlayTests(unittest.TestCase):
+    def test_parlay_value_is_product_and_fee_adjusted(self):
+        v = parlay_value([(0.6, 0.02), (0.5, 0.02)], fee_rate=0.07)
+        self.assertAlmostEqual(v["fair"], 0.30)
+        self.assertLess(v["max_price"], v["fair"])
+        self.assertGreater(v["sd"], 0.0)
+        self.assertAlmostEqual(v["fair_decimal_odds"], 1 / 0.30)
+
+    def test_suggestions_only_from_positive_edge_legs_in_different_games(self):
+        games = [
+            _game(game_id=str(i), home=_team(str(i), f"City{i}", f"Team{i}", f"H{i}X"),
+                  away=_team(str(i + 100), f"Town{i}", f"Club{i}", f"A{i}X"),
+                  home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+            for i in range(3)
+        ]
+        markets = [
+            _market(f"City{i}", yes_ask=0.57, no_ask=0.45, title=f"Town{i} at City{i} Winner?",
+                    ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X-H{i}X", event_ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X")
+            for i in range(3)
+        ]
+        strat, _ = _strategy(_config(), games, markets)
+        _, _, result = _run(strat)
+        self.assertEqual([len(p["legs"]) for p in result["parlays"]], [2, 3])
+        for parlay in result["parlays"]:
+            self.assertEqual(len({l["game"] for l in parlay["legs"]}), len(parlay["legs"]))
+            self.assertLess(parlay["fair_prob"], 0.7)
+
+    def test_no_parlays_without_edge(self):
+        strat, _ = _strategy(_config(), [_game()], [_market("Baltimore", yes_ask=0.55, no_ask=0.47)])
+        _, _, result = _run(strat)
+        self.assertEqual(result["parlays"], [])
 
 
 class OrderBookTests(unittest.TestCase):
