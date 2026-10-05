@@ -235,6 +235,37 @@ class PaperBroker:
             )
         return position
 
+    def resize_position(
+        self,
+        state: PortfolioState,
+        symbol: str,
+        new_quantity: float,
+        *,
+        refund_price: float | None = None,
+        refund: bool = True,
+    ) -> Position | None:
+        """Shrink a position (e.g. after a partial fill) and return the cash for the rest.
+
+        ``refund_price`` defaults to the entry price (use it to undo an over-booked buy;
+        pass the sale price when contracts were actually sold). ``refund=False`` only fixes
+        the bookkeeping, for when cash is synced from the real account. Returns the
+        position, or None if it was removed because ``new_quantity`` is zero.
+        """
+        position = state.positions.get(symbol)
+        if position is None or new_quantity >= position.quantity:
+            return position
+        price = position.entry_price if refund_price is None else refund_price
+        refund_amount = (position.quantity - max(new_quantity, 0.0)) * price
+        refund_cash = refund
+        bucket = self._position_cash_bucket(position)
+        if refund_cash:
+            self._adjust_cash_balance(state, refund_amount, cash_bucket=bucket)
+        if new_quantity <= 0:
+            del state.positions[symbol]
+            return None
+        position.quantity = new_quantity
+        return position
+
     def close_all(self, state: PortfolioState, *, reason: str) -> None:
         for symbol in list(state.positions):
             self.close_position(

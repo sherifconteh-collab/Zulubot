@@ -20,7 +20,7 @@ from typing import Any
 
 from trading_bot.broker import PaperBroker
 from trading_bot.clients import CoinbaseClient
-from trading_bot.clients_kalshi import KalshiClient
+from trading_bot.clients_kalshi import KalshiClient, order_fill_count
 from trading_bot.clients_polymarket import PolymarketClobClient, PolymarketGammaClient
 from trading_bot.coinbase_broker import CoinbaseBroker
 from trading_bot.config import BTC5MinConfig
@@ -380,16 +380,25 @@ class BTC5MinSpreadStrategy:
 
         if self.live_kalshi_trading:
             try:
-                self.kalshi_client.place_order(
+                # IOC a few cents through the mid so it can actually fill; a resting
+                # order at the mid would be booked below as a position we don't hold.
+                order = self.kalshi_client.place_order(
                     ticker=ticker,
                     side=side,
                     action="buy",
                     count=contracts,
-                    yes_price=yes_price_cents,
+                    price_cents=min(99, price_cents + 3),
+                    time_in_force="immediate_or_cancel",
                 )
             except Exception as exc:
                 self.logger.error("Kalshi order failed: %s", exc)
                 return []
+            filled = order_fill_count(order)
+            if filled is not None:
+                if filled < 1:
+                    self.logger.info("Kalshi order for %s did not fill; not booking.", ticker)
+                    return []
+                contracts = min(contracts, filled)
 
         # Book it in the paper broker under a synthetic symbol.
         # In live mode, use the Kalshi cash bucket so equity/risk accounting
@@ -401,7 +410,7 @@ class BTC5MinSpreadStrategy:
             asset_type="prediction",
             strategy=self.STRATEGY_NAME,
             price=price_cents / 100,
-            notional=notional,
+            notional=contracts * price_cents / 100,  # what the contracts actually cost
             opened_at=now,
             cash_bucket=self._KALSHI_CASH_BUCKET if self.live_kalshi_trading else None,
             meta={
