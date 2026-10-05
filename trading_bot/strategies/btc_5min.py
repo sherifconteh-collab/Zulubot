@@ -290,14 +290,16 @@ class BTC5MinSpreadStrategy:
         notional = risk_manager.position_notional(state, equity, symbol=symbol)
         if notional <= 0:
             return False
-        self.coinbase_broker.place_market_buy(
+        if not self.coinbase_broker.place_market_buy(
             state,
             binance_symbol=symbol,
             notional_usd=notional,
             strategy=self.STRATEGY_NAME,
             now=now,
             meta=meta,
-        )
+        ):
+            self.logger.error("Live spot BTC buy failed; not booking a position.")
+            return False
         broker.open_position(
             state,
             symbol=symbol,
@@ -322,13 +324,15 @@ class BTC5MinSpreadStrategy:
         if symbol not in state.positions:
             return False
         pos = state.positions[symbol]
-        self.coinbase_broker.place_market_sell(
+        if not self.coinbase_broker.place_market_sell(
             state,
             binance_symbol=symbol,
             quantity=pos.quantity,
             strategy=self.STRATEGY_NAME,
             reason=reason,
-        )
+        ):
+            self.logger.error("Live spot BTC sell failed; keeping position open.")
+            return False
         broker.close_position(state, symbol=symbol, price=price, reason=reason)
         return True
 

@@ -947,8 +947,7 @@ class AltcoinRotationStrategy:
             now=now,
             meta=meta,
         )
-        # In paper mode place_market_buy returns None (paper broker tracks).
-        return result is not None or self.coinbase_broker.paper_mode
+        return bool(result)
 
     # ------------------------------------------------------------------
     # Raw order methods (bypass symbol mapping entirely)
