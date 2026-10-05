@@ -475,7 +475,7 @@ class KalshiSportsConfig:
     max_position_pct: float = 0.03           # per-bet cap, % of equity
     capital_allocation_pct: float = 0.15     # total cap on open sports exposure
     max_open_bets: int = 6
-    min_trade_usd: float = 5.0               # smallest stake worth the fee/attention
+    min_trade_usd: float = 1.0               # smallest stake worth the fee/attention
     home_advantage: float = 0.55             # prior P(home wins) between equal teams (record model)
     fee_rate: float = 0.07                   # Kalshi taker fee: rate * p * (1 - p) per contract
     # Require a sportsbook line for the game; ESPN's predictor/records alone can't beat Kalshi's price.
@@ -892,7 +892,7 @@ class AppConfig:
                 max_position_pct=_env_float("KALSHI_SPORTS_MAX_POSITION_PCT", 0.03),
                 capital_allocation_pct=_env_float("KALSHI_SPORTS_CAPITAL_PCT", 0.15),
                 max_open_bets=_env_int("KALSHI_SPORTS_MAX_OPEN_BETS", 6),
-                min_trade_usd=_env_float("KALSHI_SPORTS_MIN_TRADE_USD", 5.0),
+                min_trade_usd=_env_float("KALSHI_SPORTS_MIN_TRADE_USD", 1.0),
                 home_advantage=_env_float("KALSHI_SPORTS_HOME_ADVANTAGE", 0.55),
                 fee_rate=_env_float("KALSHI_SPORTS_FEE_RATE", 0.07),
                 require_market_signal=_env_bool("KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL", True),
