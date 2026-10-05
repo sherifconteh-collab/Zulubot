@@ -90,6 +90,7 @@ def _strategy(config, games, markets, *, kalshi=None):
     logger = logging.getLogger("test_kalshi_sports")
     kalshi = kalshi or MagicMock()
     kalshi.get_markets.return_value = (markets, None)
+    kalshi.get_series.return_value = {"fee_type": "quadratic_with_maker_fees", "fee_multiplier": 1}
     espn = MagicMock()
     espn.get_scoreboard.return_value = games
     espn.enrich_game.side_effect = lambda g: g
@@ -154,6 +155,15 @@ class ModelTests(unittest.TestCase):
         self.assertAlmostEqual(kalshi_fee(0.50), 0.02)   # 0.07*.25 = .0175 -> rounds up to $0.02
         self.assertAlmostEqual(kalshi_fee(0.90), 0.01)   # .0063 -> $0.01
         self.assertEqual(kalshi_fee(0.0), 0.0)
+
+    def test_fee_multiplier_halves_mlb(self):
+        self.assertAlmostEqual(kalshi_fee(0.50, multiplier=0.5), 0.01)   # .00875 -> $0.01
+        self.assertAlmostEqual(kalshi_fee(0.50, multiplier=0.0), 0.0)
+
+    def test_bigger_orders_round_less_per_contract(self):
+        # 10 contracts @ .50: total .175 -> $0.18 -> 1.8c each, vs 2c each for a single contract
+        self.assertAlmostEqual(kalshi_fee(0.50, count=10), 0.018)
+        self.assertLess(kalshi_fee(0.50, count=10), kalshi_fee(0.50, count=1))
 
     def test_microprice_leans_toward_thin_side(self):
         self.assertAlmostEqual(microprice(0.40, 1000, 0.44, 10), 0.4396, places=3)  # heavy bid -> near ask
@@ -350,7 +360,8 @@ class StrategyTests(unittest.TestCase):
         strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
         state, _, result = _run(strat)
         pos = state.positions[result["buys"][0]]
-        self.assertAlmostEqual(pos.entry_price, pos.meta["ask"] + pos.meta["fee"])
+        self.assertAlmostEqual(pos.entry_price, pos.meta["ask"] + pos.meta["fee"], places=3)
+        self.assertLess(pos.meta["fee"], 0.02 + 1e-9)
 
     def test_tie_settles_at_fifty_cents(self):
         game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
@@ -656,6 +667,43 @@ class PolymarketTests(unittest.TestCase):
         strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.64, no_ask=0.38)])
         _, _, result = _run(strat)
         self.assertIn("polymarket", result["predictions"][0]["dropped"])
+
+
+class FeeMultiplierTests(unittest.TestCase):
+    def _run(self, series_info):
+        # A thin gap: worth betting at half fee (MLB), not at the full fee.
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0)
+        strat, kalshi = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.60, no_ask=0.42)])
+        if isinstance(series_info, Exception):
+            kalshi.get_series.side_effect = series_info
+        else:
+            kalshi.get_series.return_value = series_info
+        return _run(strat)[2]
+
+    def test_series_multiplier_is_read_from_kalshi(self):
+        full = self._run({"fee_type": "quadratic_with_maker_fees", "fee_multiplier": 1})
+        half = self._run({"fee_type": "quadratic_with_maker_fees", "fee_multiplier": 0.5})
+        net = lambda r: r["predictions"][0]["net_edge"]
+        self.assertIsNone(net(full))
+        self.assertIsNotNone(net(half))
+
+    def test_unreadable_series_falls_back_to_the_standard_fee(self):
+        result = self._run(RuntimeError("503"))
+        self.assertIsNone(result["predictions"][0]["net_edge"])      # same as multiplier 1
+
+    def test_multiplier_is_cached_per_series(self):
+        strat, kalshi = _strategy(_config(), [_game()], [_market("Baltimore")])
+        _run(strat)
+        _run(strat)
+        self.assertEqual(kalshi.get_series.call_count, 1)
+
+    def test_paper_entry_uses_the_exact_order_fee(self):
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+        strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
+        state, _, result = _run(strat)
+        pos = state.positions[result["buys"][0]]
+        from trading_bot.sports_model import kalshi_fee as fee
+        self.assertAlmostEqual(pos.entry_price - pos.meta["ask"], fee(pos.meta["ask"], 0.07, 1.0, int(pos.quantity)))
 
 
 class ParlayTests(unittest.TestCase):

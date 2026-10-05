@@ -64,6 +64,7 @@ from trading_bot.sports_model import (
     combine,
     drawdown_scale,
     evaluate_side,
+    kalshi_fee,
     microprice,
     parlay_value,
 )
@@ -375,6 +376,7 @@ class KalshiSportsStrategy:
         self.kalshi = kalshi_client
         self.espn = espn_client
         self.poly = poly_client
+        self._series_fee: dict[str, float] = {}
         self.calibration = SourceCalibration(calibration_path, logger)
         self.session = DailySession(
             calibration_path.with_name("sports_session.json") if calibration_path else None, logger,
@@ -492,6 +494,23 @@ class KalshiSportsStrategy:
             raise errors[0]
         return list(games.values())
 
+    def _fee_multiplier(self, series: str) -> float:
+        """Kalshi's fee multiplier for a series (cached); 1.0 if it can't be read."""
+        if series not in self._series_fee:
+            multiplier = 1.0
+            try:
+                info = self.kalshi.get_series(series)
+                fee_type = str(info.get("fee_type", "")).lower()
+                raw = info.get("fee_multiplier")
+                if "quadratic" in fee_type and raw not in (None, ""):
+                    multiplier = max(0.0, float(raw))
+                elif fee_type and "quadratic" not in fee_type:
+                    self.logger.warning("Series %s has fee_type '%s'; assuming the standard fee.", series, fee_type)
+            except Exception as exc:
+                self.logger.debug("Could not read fee info for %s (assuming standard fee): %s", series, exc)
+            self._series_fee[series] = multiplier
+        return self._series_fee[series]
+
     def _fetch_markets(self, series: str) -> list[dict[str, Any]]:
         markets: list[dict[str, Any]] = []
         cursor = None
@@ -512,7 +531,10 @@ class KalshiSportsStrategy:
             try:
                 markets: list[dict[str, Any]] = []
                 for series in series_list:
-                    markets.extend(self._fetch_markets(series))
+                    fee_multiplier = self._fee_multiplier(series)
+                    for m in self._fetch_markets(series):
+                        m["_fee_multiplier"] = fee_multiplier
+                        markets.append(m)
                 if not markets:  # out of season: don't spend ESPN calls on it
                     continue
                 games = self._fetch_games(spec, now)
@@ -638,10 +660,11 @@ class KalshiSportsStrategy:
         }
 
         options = []
+        mult = float(market.get("_fee_multiplier", 1.0))
         yes_decision = evaluate_side(post, "yes", post.p, yes_ask, fee_rate=cfg.fee_rate,
-                                     kelly_fraction=cfg.kelly_fraction) if yes_ask > 0 else None
+                                     kelly_fraction=cfg.kelly_fraction, fee_multiplier=mult) if yes_ask > 0 else None
         no_decision = evaluate_side(post, "no", 1.0 - post.p, no_ask, fee_rate=cfg.fee_rate,
-                                    kelly_fraction=cfg.kelly_fraction) if no_ask > 0 else None
+                                    kelly_fraction=cfg.kelly_fraction, fee_multiplier=mult) if no_ask > 0 else None
         if yes_decision:
             options.append((yes_decision, backed, _kalshi_size(market, "yes_ask_size")))
         if no_decision:
@@ -696,6 +719,7 @@ class KalshiSportsStrategy:
             chosen = legs[:size]
             value = parlay_value(
                 [(c["decision"].p, c["decision"].sd) for c in chosen], fee_rate=cfg.fee_rate,
+                fee_multiplier=max(float(c["market"].get("_fee_multiplier", 1.0)) for c in chosen),
             )
             suggestions.append({
                 "legs": [
@@ -832,6 +856,7 @@ class KalshiSportsStrategy:
         bucket: str | None,
     ) -> Any | None:
         market, game, decision = cand["market"], cand["game"], cand["decision"]
+        cfg_fee_rate = self.config.fee_rate
         side, ask = decision.side, decision.price
         ticker = str(market.get("ticker", ""))
         symbol = f"{_SYMBOL_PREFIX}:{ticker}:{side.upper()}"
@@ -846,6 +871,10 @@ class KalshiSportsStrategy:
         quantity = math.floor(notional / entry_price)
         if quantity < 1:
             return None
+        if not self.live_trading_enabled:
+            # Exact fee for this order size (rounding is per order, so bigger orders pay less per contract).
+            per_contract = kalshi_fee(ask, cfg_fee_rate, float(market.get("_fee_multiplier", 1.0)), quantity)
+            entry_price = ask + per_contract
 
         # Live: place the order first and book only what actually filled, so an
         # unfilled or partly filled order never leaves a phantom bet in state.
@@ -886,7 +915,7 @@ class KalshiSportsStrategy:
             "uncertainty_sd": round(decision.sd, 4),
             "net_edge": round(decision.net_edge, 4),
             "ask": round(ask, 4),
-            "fee": round(decision.fee, 4),
+            "fee": round(entry_price - ask, 4) if not self.live_trading_enabled else round(decision.fee, 4),
             "sources": cand["posterior"].to_dict()["sources"],
             "odds_provider": game.odds_provider,
         }

@@ -54,11 +54,20 @@ def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-def kalshi_fee(price: float, fee_rate: float = 0.07) -> float:
-    """Taker fee per contract in dollars: ``fee_rate * p * (1 - p)``, rounded up to a cent."""
-    if price <= 0 or price >= 1 or fee_rate <= 0:
+def kalshi_fee(price: float, fee_rate: float = 0.07, multiplier: float = 1.0, count: int = 1) -> float:
+    """Taker fee per contract, in dollars.
+
+    Kalshi's schedule: ``fee = ceil(multiplier * 0.07 * C * P * (1 - P))`` for an order of ``C``
+    contracts at price ``P``. ``multiplier`` is set per series (e.g. 0.5 for MLB games) and is
+    read from Kalshi's API. A retail balance settles to whole cents, so the order total is
+    rounded up to the next cent and spread across the contracts. With ``count=1`` this is a
+    conservative upper bound: larger orders round less per contract. Maker (resting) orders
+    pay a lower fee, but the bot only places immediate-or-cancel taker orders.
+    """
+    if price <= 0 or price >= 1 or fee_rate <= 0 or multiplier <= 0 or count < 1:
         return 0.0
-    return math.ceil(fee_rate * price * (1 - price) * 100 - 1e-9) / 100.0
+    total = multiplier * fee_rate * count * price * (1 - price)
+    return math.ceil(total * 100 - 1e-9) / 100.0 / count
 
 
 def microprice(bid: float, bid_size: float, ask: float, ask_size: float) -> float | None:
@@ -164,11 +173,11 @@ class BetDecision:
 
 
 def evaluate_side(post: Posterior, side: str, p_side: float, ask: float, *, fee_rate: float,
-                  kelly_fraction: float) -> BetDecision | None:
+                  kelly_fraction: float, fee_multiplier: float = 1.0) -> BetDecision | None:
     """Value of buying ``side`` at ``ask`` given the posterior for that side."""
     if ask <= 0 or ask >= 1:
         return None
-    fee = kalshi_fee(ask, fee_rate)
+    fee = kalshi_fee(ask, fee_rate, fee_multiplier)
     net_edge = p_side - ask - fee
     if net_edge <= 1e-9:
         return None
@@ -190,7 +199,7 @@ def evaluate_side(post: Posterior, side: str, p_side: float, ask: float, *, fee_
     )
 
 
-def parlay_value(legs: list[tuple[float, float]], *, fee_rate: float) -> dict[str, float]:
+def parlay_value(legs: list[tuple[float, float]], *, fee_rate: float, fee_multiplier: float = 1.0) -> dict[str, float]:
     """Fair value of a parlay from independent legs given as (win prob, sd).
 
     ``fair`` is the product of leg probabilities; ``max_price`` is the most worth
@@ -205,7 +214,7 @@ def parlay_value(legs: list[tuple[float, float]], *, fee_rate: float) -> dict[st
     sd_fair = fair * math.sqrt(rel_var)
     max_price = fair
     for _ in range(3):  # fee depends on the price: iterate to a fixed point
-        max_price = max(fair - kalshi_fee(max_price, fee_rate), 0.0)
+        max_price = max(fair - kalshi_fee(max_price, fee_rate, fee_multiplier), 0.0)
     return {"fair": fair, "sd": sd_fair, "max_price": max_price, "fair_decimal_odds": 1.0 / fair}
 
 
