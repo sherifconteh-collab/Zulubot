@@ -480,7 +480,7 @@ class KalshiSportsConfig:
     max_open_bets: int = 10
     min_trade_usd: float = 1.0               # smallest stake worth the fee/attention
     home_advantage: float = 0.55             # prior P(home wins) between equal teams (record model)
-    fee_rate: float = 0.07                   # Kalshi taker fee: rate * p * (1 - p) per contract
+    fee_rate: float = 0.07                   # Kalshi taker fee: ceil(M * rate * C * p * (1 - p)); M is read per series
     # Require a sportsbook line for the game; ESPN's predictor/records alone can't beat Kalshi's price.
     require_market_signal: bool = True
     # Stakes are a share of the *current* wallet, so wins compound automatically. After a

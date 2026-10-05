@@ -293,6 +293,11 @@ class KalshiClient:
         result = self._get("/events", params=params)
         return result.get("events", [])
 
+    def get_series(self, series_ticker: str) -> dict[str, Any]:
+        """Series metadata, including ``fee_type`` and ``fee_multiplier``."""
+        result = self._get(f"/series/{series_ticker}")
+        return result.get("series", result)
+
     def get_orderbook(self, ticker: str) -> dict[str, Any]:
         """Get the orderbook for a market."""
         return self._get(f"/markets/{ticker}/orderbook")
