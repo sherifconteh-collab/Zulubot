@@ -597,3 +597,11 @@ There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
 A sportsbook line is required by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`): ESPN's predictor and records alone are not sharper than Kalshi's price. Telegram: `/sports` runs a scan and shows picks with probability ± uncertainty, net edge after fees, and line movement.
 
 Reality check from live testing (Oct 2026): DraftKings, Kalshi and ESPN agree to within a point or two on most games, so after the fee and spread there is usually no edge. Real edge needs more independent sharp sources (e.g. Pinnacle / multi-book lines, Polymarket prices) or catching Kalshi lagging a line move. Verified against live ESPN and Kalshi responses; if Kalshi renames a series, override it with `KALSHI_SPORTS_SERIES`. Soccer is unsupported (three-way outcomes). Sports betting carries real risk of loss; a positive modelled edge is not a guarantee.
+
+## Live order safety
+
+- Kalshi orders always carry a limit price (`price_cents` for the side being traded; NO orders use `no_price`) and buys/sells are immediate-or-cancel. Bets are booked only for contracts that actually filled; a failed or unfilled sell keeps the position open to retry.
+- Coinbase buys/sells report whether the order was accepted (`success`), and the crypto, BTC 5-min and rotation strategies only book or close positions when it was.
+- Each cycle, live Kalshi positions are reconciled: imported positions that settled or were sold are dropped, and the bot's own bets are checked against real holdings.
+- The drawdown peak is seeded from the same equity the risk check measures, and a failed live balance sync can never trigger the kill switch.
+- Service cycles are serialised with a lock so concurrent Telegram commands and scheduler runs cannot double-place bets.
