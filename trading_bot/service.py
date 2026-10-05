@@ -238,6 +238,7 @@ class TradingBotService:
             espn_client=self.espn_client,
             logger=logger,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+            calibration_path=config.data_dir / "sports_calibration.json",
         )
 
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
@@ -1023,25 +1024,8 @@ class TradingBotService:
                     entry_price = 0.50
                     try:
                         market = self.kalshi_client.get_market(ticker)
-                        # Kalshi market data includes yes_ask/yes_bid or last_price.
-                        # Prices may be in cents (1–99) or fractional [0,1]; normalise
-                        # to [0,1] before computing the NO-side complement.
-                        def _to_prob(raw: Any) -> float:
-                            v = float(raw)
-                            return v / 100.0 if v > 1 else v
-
-                        if side == "YES":
-                            raw = market.get("yes_ask") or market.get("last_price") or 0
-                            price = _to_prob(raw)
-                        else:
-                            # Prefer an explicit no_ask field; fall back to 1 - yes_bid
-                            no_raw = market.get("no_ask")
-                            if no_raw:
-                                price = _to_prob(no_raw)
-                            else:
-                                yes_bid_raw = market.get("yes_bid") or 0
-                                yes_bid = _to_prob(yes_bid_raw)
-                                price = 1.0 - yes_bid if yes_bid > 0 else 0.0
+                        # Handles both ``*_dollars`` and legacy cent fields.
+                        price = self._kalshi_position_price(market, side.lower())
                         if 0 < price < 1:
                             entry_price = price
                     except Exception:

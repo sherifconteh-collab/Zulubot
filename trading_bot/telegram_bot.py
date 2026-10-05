@@ -1009,13 +1009,18 @@ class TradingTelegramBot:
             ]
             preds = sorted(module.get("predictions") or [], key=lambda p: p.get("edge", 0), reverse=True)
             for pred in preds[:10]:
+                move = pred.get("line_move_to_yes")
+                move_txt = "" if move is None else f" | line {float(move):+.1%} toward {html.escape(str(pred.get('yes_team', '')))}"
+                net = pred.get("net_edge")
                 lines.append(
                     f"\u2022 <b>{html.escape(str(pred.get('pick', '?')))}</b> "
                     f"({html.escape(str(pred.get('game', '')))})\n"
-                    f"   model {float(pred.get('p_yes', 0)):.0%} (YES) | "
-                    f"{html.escape(str(pred.get('side', '')).upper())} ask "
-                    f"{float(pred.get('yes_ask' if pred.get('side') == 'yes' else 'no_ask', 0)):.2f} | "
-                    f"edge {float(pred.get('edge', 0)):+.1%}"
+                    f"   {html.escape(str(pred.get('yes_team', '')))} win prob "
+                    f"{float(pred.get('p_yes', 0)):.1%} \u00b1{float(pred.get('sd', 0)):.1%}"
+                    f" | {html.escape(str(pred.get('side', '')).upper())} ask "
+                    f"{float(pred.get('yes_ask' if pred.get('side') == 'yes' else 'no_ask', 0)):.2f}"
+                    + (f" | net edge {float(net):+.1%}" if net is not None else " | no edge after fees")
+                    + move_txt
                 )
             if not preds:
                 lines.append("No predictable games found right now.")

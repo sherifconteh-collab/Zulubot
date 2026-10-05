@@ -469,23 +469,17 @@ class KalshiSportsConfig:
     check_interval_minutes: int = 30
     max_hours_ahead: float = 36.0            # only bet games starting within this window
     min_minutes_to_start: float = 5.0        # don't enter right at kickoff
-    min_edge_pct: float = 0.06               # model prob minus ask price, in probability points
-    min_model_prob: float = 0.40             # never back long shots
-    max_entry_price: float = 0.85            # skip heavy favourites (poor payout, thin edge)
-    kelly_fraction: float = 0.20
+    # No fixed edge/price/volume cutoffs: stakes scale with net edge vs uncertainty
+    # (see trading_bot/sports_model.py). These are risk limits and cost inputs only.
+    kelly_fraction: float = 0.25             # fraction of (uncertainty-shrunk) Kelly to stake
     max_position_pct: float = 0.03           # per-bet cap, % of equity
     capital_allocation_pct: float = 0.15     # total cap on open sports exposure
     max_open_bets: int = 6
-    min_trade_usd: float = 5.0
-    home_advantage: float = 0.55             # prior P(home wins) between equal teams
-    # Blend weights for the win-probability model.
-    weight_sportsbook: float = 0.60
-    weight_espn_predictor: float = 0.25
-    weight_record: float = 0.15
+    min_trade_usd: float = 5.0               # smallest stake worth the fee/attention
+    home_advantage: float = 0.55             # prior P(home wins) between equal teams (record model)
+    fee_rate: float = 0.07                   # Kalshi taker fee: rate * p * (1 - p) per contract
     # Require a sportsbook line for the game; ESPN's predictor/records alone can't beat Kalshi's price.
     require_market_signal: bool = True
-    min_kalshi_volume: int = 100             # contracts traded; skip illiquid markets
-    max_spread: float = 0.06                 # skip if ask - bid is wider than this
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
     take_profit_pct: float = 0.0
@@ -883,21 +877,14 @@ class AppConfig:
                 check_interval_minutes=_env_int("KALSHI_SPORTS_INTERVAL_MINUTES", 30),
                 max_hours_ahead=_env_float("KALSHI_SPORTS_MAX_HOURS_AHEAD", 36.0),
                 min_minutes_to_start=_env_float("KALSHI_SPORTS_MIN_MINUTES_TO_START", 5.0),
-                min_edge_pct=_env_float("KALSHI_SPORTS_MIN_EDGE", 0.06),
-                min_model_prob=_env_float("KALSHI_SPORTS_MIN_MODEL_PROB", 0.40),
-                max_entry_price=_env_float("KALSHI_SPORTS_MAX_ENTRY_PRICE", 0.85),
-                kelly_fraction=_env_float("KALSHI_SPORTS_KELLY_FRACTION", 0.20),
+                kelly_fraction=_env_float("KALSHI_SPORTS_KELLY_FRACTION", 0.25),
                 max_position_pct=_env_float("KALSHI_SPORTS_MAX_POSITION_PCT", 0.03),
                 capital_allocation_pct=_env_float("KALSHI_SPORTS_CAPITAL_PCT", 0.15),
                 max_open_bets=_env_int("KALSHI_SPORTS_MAX_OPEN_BETS", 6),
                 min_trade_usd=_env_float("KALSHI_SPORTS_MIN_TRADE_USD", 5.0),
                 home_advantage=_env_float("KALSHI_SPORTS_HOME_ADVANTAGE", 0.55),
-                weight_sportsbook=_env_float("KALSHI_SPORTS_WEIGHT_SPORTSBOOK", 0.60),
-                weight_espn_predictor=_env_float("KALSHI_SPORTS_WEIGHT_ESPN", 0.25),
-                weight_record=_env_float("KALSHI_SPORTS_WEIGHT_RECORD", 0.15),
+                fee_rate=_env_float("KALSHI_SPORTS_FEE_RATE", 0.07),
                 require_market_signal=_env_bool("KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL", True),
-                min_kalshi_volume=_env_int("KALSHI_SPORTS_MIN_VOLUME", 100),
-                max_spread=_env_float("KALSHI_SPORTS_MAX_SPREAD", 0.06),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),

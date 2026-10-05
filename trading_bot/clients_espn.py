@@ -69,6 +69,9 @@ class EspnGame:
     home_moneyline: float | None = None
     away_moneyline: float | None = None
     odds_provider: str = ""
+    # Opening moneylines (None if unavailable); close-vs-open shows where bettors pushed the line
+    home_open_moneyline: float | None = None
+    away_open_moneyline: float | None = None
     # ESPN predictor: P(home wins), 0-1
     predictor_home_prob: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -182,6 +185,23 @@ def _moneylines_from_odds(odds_entry: dict[str, Any]) -> tuple[float | None, flo
     return None, None
 
 
+def _open_moneylines(odds_entry: dict[str, Any]) -> tuple[float | None, float | None]:
+    ml = odds_entry.get("moneyline") or {}
+    return (
+        _to_float(((ml.get("home") or {}).get("open") or {}).get("odds")),
+        _to_float(((ml.get("away") or {}).get("open") or {}).get("odds")),
+    )
+
+
+def line_movement(game: "EspnGame") -> float | None:
+    """Change in the vig-free P(home) from the opening to the current line (+ = toward home)."""
+    now = devig_two_way(game.home_moneyline, game.away_moneyline)
+    then = devig_two_way(game.home_open_moneyline, game.away_open_moneyline)
+    if now is None or then is None:
+        return None
+    return now - then
+
+
 def parse_scoreboard(payload: dict[str, Any], league: str) -> list[EspnGame]:
     """Turn an ESPN scoreboard payload into ``EspnGame`` objects."""
     games: list[EspnGame] = []
@@ -201,12 +221,13 @@ def parse_scoreboard(payload: dict[str, Any], league: str) -> list[EspnGame]:
                 continue
             state = str(((event.get("status") or comp.get("status") or {}).get("type") or {}).get("state", "pre"))
 
-            home_ml = away_ml = None
+            home_ml = away_ml = home_open = away_open = None
             provider = ""
             for odds_entry in comp.get("odds") or []:
                 home_ml, away_ml = _moneylines_from_odds(odds_entry)
                 if home_ml is not None and away_ml is not None:
                     provider = str((odds_entry.get("provider") or {}).get("name", ""))
+                    home_open, away_open = _open_moneylines(odds_entry)
                     break
 
             games.append(EspnGame(
@@ -219,6 +240,8 @@ def parse_scoreboard(payload: dict[str, Any], league: str) -> list[EspnGame]:
                 home_moneyline=home_ml,
                 away_moneyline=away_ml,
                 odds_provider=provider,
+                home_open_moneyline=home_open,
+                away_open_moneyline=away_open,
             ))
         except Exception:  # one malformed event must not drop the whole slate
             continue
@@ -239,13 +262,19 @@ def parse_predictor(payload: dict[str, Any]) -> float | None:
     return None
 
 
-def parse_summary_moneylines(payload: dict[str, Any]) -> tuple[float | None, float | None, str]:
-    """Fallback odds source: the summary's ``pickcenter`` list."""
+def parse_summary_moneylines(
+    payload: dict[str, Any],
+) -> tuple[float | None, float | None, str, float | None, float | None]:
+    """Fallback odds source: the summary's ``pickcenter`` list.
+
+    Returns (home_ml, away_ml, provider, home_open_ml, away_open_ml).
+    """
     for entry in payload.get("pickcenter") or []:
         home, away = _moneylines_from_odds(entry)
         if home is not None and away is not None:
-            return home, away, str((entry.get("provider") or {}).get("name", ""))
-    return None, None, ""
+            h_open, a_open = _open_moneylines(entry)
+            return home, away, str((entry.get("provider") or {}).get("name", "")), h_open, a_open
+    return None, None, "", None, None
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +325,8 @@ class EspnClient:
             return game
         game.predictor_home_prob = parse_predictor(payload)
         if game.home_moneyline is None or game.away_moneyline is None:
-            home, away, provider = parse_summary_moneylines(payload)
+            home, away, provider, h_open, a_open = parse_summary_moneylines(payload)
             if home is not None and away is not None:
                 game.home_moneyline, game.away_moneyline, game.odds_provider = home, away, provider
+                game.home_open_moneyline, game.away_open_moneyline = h_open, a_open
         return game

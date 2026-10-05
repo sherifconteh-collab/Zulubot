@@ -579,11 +579,14 @@ python -m unittest discover -s tests -p "test_*.py"
 
 `KalshiSportsStrategy` bets on Kalshi game-winner markets (NFL, NBA, MLB, NHL by default; college football/basketball via `KALSHI_SPORTS_LEAGUES`). Enable with `KALSHI_SPORTS_ENABLED=true`; it paper-trades unless `PAPER_MODE=false` and Kalshi credentials are set.
 
-Each cycle (default 30 min) it:
-1. Pulls upcoming games from ESPN (schedule, records, sportsbook moneylines, ESPN's matchup predictor).
-2. Matches open Kalshi markets to those games and teams.
-3. Builds a win probability from the vig-free sportsbook line (60%) blended with ESPN's matchup predictor (25%). Games with no sportsbook line are skipped by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`); a log5 records model is only a fallback when that guard is turned off.
-4. Buys YES or NO only when `model probability - ask >= KALSHI_SPORTS_MIN_EDGE`, subject to liquidity/spread/price filters, one bet per game, fractional-Kelly sizing, a per-bet cap and a total exposure cap.
-5. Holds to settlement and closes at $1/$0 when Kalshi resolves the market.
+There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
+1. Pulls upcoming games from ESPN (schedule, DraftKings opening/closing moneylines, ESPN's matchup predictor, records) and matches open Kalshi markets to them.
+2. Treats each input as a noisy measurement of the true win probability: the sportsbook closing line, Kalshi's own size-weighted order-book price (real-money flow), ESPN's predictor, and a records model only when no line exists. They're fused by inverse-variance weighting in log-odds space.
+3. **Learns** how reliable each source is: every forecast is logged, scored when Kalshi settles the game, and each source's uncertainty is updated (persisted in `sports_calibration.json` under the data dir). `/sports` and run results include `source_accuracy`.
+4. Skips games where sources contradict each other beyond chance (a 99% chi-square test: usually a mismatched team or a stale quote) and drops a lone outlier source.
+5. Values YES and NO **net of Kalshi's taker fee**, then sizes with Kelly shrunk by edge-vs-uncertainty, so noisy or thin edges get tiny stakes and strong, well-supported ones get larger ones. Stakes are capped by the size resting at the ask, a per-bet % of equity and a total exposure budget. One bet per game.
+6. Holds to settlement and closes at Kalshi's settlement value ($1, $0, or $0.50 on a tie). Paper PnL includes the fee.
 
-Telegram: `/sports` runs a scan and shows the top model picks with edge. Verified against live ESPN and Kalshi responses (NFL/NBA/MLB/NHL series tickers and payload shapes) on 2026-10-04; if Kalshi renames a series, override it with `KALSHI_SPORTS_SERIES`. Soccer is unsupported (three-way outcomes). Sports betting carries real risk of loss; a positive modelled edge is not a guarantee.
+A sportsbook line is required by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`): ESPN's predictor and records alone are not sharper than Kalshi's price. Telegram: `/sports` runs a scan and shows picks with probability ± uncertainty, net edge after fees, and line movement.
+
+Reality check from live testing (Oct 2026): DraftKings, Kalshi and ESPN agree to within a point or two on most games, so after the fee and spread there is usually no edge. Real edge needs more independent sharp sources (e.g. Pinnacle / multi-book lines, Polymarket prices) or catching Kalshi lagging a line move. Verified against live ESPN and Kalshi responses; if Kalshi renames a series, override it with `KALSHI_SPORTS_SERIES`. Soccer is unsupported (three-way outcomes). Sports betting carries real risk of loss; a positive modelled edge is not a guarantee.

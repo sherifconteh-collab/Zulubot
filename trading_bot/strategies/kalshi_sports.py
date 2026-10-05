@@ -1,19 +1,22 @@
-"""Kalshi sports (game-winner) strategy driven by ESPN data.
+"""Kalshi sports (game-winner) strategy driven by ESPN data and an adaptive model.
 
 Strategy overview
 -----------------
 1. Pull upcoming games from ESPN's scoreboard for each configured league.
 2. Pull open Kalshi game-winner markets for the matching series
    (e.g. ``KXNFLGAME``) and match each market to an ESPN game + team.
-3. For each matched game build a win-probability estimate by blending:
-     * the vig-free sportsbook moneyline ESPN shows for the game,
-     * ESPN's own matchup predictor,
-     * a log5 team-record model with a home-field prior (only when no
-       sportsbook line exists, since the line already prices records).
-4. Compare the estimate to Kalshi's ask on both YES and NO. Bet only when the
-   edge clears ``min_edge_pct`` and every sanity filter passes.
-5. Size with fractional Kelly, capped per bet and in total sports exposure.
-6. Hold to settlement (default) and close at $1/$0 when Kalshi resolves.
+3. Treat each input as a noisy measurement of the true win probability and fuse
+   them (``sports_model.combine``): the sportsbook closing line, Kalshi's own
+   size-weighted order-book price, ESPN's predictor and (only when there is no
+   line) a records model. Each source's weight comes from how accurate it has
+   actually been on settled games (``SourceCalibration``), not fixed numbers.
+4. Value YES and NO net of Kalshi's fee. Stake by Kelly shrunk by
+   edge-versus-uncertainty, so there is no arbitrary minimum-edge cutoff: weak
+   or noisy edges get tiny stakes, strong well-supported ones get larger ones.
+5. Cap each bet at the liquidity resting at the ask, a per-bet % of equity and
+   a total exposure budget. One bet per game.
+6. Hold to settlement and close at Kalshi's settlement value ($1, $0, or $0.50
+   on a tie).
 
 Position symbols
 ----------------
@@ -23,9 +26,8 @@ Notes
 -----
 * Two-way model only: leagues where a draw is possible (soccer) are not
   supported by the default series map.
-* Sportsbook lines are the sharpest public input; ESPN's predictor and team
-  records alone are not enough to beat Kalshi's price, so
-  ``require_market_signal`` (a sportsbook line is mandatory) defaults on.
+* A sportsbook line is mandatory by default: ESPN's predictor and team records
+  alone are not sharper than Kalshi's own price.
 """
 
 from __future__ import annotations
@@ -38,22 +40,32 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from trading_bot.broker import PaperBroker
+from pathlib import Path
+
 from trading_bot.clients_espn import (
     DEFAULT_KALSHI_SERIES,
     EspnClient,
     EspnGame,
     EspnTeam,
     devig_two_way,
+    line_movement,
 )
 from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
+from trading_bot.sports_model import (
+    Signal,
+    SourceCalibration,
+    combine,
+    evaluate_side,
+    microprice,
+)
 
 _CASH_BUCKET = "kalshi"
 _SYMBOL_PREFIX = "KS"
-# An "edge" this large almost always means a team mismatch or bad quote, not alpha.
-_MAX_PLAUSIBLE_EDGE = 0.20
+# Settle-check budget per cycle (get_market calls) when scoring past forecasts.
+_MAX_OUTCOME_CHECKS = 25
 # Shrink small-sample records toward .500 (equivalent to 5 phantom wins + 5 losses).
 _RECORD_PRIOR_GAMES = 10.0
 _RESOLVED_STATUSES = {"settled", "finalized", "determined"}
@@ -151,6 +163,34 @@ def match_market_to_game(
     return None
 
 
+def _settlement_yes_value(market: dict[str, Any]) -> float | None:
+    """YES payout in dollars once a market has settled (1, 0, or 0.5 on a tie); else None."""
+    raw = market.get("settlement_value_dollars")
+    settled = str(market.get("status", "")).lower() in _RESOLVED_STATUSES
+    if raw not in (None, "") and (settled or str(market.get("result", "")).lower() in ("yes", "no")):
+        try:
+            return min(max(float(raw), 0.0), 1.0)
+        except (TypeError, ValueError):
+            pass
+    result = str(market.get("result", "")).lower()
+    if result == "yes":
+        return 1.0
+    if result == "no":
+        return 0.0
+    return None
+
+
+def _kalshi_size(market: dict[str, Any], name: str) -> float:
+    for key in (f"{name}_fp", name):
+        raw = market.get(key)
+        if raw not in (None, ""):
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
 def _kalshi_price(market: dict[str, Any], name: str) -> float:
     """Price in [0, 1] for e.g. ``yes_ask``; 0.0 when absent."""
     dollars = market.get(f"{name}_dollars")
@@ -187,50 +227,42 @@ def record_home_prob(game: EspnGame, home_advantage: float) -> float | None:
     return odds / (1 + odds)
 
 
-def estimate_home_win_prob(
+def build_signals(
     game: EspnGame,
+    team_side: str,
+    market: dict[str, Any],
     config: KalshiSportsConfig,
-) -> tuple[float, dict[str, float]] | None:
-    """Blend the available signals into P(home wins).
+    calibration: SourceCalibration,
+) -> list[Signal]:
+    """Independent estimates of P(YES) for a market (YES = the team on ``team_side``)."""
+    signals: list[Signal] = []
 
-    Returns (probability, components) or None when the data is too thin to bet.
-    """
-    components: dict[str, float] = {}
-    weights: dict[str, float] = {}
+    def as_yes(p_home: float) -> float:
+        return p_home if team_side == "home" else 1.0 - p_home
 
     book = devig_two_way(game.home_moneyline, game.away_moneyline)
     if book is not None:
-        components["sportsbook"] = book
-        weights["sportsbook"] = config.weight_sportsbook
+        signals.append(Signal("sportsbook", as_yes(book), calibration.sd("sportsbook")))
+
+    yes_bid, yes_ask = _kalshi_price(market, "yes_bid"), _kalshi_price(market, "yes_ask")
+    micro = microprice(
+        yes_bid, _kalshi_size(market, "yes_bid_size"), yes_ask, _kalshi_size(market, "yes_ask_size"),
+    )
+    if micro is not None:
+        # A wide spread means the market is unsure of its own price.
+        sd = max(calibration.sd("kalshi_book"), (yes_ask - yes_bid) / 2.0)
+        signals.append(Signal("kalshi_book", micro, sd))
+
     if game.predictor_home_prob is not None:
-        components["espn_predictor"] = game.predictor_home_prob
-        weights["espn_predictor"] = config.weight_espn_predictor
-    # Records are already priced into a sportsbook line; blending them in would only
-    # shrink a sharp number toward .500 and manufacture fake edges on underdogs.
-    # They are a fallback for games with no line.
+        signals.append(Signal("espn_predictor", as_yes(game.predictor_home_prob), calibration.sd("espn_predictor")))
+
+    # Records are already priced into a sportsbook line; blending them in would
+    # only shrink a sharp number toward .500. They are a fallback for no-line games.
     if book is None:
         rec = record_home_prob(game, config.home_advantage)
         if rec is not None:
-            components["record"] = rec
-            weights["record"] = config.weight_record
-
-    # ESPN's predictor and records are not sharper than Kalshi's own price; only a
-    # sportsbook line is a credible independent reference to bet against.
-    if config.require_market_signal and "sportsbook" not in components:
-        return None
-    total_weight = sum(weights.values())
-    if not components or total_weight <= 0:
-        return None
-    prob = sum(components[k] * weights[k] for k in components) / total_weight
-    return min(max(prob, 0.01), 0.99), components
-
-
-def kelly_notional(edge: float, ask: float, equity: float, config: KalshiSportsConfig) -> float:
-    """Fractional-Kelly stake in USD for a binary contract, capped per bet."""
-    if ask <= 0 or ask >= 1 or edge <= 0:
-        return 0.0
-    full = edge / (1.0 - ask)
-    return min(equity * full * config.kelly_fraction, equity * config.max_position_pct)
+            signals.append(Signal("record", as_yes(rec), calibration.sd("record")))
+    return signals
 
 
 # ---------------------------------------------------------------------------
@@ -248,10 +280,12 @@ class KalshiSportsStrategy:
         espn_client: EspnClient,
         logger: logging.Logger,
         live_trading_enabled: bool = False,
+        calibration_path: Path | None = None,
     ) -> None:
         self.config = config
         self.kalshi = kalshi_client
         self.espn = espn_client
+        self.calibration = SourceCalibration(calibration_path, logger)
         self.logger = logger.getChild("strategy.kalshi_sports")
         self.live_trading_enabled = live_trading_enabled
 
@@ -286,6 +320,7 @@ class KalshiSportsStrategy:
         try:
             self._close_resolved_positions(state, broker, result)
             self._manage_open_positions(state, broker, result)
+            self._score_past_forecasts()
 
             if state.kill_switch_engaged or state.halt_new_trades_for_day:
                 result["status"] = "halted"
@@ -305,7 +340,21 @@ class KalshiSportsStrategy:
             self.logger.error("Kalshi sports cycle failed: %s", exc, exc_info=True)
             result["status"] = "error"
             result["error"] = str(exc)
+        finally:
+            result["source_accuracy"] = self.calibration.summary()
+            self.calibration.save()
         return result
+
+    def _score_past_forecasts(self) -> None:
+        """Teach the model which sources were right: score forecasts for settled games."""
+        for ticker in list(self.calibration.pending)[:_MAX_OUTCOME_CHECKS]:
+            try:
+                value = _settlement_yes_value(self.kalshi.get_market(ticker))
+            except Exception as exc:
+                self.logger.debug("Outcome check failed for %s: %s", ticker, exc)
+                continue
+            if value is not None:
+                self.calibration.record_outcome(ticker, value)
 
     # ------------------------------------------------------------------
     # Discovery + prediction
@@ -412,74 +461,86 @@ class KalshiSportsStrategy:
     ) -> dict[str, Any] | None:
         cfg = self.config
         ticker = str(market.get("ticker", ""))
-        estimate = estimate_home_win_prob(game, cfg)
-        if estimate is None:
+        signals = build_signals(game, team_side, market, cfg, self.calibration)
+        if cfg.require_market_signal and not any(s.name == "sportsbook" for s in signals):
+            self._log_skip(result, ticker, "no_sportsbook_line", game=game.label)
+            return None
+        post = combine(signals)
+        if post is None:
             self._log_skip(result, ticker, "insufficient_data", game=game.label)
             return None
-        p_home, components = estimate
-        p_team = p_home if team_side == "home" else 1.0 - p_home
+        # Remember every source's raw forecast so the model can learn who was right.
+        self.calibration.record_forecast(ticker, {s.name: s.p for s in signals})
+        if post.conflict:
+            self._log_skip(result, ticker, "sources_conflict", game=game.label,
+                           sources={s.name: round(s.p, 3) for s in post.used})
+            return None
 
-        yes_ask = _kalshi_price(market, "yes_ask")
-        yes_bid = _kalshi_price(market, "yes_bid")
-        no_ask = _kalshi_price(market, "no_ask")
-        no_bid = _kalshi_price(market, "no_bid")
         backed = game.home if team_side == "home" else game.away
         other = game.away if team_side == "home" else game.home
+        yes_ask = _kalshi_price(market, "yes_ask")
+        no_ask = _kalshi_price(market, "no_ask")
+        move = line_movement(game)
+        if move is not None and team_side == "away":
+            move = -move  # express movement toward the YES team
 
-        prediction = {
+        prediction: dict[str, Any] = {
             "game": game.label,
             "league": game.league,
             "start": game.start_time.isoformat(),
             "ticker": ticker,
             "yes_team": backed.display_name,
-            "p_yes": round(p_team, 4),
-            "components": {k: round(v, 4) for k, v in components.items()},
+            "p_yes": round(post.p, 4),
+            "sd": round(post.sd, 4),
+            "sources": post.to_dict()["sources"],
+            "dropped": post.dropped,
+            "line_move_to_yes": None if move is None else round(move, 4),
             "yes_ask": round(yes_ask, 4),
             "no_ask": round(no_ask, 4),
         }
 
         options = []
-        if yes_ask > 0:
-            options.append(("yes", yes_ask, yes_bid, p_team, backed))
-        if no_ask > 0:
-            options.append(("no", no_ask, no_bid, 1.0 - p_team, other))
+        yes_decision = evaluate_side(post, "yes", post.p, yes_ask, fee_rate=cfg.fee_rate,
+                                     kelly_fraction=cfg.kelly_fraction) if yes_ask > 0 else None
+        no_decision = evaluate_side(post, "no", 1.0 - post.p, no_ask, fee_rate=cfg.fee_rate,
+                                    kelly_fraction=cfg.kelly_fraction) if no_ask > 0 else None
+        if yes_decision:
+            options.append((yes_decision, backed, _kalshi_size(market, "yes_ask_size")))
+        if no_decision:
+            options.append((no_decision, other, _kalshi_size(market, "no_ask_size")))
+
         if not options:
-            self._log_skip(result, ticker, "no_quotes", game=game.label)
+            # Report the better-valued side even though it isn't a bet, for the picks list.
+            best_p, best_ask, best_side, best_team = max(
+                [(post.p, yes_ask, "yes", backed), (1.0 - post.p, no_ask, "no", other)],
+                key=lambda o: o[0] - (o[1] or 1.0),
+            )
+            prediction.update({"pick": best_team.display_name, "side": best_side,
+                               "edge": round(best_p - best_ask, 4) if best_ask else 0.0,
+                               "net_edge": None})
+            result["predictions"].append(prediction)
+            self._log_skip(result, ticker, "no_edge_after_fees", game=game.label,
+                           p=round(post.p, 4), sd=round(post.sd, 4))
             return None
 
-        side, ask, bid, prob, pick_team = max(options, key=lambda o: o[3] - o[1])
-        edge = prob - ask
-        prediction.update({"pick": pick_team.display_name, "side": side, "edge": round(edge, 4)})
+        decision, pick_team, depth = max(options, key=lambda o: o[0].stake_fraction * o[0].net_edge)
+        prediction.update({
+            "pick": pick_team.display_name,
+            "side": decision.side,
+            "edge": round(decision.p - decision.price, 4),
+            "net_edge": round(decision.net_edge, 4),
+            "confidence": round(decision.confidence, 3),
+            "stake_fraction": round(decision.stake_fraction, 5),
+        })
         result["predictions"].append(prediction)
-
-        volume = int(float(market.get("volume_fp") or market.get("volume") or 0))
-        reason = None
-        if edge < cfg.min_edge_pct:
-            reason = "edge_below_min"
-        elif edge > _MAX_PLAUSIBLE_EDGE:
-            reason = "edge_implausible"
-        elif prob < cfg.min_model_prob:
-            reason = "model_prob_too_low"
-        elif ask > cfg.max_entry_price:
-            reason = "price_too_high"
-        elif volume < cfg.min_kalshi_volume:
-            reason = "illiquid"
-        elif bid > 0 and ask - bid > cfg.max_spread:
-            reason = "spread_too_wide"
-        if reason:
-            self._log_skip(result, ticker, reason, game=game.label, edge=round(edge, 4), ask=round(ask, 4))
-            return None
-
         return {
             "market": market,
             "game": game,
-            "side": side,
-            "ask": ask,
-            "prob": prob,
-            "edge": edge,
+            "decision": decision,
+            "posterior": post,
             "pick": pick_team.display_name,
-            "components": components,
-            "volume": volume,
+            "depth": depth,
+            "edge": decision.stake_fraction * decision.net_edge,  # expected growth: ranking key
         }
 
     def _log_skip(self, result: dict[str, Any], ticker: str, reason: str, **signals: Any) -> None:
@@ -529,10 +590,17 @@ class KalshiSportsStrategy:
                 self._log_skip(result, ticker, "already_bet_on_game")
                 continue
 
-            notional = kelly_notional(cand["edge"], cand["ask"], equity, cfg)
-            notional = min(notional, max(0.0, exposure_cap - exposure))
+            decision = cand["decision"]
+            notional = min(
+                equity * decision.stake_fraction,
+                equity * cfg.max_position_pct,
+                max(0.0, exposure_cap - exposure),
+            )
+            if cand["depth"] > 0:  # can't buy more than what's offered at our price
+                notional = min(notional, cand["depth"] * decision.price)
             if notional < cfg.min_trade_usd:
-                self._log_skip(result, ticker, "stake_below_min", notional=round(notional, 2))
+                self._log_skip(result, ticker, "stake_below_min", notional=round(notional, 2),
+                               net_edge=round(decision.net_edge, 4), sd=round(decision.sd, 4))
                 continue
 
             position = self._place_bet(state, broker, cand, notional, now, bucket)
@@ -551,12 +619,15 @@ class KalshiSportsStrategy:
                 "signals": {
                     "game": cand["game"].label,
                     "pick": cand["pick"],
-                    "side": cand["side"],
-                    "model_prob": round(cand["prob"], 4),
-                    "ask": round(cand["ask"], 4),
-                    "edge": round(cand["edge"], 4),
+                    "side": decision.side,
+                    "model_prob": round(decision.p, 4),
+                    "uncertainty_sd": round(decision.sd, 4),
+                    "ask": round(decision.price, 4),
+                    "fee": round(decision.fee, 4),
+                    "net_edge": round(decision.net_edge, 4),
+                    "confidence": round(decision.confidence, 3),
                     "notional": round(position.quantity * position.entry_price, 2),
-                    "components": {k: round(v, 4) for k, v in cand["components"].items()},
+                    "sources": cand["posterior"].to_dict()["sources"],
                 },
             })
 
@@ -569,15 +640,19 @@ class KalshiSportsStrategy:
         now: datetime,
         bucket: str | None,
     ) -> Any | None:
-        market, game, side, ask = cand["market"], cand["game"], cand["side"], cand["ask"]
+        market, game, decision = cand["market"], cand["game"], cand["decision"]
+        side, ask = decision.side, decision.price
         ticker = str(market.get("ticker", ""))
         symbol = f"{_SYMBOL_PREFIX}:{ticker}:{side.upper()}"
         if symbol in state.positions:
             return None
 
+        # Paper accounting books the fee into the entry price so simulated PnL is
+        # net of costs; live, Kalshi debits the fee from the balance itself.
+        entry_price = ask if self.live_trading_enabled else ask + decision.fee
         if self.live_trading_enabled:
             notional = min(notional, broker.get_cash_balance(state, cash_bucket=_CASH_BUCKET) * 0.95)
-        quantity = math.floor(notional / ask)
+        quantity = math.floor(notional / entry_price)
         if quantity < 1:
             return None
 
@@ -591,9 +666,12 @@ class KalshiSportsStrategy:
             "game": game.label,
             "pick": cand["pick"],
             "game_start": game.start_time.isoformat(),
-            "model_prob": round(cand["prob"], 4),
-            "edge": round(cand["edge"], 4),
-            "components": {k: round(v, 4) for k, v in cand["components"].items()},
+            "model_prob": round(decision.p, 4),
+            "uncertainty_sd": round(decision.sd, 4),
+            "net_edge": round(decision.net_edge, 4),
+            "ask": round(ask, 4),
+            "fee": round(decision.fee, 4),
+            "sources": cand["posterior"].to_dict()["sources"],
             "odds_provider": game.odds_provider,
         }
         position = broker.open_position(
@@ -601,8 +679,8 @@ class KalshiSportsStrategy:
             symbol=symbol,
             asset_type="prediction",
             strategy="kalshi_sports",
-            price=ask,
-            notional=quantity * ask,
+            price=entry_price,
+            notional=quantity * entry_price,
             opened_at=now,
             meta=meta,
             cash_bucket=bucket,
@@ -612,10 +690,10 @@ class KalshiSportsStrategy:
 
         filled = int(round(position.quantity))
         self.logger.info(
-            "KALSHI SPORTS %s %s %s on %s @ $%.2f x%d | model=%.1f%% edge=%.1f%%",
+            "KALSHI SPORTS %s %s %s on %s @ $%.2f (+$%.2f fee) x%d | p=%.1f%%±%.1f net edge=%.1f%%",
             "LIVE" if self.live_trading_enabled else "PAPER",
-            side.upper(), cand["pick"], game.label, ask, filled,
-            cand["prob"] * 100, cand["edge"] * 100,
+            side.upper(), cand["pick"], game.label, ask, decision.fee, filled,
+            decision.p * 100, decision.sd * 100, decision.net_edge * 100,
         )
 
         if self.live_trading_enabled and filled >= 1:
@@ -633,7 +711,7 @@ class KalshiSportsStrategy:
             except Exception as exc:
                 self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
                 # Roll the paper position back so we don't track a bet that never placed.
-                broker.close_position(state, symbol=symbol, price=ask, reason="order_failed", cash_bucket=bucket)
+                broker.close_position(state, symbol=symbol, price=entry_price, reason="order_failed", cash_bucket=bucket)
                 return None
         return position
 
@@ -655,14 +733,14 @@ class KalshiSportsStrategy:
                 continue
             try:
                 market = self.kalshi.get_market(ticker)
-                status = str(market.get("status", "")).lower()
-                outcome = str(market.get("result", "")).lower()
-                if outcome not in ("yes", "no"):
-                    if status in _RESOLVED_STATUSES:
+                yes_value = _settlement_yes_value(market)
+                if yes_value is None:
+                    if str(market.get("status", "")).lower() in _RESOLVED_STATUSES:
                         self.logger.warning("%s resolved without a result; leaving for manual review.", ticker)
                     continue
                 side = str(position.meta.get("side", "yes")).lower()
-                close_price = 1.0 if outcome == side else 0.0
+                close_price = yes_value if side == "yes" else 1.0 - yes_value
+                outcome = "tie" if yes_value == 0.5 else ("yes" if yes_value >= 1.0 else "no")
                 broker.close_position(
                     state, symbol=symbol, price=close_price, reason=f"resolved:{outcome}",
                 )
@@ -672,7 +750,8 @@ class KalshiSportsStrategy:
                     "symbol": symbol,
                     "action": "sell",
                     "reason": f"resolved:{outcome}",
-                    "signals": {"won": close_price == 1.0, "game": position.meta.get("game", "")},
+                    "signals": {"won": close_price > position.entry_price, "payout": close_price,
+                                "game": position.meta.get("game", "")},
                 })
             except Exception as exc:
                 self.logger.warning("Resolution check failed for %s: %s", ticker, exc)
