@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any
 
 from trading_bot.broker import PaperBroker
-from trading_bot.clients_kalshi import KalshiClient
+from trading_bot.clients_kalshi import KalshiClient, parse_top_of_book
 from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.config import LatencyArbConfig
 from trading_bot.charting import render_candlestick_chart_data_uri
@@ -452,19 +452,8 @@ class LatencyArbStrategy:
         Falls back to mid-price from market data if orderbook unavailable.
         """
         try:
-            book = self.kalshi.get_orderbook(ticker)
-            orderbook = book.get("orderbook", book)
-
-            yes_ask = _best_ask(orderbook.get("yes", []))
-            no_ask = _best_ask(orderbook.get("no", []))
-
-            # Kalshi prices are in cents (1–99), convert to [0,1]
-            if yes_ask > 1:
-                yes_ask = yes_ask / 100.0
-            if no_ask > 1:
-                no_ask = no_ask / 100.0
-
-            return yes_ask, no_ask
+            top = parse_top_of_book(self.kalshi.get_orderbook(ticker))
+            return top["yes_ask"], top["no_ask"]
 
         except Exception as exc:
             self.logger.debug("Orderbook fetch failed for %s: %s", ticker, exc)

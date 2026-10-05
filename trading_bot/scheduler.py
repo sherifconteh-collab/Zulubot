@@ -47,6 +47,8 @@ class SchedulerService:
         self._last_markov_run: datetime | None = None
         self._last_options_run: datetime | None = None
         self._last_kalshi_perps_run: datetime | None = None
+        self._last_kalshi_sports_run: datetime | None = None
+        self._paused_by_kill_switch = False
 
         # When latency arb is active, tighten the poll loop to its scan interval
         if config.latency_arb.enabled:
@@ -122,7 +124,14 @@ class SchedulerService:
                 status = self.service.status()
                 await self.notifier.notify_heartbeat(status)
                 self._last_heartbeat = now
+            # A kill-switch pause (not a manual /pause) must not stop sports betting.
+            if self._sports_runs_through_kill_switch() and self._should_run_kalshi_sports(now):
+                result = await self._run_module("kalshi_sports", now)
+                self._last_kalshi_sports_run = now
+                if result is not None:
+                    await self.notifier.notify_trade(result)
             return
+        self._paused_by_kill_switch = False
 
         # Latency arb cycle (highest priority — runs every scan_interval_seconds)
         if self._should_run_latency_arb(now):
@@ -233,6 +242,22 @@ class SchedulerService:
                 await self._handle_kill_switch(result)
                 return
 
+        # Kalshi sports cycle
+        if self._should_run_kalshi_sports(now):
+            result = await self._run_module("kalshi_sports", now)
+            if result is not None:
+                module_results.append(result)
+            self._last_kalshi_sports_run = now
+            if (
+                result is not None
+                and result.get("risk", {}).get("kill_switch_active")
+                and not self.config.kalshi_sports.ignore_global_halt
+            ):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
+
         # Options cycle
         if self._should_run_options(now):
             result = await self._run_module("options", now)
@@ -314,10 +339,15 @@ class SchedulerService:
         if risk.get("daily_halt_active") or risk.get("kill_switch_active"):
             await self.notifier.notify_risk(risk)
 
+    def _sports_runs_through_kill_switch(self) -> bool:
+        cfg = self.config.kalshi_sports
+        return cfg.enabled and cfg.ignore_global_halt and self._paused_by_kill_switch
+
     async def _handle_kill_switch(self, result: dict[str, Any]) -> None:
         risk = result.get("risk", {})
         if risk.get("kill_switch_active"):
             self.telegram._paused = True
+            self._paused_by_kill_switch = True
             await self.notifier.notify_error("Kill switch triggered. Bot paused.")
 
     @staticmethod
@@ -397,6 +427,14 @@ class SchedulerService:
             return True
         elapsed = (now - self._last_markov_run).total_seconds()
         return elapsed >= self.config.markov.run_interval_minutes * 60
+
+    def _should_run_kalshi_sports(self, now: datetime) -> bool:
+        if not self.config.kalshi_sports.enabled:
+            return False
+        if self._last_kalshi_sports_run is None:
+            return True
+        elapsed = (now - self._last_kalshi_sports_run).total_seconds()
+        return elapsed >= self.config.kalshi_sports.check_interval_minutes * 60
 
     def _should_run_kalshi_perps(self, now: datetime) -> bool:
         if not self.config.kalshi_perps.enabled:
