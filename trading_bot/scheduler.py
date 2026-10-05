@@ -374,7 +374,13 @@ class SchedulerService:
         elapsed = (now - self._last_latency_arb_run).total_seconds()
         return elapsed >= self.config.latency_arb.scan_interval_seconds
 
+    def _crypto_venue_active(self) -> bool:
+        """Crypto/rotation only run when simulated or when Coinbase trading is enabled."""
+        return self.config.paper_mode or self.config.coinbase.trading_enabled
+
     def _should_run_crypto(self, now: datetime) -> bool:
+        if not self._crypto_venue_active():
+            return False
         if self._last_crypto_run is None:
             return True
         elapsed = (now - self._last_crypto_run).total_seconds()
@@ -389,6 +395,8 @@ class SchedulerService:
         return elapsed >= self.scheduler_config.btc5min_interval_minutes * 60
 
     def _should_run_rotation(self, now: datetime) -> bool:
+        if not self._crypto_venue_active():
+            return False
         if not self.config.altcoin_rotation.enabled:
             return False
         if self._last_rotation_run is None:

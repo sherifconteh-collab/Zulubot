@@ -154,7 +154,8 @@ class TradingBotService:
             api_key=config.coinbase.api_key,
             api_secret=config.coinbase.api_secret,
             coinbase_client=self.coinbase_client,
-            paper_mode=config.paper_mode,
+            # Without COINBASE_TRADING_ENABLED, Coinbase is read-only: never send it an order.
+            paper_mode=config.paper_mode or not config.coinbase.trading_enabled,
             logger=logger,
             retry_config=config.http_retry,
         )
@@ -324,6 +325,11 @@ class TradingBotService:
         self._kalshi_balance_cache_ts: float = 0.0
         self._kalshi_balance_cache_ttl: float = 120.0  # 2-minute TTL
 
+    @property
+    def coinbase_trading_active(self) -> bool:
+        """True when crypto strategies may trade: simulated (paper) or Coinbase trading enabled."""
+        return self.config.paper_mode or self.config.coinbase.trading_enabled
+
     def _skipped_module(self, reason: str) -> dict[str, Any]:
         return {
             "status": "skipped",
@@ -381,7 +387,11 @@ class TradingBotService:
             else:
                 self.logger.warning("Stocks module skipped in live mode: live stock execution is not implemented.")
                 module_results["stocks"] = self._skipped_module("live_stock_execution_unavailable")
-        if command in {"crypto", "all"}:
+        if command in {"crypto", "rotation", "all"} and not self.coinbase_trading_active:
+            self.logger.info("Crypto/rotation skipped: Coinbase is data-only (COINBASE_TRADING_ENABLED=false).")
+        if command in {"crypto", "all"} and not self.coinbase_trading_active:
+            module_results["crypto"] = self._skipped_module("coinbase_trading_disabled")
+        elif command in {"crypto", "all"}:
             module_results["crypto"] = self._run_module(
                 "crypto",
                 lambda: self.crypto_strategy.run(
@@ -391,7 +401,9 @@ class TradingBotService:
                     now=now,
                 ),
             )
-        if command in {"rotation", "all"}:
+        if command in {"rotation", "all"} and not self.coinbase_trading_active:
+            module_results["rotation"] = self._skipped_module("coinbase_trading_disabled")
+        elif command in {"rotation", "all"}:
             module_results["rotation"] = self._run_module(
                 "rotation",
                 lambda: self.rotation_strategy.run(
@@ -972,6 +984,10 @@ class TradingBotService:
 
     def _sync_coinbase_balance(self, state: PortfolioState) -> None:
         """Sync portfolio cash and equity from real Coinbase balances."""
+        if not self.config.coinbase.trading_enabled:
+            # Coinbase is data-only: none of its balance is ours to trade or count as equity.
+            state.cash = 0.0
+            return
         try:
             total_usd, breakdown = self.coinbase_broker.get_total_balance()
             usd_cash = breakdown.get("USD", 0.0) + breakdown.get("USDC", 0.0)
