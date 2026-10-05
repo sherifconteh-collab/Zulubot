@@ -32,6 +32,7 @@ from typing import Any
 PRIOR_SD: dict[str, float] = {
     "sportsbook": 0.025,       # closing line from a major book: sharpest public number
     "kalshi_book": 0.030,      # Kalshi's own size-weighted order-book price
+    "polymarket": 0.030,       # Polymarket mid: a separate real-money crowd
     "espn_predictor": 0.060,   # ESPN matchup predictor: ignores much market info
     "record": 0.090,           # records + home field: weakest
 }

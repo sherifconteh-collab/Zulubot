@@ -37,6 +37,7 @@ from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.kalshi_perpetuals import KalshiPerpetualsStrategy
 from trading_bot.strategies.kalshi_sports import KalshiSportsStrategy
 from trading_bot.clients_espn import EspnClient
+from trading_bot.clients_polymarket_sports import PolymarketSportsClient
 from trading_bot.strategies.stocks import StockValueStrategy
 
 try:
@@ -236,6 +237,8 @@ class TradingBotService:
             config=config.kalshi_sports,
             kalshi_client=self.kalshi_client,
             espn_client=self.espn_client,
+            poly_client=PolymarketSportsClient(timeout_seconds=config.request_timeout_seconds, logger=logger)
+            if config.kalshi_sports.use_polymarket else None,
             logger=logger,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
             calibration_path=config.data_dir / "sports_calibration.json",

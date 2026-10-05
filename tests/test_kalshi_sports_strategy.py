@@ -17,6 +17,7 @@ from trading_bot.clients_espn import (
     parse_record,
     parse_scoreboard,
 )
+from trading_bot.clients_polymarket_sports import PolyQuote, parse_poly_events
 from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState
 from trading_bot.sports_model import (
@@ -32,6 +33,7 @@ from trading_bot.strategies.kalshi_sports import (
     KalshiSportsStrategy,
     _settlement_yes_value,
     build_signals,
+    link_polymarket,
     match_market_to_game,
     record_home_prob,
 )
@@ -525,6 +527,72 @@ class SoccerTests(unittest.TestCase):
         strat, _ = _strategy(_config(), [game], [_soccer_market("EVE", "Everton", 0.20, 0.81)])
         _, _, result = _run(strat)
         self.assertEqual(result["buys"], [])
+
+
+class PolymarketTests(unittest.TestCase):
+    def _events(self):
+        two_way = {"title": "Ravens vs. Bills", "markets": [{
+            "sportsMarketType": "moneyline", "gameStartTime": "2026-10-04 17:00:00+00",
+            "outcomes": '["Ravens", "Bills"]', "bestBid": 0.55, "bestAsk": 0.57, "liquidityNum": 5000}]}
+        soccer = {"title": "Chelsea vs. Everton", "markets": [
+            {"sportsMarketType": "moneyline", "gameStartTime": "2026-10-04 17:00:00+00",
+             "question": "Will Chelsea FC win on 2026-10-04?", "outcomes": '["Yes", "No"]', "bestBid": 0.50, "bestAsk": 0.52},
+            {"sportsMarketType": "moneyline", "gameStartTime": "2026-10-04 17:00:00+00",
+             "question": "Will Chelsea FC vs. Everton end in a draw?", "outcomes": '["Yes", "No"]', "bestBid": 0.24, "bestAsk": 0.26},
+            {"sportsMarketType": "moneyline", "gameStartTime": "2026-10-04 17:00:00+00",
+             "question": "Will Everton FC win on 2026-10-04?", "outcomes": '["Yes", "No"]', "bestBid": 0.23, "bestAsk": 0.25}]}
+        stale = {"title": "Old", "markets": [{"sportsMarketType": "moneyline", "gameStartTime": "2026-10-04 17:00:00+00",
+                                             "outcomes": '["A", "B"]', "bestBid": None, "bestAsk": 1}]}
+        return [two_way, soccer, stale]
+
+    def test_parse_two_way_and_soccer_and_skip_unquoted(self):
+        games = parse_poly_events(self._events())
+        self.assertEqual(len(games), 2)
+        two, soc = games
+        self.assertAlmostEqual(two.quotes["ravens"].mid, 0.56)
+        self.assertAlmostEqual(two.quotes["bills"].mid, 0.44)       # complement of outcome 0
+        self.assertAlmostEqual(two.quotes["bills"].bid, 0.43)
+        self.assertEqual(set(soc.quotes), {"chelsea fc", "draw", "everton fc"})
+
+    def test_link_two_way_matches_teams_and_time(self):
+        game = _game(start_time=datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc))
+        quotes = link_polymarket(game, parse_poly_events(self._events()))
+        self.assertIsNotNone(quotes)
+        self.assertAlmostEqual(quotes["home"].mid + quotes["away"].mid, 1.0)  # normalised
+        self.assertGreater(quotes["away"].mid, 0.4)  # Bills == away (Buffalo)
+
+    def test_link_rejects_wrong_day(self):
+        game = _game(start_time=datetime(2026, 10, 7, 17, 0, tzinfo=timezone.utc))
+        self.assertIsNone(link_polymarket(game, parse_poly_events(self._events())))
+
+    def test_soccer_link_needs_draw_and_normalises(self):
+        game = _soccer_game(start_time=datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc))
+        quotes = link_polymarket(game, parse_poly_events(self._events()))
+        self.assertEqual(set(quotes), {"home", "away", "draw"})
+        self.assertAlmostEqual(sum(q.mid for q in quotes.values()), 1.0)
+
+    def test_polymarket_becomes_a_signal_with_spread_based_sd(self):
+        game = _game()
+        game.extra["polymarket"] = {"home": PolyQuote(0.6, 0.55, 0.65), "away": PolyQuote(0.4, 0.35, 0.45)}
+        sigs = {s.name: s for s in build_signals(game, "home", _market("Baltimore"), _config(), SourceCalibration())}
+        self.assertAlmostEqual(sigs["polymarket"].p, 0.6)
+        self.assertAlmostEqual(sigs["polymarket"].sd, 0.05)  # half the 10-point spread
+
+    def test_lone_dissenting_polymarket_price_is_dropped_as_an_outlier(self):
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+        game.extra["polymarket"] = {"home": PolyQuote(0.25, 0.24, 0.26), "away": PolyQuote(0.75, 0.74, 0.76)}
+        strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
+        _, _, result = _run(strat)
+        self.assertIn("polymarket", result["predictions"][0]["dropped"])
+        self.assertAlmostEqual(result["predictions"][0]["p_yes"], 0.62, delta=0.04)
+
+    def test_polymarket_vs_book_conflict_with_no_tiebreaker_blocks_bet(self):
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0)   # no predictor
+        game.extra["polymarket"] = {"home": PolyQuote(0.25, 0.24, 0.26), "away": PolyQuote(0.75, 0.74, 0.76)}
+        # Kalshi's own price sits with the book, so the three-way split is 2 vs 1 and Polymarket drops.
+        strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.64, no_ask=0.38)])
+        _, _, result = _run(strat)
+        self.assertIn("polymarket", result["predictions"][0]["dropped"])
 
 
 class ParlayTests(unittest.TestCase):

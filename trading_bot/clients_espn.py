@@ -32,30 +32,31 @@ class LeagueSpec:
     kalshi_series: tuple[str, ...]    # game-winner series tickers
     groups: str | None = None         # ESPN `groups` filter (college divisions)
     three_way: bool = False           # draws possible (soccer): three markets per game
+    poly_sport: str | None = None     # Polymarket /sports code, for its price signal
 
 
 # ⚠️ Series tickers verified against Kalshi's live /series listing (Oct 2026); override or
 # extend with KALSHI_SPORTS_SERIES="key=SERIES,...". Leagues out of season simply return
 # no markets and are skipped without touching ESPN.
 LEAGUES: dict[str, LeagueSpec] = {s.key: s for s in (
-    LeagueSpec("nfl", "football/nfl", ("KXNFLGAME",)),
-    LeagueSpec("ncaaf", "football/college-football", ("KXNCAAFGAME", "KXNCAAFBOWLGAME"), groups="80"),
+    LeagueSpec("nfl", "football/nfl", ("KXNFLGAME",), poly_sport="nfl"),
+    LeagueSpec("ncaaf", "football/college-football", ("KXNCAAFGAME", "KXNCAAFBOWLGAME"), groups="80", poly_sport="cfb"),
     LeagueSpec("ncaaf-fcs", "football/college-football", ("KXNCAAFCSGAME",), groups="81"),
-    LeagueSpec("ncaamb", "basketball/mens-college-basketball", ("KXNCAAMBGAME",), groups="50"),
-    LeagueSpec("ncaawb", "basketball/womens-college-basketball", ("KXNCAAWBGAME",), groups="50"),
-    LeagueSpec("nba", "basketball/nba", ("KXNBAGAME",)),
-    LeagueSpec("wnba", "basketball/wnba", ("KXWNBAGAME",)),
-    LeagueSpec("mlb", "baseball/mlb", ("KXMLBGAME",)),
-    LeagueSpec("nhl", "hockey/nhl", ("KXNHLGAME",)),
-    LeagueSpec("epl", "soccer/eng.1", ("KXEPLGAME",), three_way=True),
-    LeagueSpec("laliga", "soccer/esp.1", ("KXLALIGAGAME",), three_way=True),
-    LeagueSpec("bundesliga", "soccer/ger.1", ("KXBUNDESLIGAGAME",), three_way=True),
-    LeagueSpec("seriea", "soccer/ita.1", ("KXSERIEAGAME",), three_way=True),
-    LeagueSpec("ligue1", "soccer/fra.1", ("KXLIGUE1GAME",), three_way=True),
-    LeagueSpec("mls", "soccer/usa.1", ("KXMLSGAME",), three_way=True),
-    LeagueSpec("ligamx", "soccer/mex.1", ("KXLIGAMXGAME",), three_way=True),
-    LeagueSpec("ucl", "soccer/uefa.champions", ("KXUCLGAME",), three_way=True),
-    LeagueSpec("uel", "soccer/uefa.europa", ("KXUELGAME",), three_way=True),
+    LeagueSpec("ncaamb", "basketball/mens-college-basketball", ("KXNCAAMBGAME",), groups="50", poly_sport="cbb"),
+    LeagueSpec("ncaawb", "basketball/womens-college-basketball", ("KXNCAAWBGAME",), groups="50", poly_sport="cwbb"),
+    LeagueSpec("nba", "basketball/nba", ("KXNBAGAME",), poly_sport="nba"),
+    LeagueSpec("wnba", "basketball/wnba", ("KXWNBAGAME",), poly_sport="wnba"),
+    LeagueSpec("mlb", "baseball/mlb", ("KXMLBGAME",), poly_sport="mlb"),
+    LeagueSpec("nhl", "hockey/nhl", ("KXNHLGAME",), poly_sport="nhl"),
+    LeagueSpec("epl", "soccer/eng.1", ("KXEPLGAME",), three_way=True, poly_sport="epl"),
+    LeagueSpec("laliga", "soccer/esp.1", ("KXLALIGAGAME",), three_way=True, poly_sport="lal"),
+    LeagueSpec("bundesliga", "soccer/ger.1", ("KXBUNDESLIGAGAME",), three_way=True, poly_sport="bun"),
+    LeagueSpec("seriea", "soccer/ita.1", ("KXSERIEAGAME",), three_way=True, poly_sport="sea"),
+    LeagueSpec("ligue1", "soccer/fra.1", ("KXLIGUE1GAME",), three_way=True, poly_sport="fl1"),
+    LeagueSpec("mls", "soccer/usa.1", ("KXMLSGAME",), three_way=True, poly_sport="mls"),
+    LeagueSpec("ligamx", "soccer/mex.1", ("KXLIGAMXGAME",), three_way=True, poly_sport="mex"),
+    LeagueSpec("ucl", "soccer/uefa.champions", ("KXUCLGAME",), three_way=True, poly_sport="ucl"),
+    LeagueSpec("uel", "soccer/uefa.europa", ("KXUELGAME",), three_way=True, poly_sport="uel"),
     LeagueSpec("worldcup", "soccer/fifa.world", ("KXWCGAME",), three_way=True),
 )}
 DEFAULT_LEAGUES: list[str] = [

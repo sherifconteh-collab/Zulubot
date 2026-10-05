@@ -581,7 +581,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
 1. Pulls upcoming games from ESPN (schedule, DraftKings opening/closing moneylines, ESPN's matchup predictor, records) and matches open Kalshi markets to them.
-2. Treats each input as a noisy measurement of the true win probability: the sportsbook closing line, Kalshi's own size-weighted order-book price (real-money flow), ESPN's predictor, and a records model only when no line exists. They're fused by inverse-variance weighting in log-odds space.
+2. Treats each input as a noisy measurement of the true win probability: the sportsbook closing line, Kalshi's own size-weighted order-book price (real-money flow), Polymarket's game price (a separate real-money crowd, public Gamma API, `KALSHI_SPORTS_USE_POLYMARKET`), ESPN's predictor, and a records model only when no line exists. They're fused by inverse-variance weighting in log-odds space.
 3. **Learns** how reliable each source is: every forecast is logged, scored when Kalshi settles the game, and each source's uncertainty is updated (persisted in `sports_calibration.json` under the data dir). `/sports` and run results include `source_accuracy`.
 4. Skips games where sources contradict each other beyond chance (a 99% chi-square test: usually a mismatched team or a stale quote) and drops a lone outlier source.
 5. Values YES and NO **net of Kalshi's taker fee**, then sizes with Kelly shrunk by edge-vs-uncertainty, so noisy or thin edges get tiny stakes and strong, well-supported ones get larger ones. Stakes are capped by the size resting at the ask, a per-bet % of equity and a total exposure budget. One bet per game.

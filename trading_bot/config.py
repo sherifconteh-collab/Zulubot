@@ -480,6 +480,7 @@ class KalshiSportsConfig:
     fee_rate: float = 0.07                   # Kalshi taker fee: rate * p * (1 - p) per contract
     # Require a sportsbook line for the game; ESPN's predictor/records alone can't beat Kalshi's price.
     require_market_signal: bool = True
+    use_polymarket: bool = True              # add Polymarket's real-money price as a signal
     # Parlay *suggestions* (never auto-placed): combine up to this many model-approved
     # legs from different games. 0 disables. Kalshi combos are quoted on request, not
     # via an order book, so they are placed manually in Kalshi's parlay builder.
@@ -891,6 +892,7 @@ class AppConfig:
                 home_advantage=_env_float("KALSHI_SPORTS_HOME_ADVANTAGE", 0.55),
                 fee_rate=_env_float("KALSHI_SPORTS_FEE_RATE", 0.07),
                 require_market_signal=_env_bool("KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL", True),
+                use_polymarket=_env_bool("KALSHI_SPORTS_USE_POLYMARKET", True),
                 parlay_max_legs=_env_int("KALSHI_SPORTS_PARLAY_MAX_LEGS", 4),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),

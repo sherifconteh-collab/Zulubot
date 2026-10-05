@@ -53,6 +53,7 @@ from trading_bot.clients_espn import (
     line_movement,
 )
 from trading_bot.clients_kalshi import KalshiClient
+from trading_bot.clients_polymarket_sports import PolyGame, PolyQuote
 from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
@@ -258,6 +259,39 @@ def record_home_prob(game: EspnGame, home_advantage: float) -> float | None:
     return odds / (1 + odds)
 
 
+def link_polymarket(game: EspnGame, poly_games: list[PolyGame]) -> dict[str, PolyQuote] | None:
+    """Polymarket quotes for ``game`` keyed home/away/draw, or None if it can't be matched.
+
+    Needs both teams named in the Polymarket labels and a kickoff within 4 hours.
+    Quotes are normalised so the outcomes sum to 1 (removing Polymarket's own spread bias).
+    """
+    best: dict[str, PolyQuote] | None = None
+    for pg in poly_games:
+        if abs((pg.start - game.start_time).total_seconds()) > 4 * 3600:
+            continue
+        home = [q for label, q in pg.quotes.items() if _team_in_text(game.home, label)]
+        away = [q for label, q in pg.quotes.items() if _team_in_text(game.away, label)]
+        if len(home) != 1 or len(away) != 1 or home[0] is away[0]:
+            continue
+        found = {"home": home[0], "away": away[0]}
+        if "draw" in pg.quotes:
+            found["draw"] = pg.quotes["draw"]
+        if game.three_way and "draw" not in found:
+            continue
+        if best is not None:  # ambiguous: two Polymarket games fit
+            return None
+        best = found
+    if best is None:
+        return None
+    total = sum(q.mid for q in best.values())
+    if total <= 0:
+        return None
+    return {
+        k: PolyQuote(mid=q.mid / total, bid=q.bid, ask=q.ask, liquidity=q.liquidity)
+        for k, q in best.items()
+    }
+
+
 def sportsbook_outcome_probs(game: EspnGame) -> dict[str, float] | None:
     """Vig-free {home, away[, draw]} probabilities from the game's moneylines."""
     if game.three_way:
@@ -289,6 +323,11 @@ def build_signals(
         # A wide spread means the market is unsure of its own price.
         sd = max(calibration.sd("kalshi_book"), (yes_ask - yes_bid) / 2.0)
         signals.append(Signal("kalshi_book", micro, sd))
+
+    poly = (game.extra or {}).get("polymarket")
+    if poly and outcome in poly:
+        quote = poly[outcome]
+        signals.append(Signal("polymarket", quote.mid, max(calibration.sd("polymarket"), quote.spread / 2.0)))
 
     # ESPN's predictor and the records model are two-way only (no draw probability).
     if not game.three_way and outcome in ("home", "away"):
@@ -326,12 +365,14 @@ class KalshiSportsStrategy:
         kalshi_client: KalshiClient,
         espn_client: EspnClient,
         logger: logging.Logger,
+        poly_client: Any | None = None,
         live_trading_enabled: bool = False,
         calibration_path: Path | None = None,
     ) -> None:
         self.config = config
         self.kalshi = kalshi_client
         self.espn = espn_client
+        self.poly = poly_client
         self.calibration = SourceCalibration(calibration_path, logger)
         self.logger = logger.getChild("strategy.kalshi_sports")
         self.live_trading_enabled = live_trading_enabled
@@ -498,6 +539,19 @@ class KalshiSportsStrategy:
                 if found is not None:
                     matched.append((market, found[0], found[1]))
             result["markets_matched"] += len(matched)
+
+            if self.poly is not None and spec.poly_sport and matched:
+                try:
+                    poly_games = self.poly.get_upcoming_games(spec.poly_sport, now=now)
+                except Exception as exc:
+                    self.logger.debug("Polymarket fetch failed for %s: %s", spec.key, exc)
+                    poly_games = []
+                for game in {g.game_id: g for _, g, _ in matched}.values():
+                    quotes = link_polymarket(game, poly_games)
+                    if quotes:
+                        game.extra["polymarket"] = quotes
+                result["polymarket_linked"] = result.get("polymarket_linked", 0) + len(
+                    {g.game_id for _, g, _ in matched if g.extra.get("polymarket")})
 
             enriched: set[str] = set()
             for market, game, outcome in matched:
