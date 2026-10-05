@@ -352,6 +352,7 @@ python -m trading_bot crypto          # BTC/ETH sentiment
 python -m trading_bot rotation        # altcoin rotation
 python -m trading_bot predictions     # Kalshi prediction markets
 python -m trading_bot latency_arb     # single latency arb scan
+python -m trading_bot kalshi_sports   # single sports scan (needs KALSHI_SPORTS_ENABLED=true for 'all'; explicit run always scans)
 python -m trading_bot btc5min         # single BTC 5-min spread scan
 ```
 
@@ -573,3 +574,26 @@ Streaming, tool use, extended thinking, and vision are all opt-in. They only act
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+## Kalshi Sports Betting
+
+`KalshiSportsStrategy` bets on Kalshi game-winner markets across NFL, college football (FBS and FCS), men's and women's college basketball, NBA, WNBA, MLB, NHL and soccer (EPL, La Liga, Bundesliga, Serie A, Ligue 1, MLS, Liga MX, Champions/Europa League; World Cup optional). Pick leagues with `KALSHI_SPORTS_LEAGUES`; leagues with no open Kalshi markets (offseason) are skipped without calling ESPN. Soccer uses three-way (home/draw/away) devigged odds and the separate "Tie" markets. Enable with `KALSHI_SPORTS_ENABLED=true`; it paper-trades unless `PAPER_MODE=false` and Kalshi credentials are set.
+
+There are no fixed "minimum edge" cutoffs. Each cycle (default 30 min) it:
+1. Pulls upcoming games from ESPN (schedule, DraftKings opening/closing moneylines, ESPN's matchup predictor, records) and matches open Kalshi markets to them.
+2. Treats each input as a noisy measurement of the true win probability: the sportsbook closing line, Kalshi's own size-weighted order-book price (real-money flow), Polymarket's game price (a separate real-money crowd, public Gamma API, `KALSHI_SPORTS_USE_POLYMARKET`), ESPN's predictor, and a records model only when no line exists. They're fused by inverse-variance weighting in log-odds space.
+3. **Learns** how reliable each source is: every forecast is logged, scored when Kalshi settles the game, and each source's uncertainty is updated (persisted in `sports_calibration.json` under the data dir). `/sports` and run results include `source_accuracy`.
+4. Skips games where sources contradict each other beyond chance (a 99% chi-square test: usually a mismatched team or a stale quote) and drops a lone outlier source.
+5. Values YES and NO **net of Kalshi's taker fee**, then sizes with Kelly shrunk by edge-vs-uncertainty, so noisy or thin edges get tiny stakes and strong, well-supported ones get larger ones. Stakes are capped by the size resting at the ask, a per-bet % of equity and a total exposure budget. One bet per game.
+6. Holds to settlement and closes at Kalshi's settlement value ($1, $0, or $0.50 on a tie). Paper PnL includes the fee.
+7. Every match must agree on kickoff time as well as teams, so a playoff series or home-and-home pair can't be priced off another day's game.
+
+**Adaptive bankroll:** stakes are a share of your *current* wallet (cash plus open bets), re-read every cycle, so a win immediately grows the next stakes and the number of bets that fit, and a loss shrinks them. Simultaneous opportunities are sized together and trimmed proportionally to fit the exposure budget (`KALSHI_SPORTS_CAPITAL_PCT`, default 50% of the wallet), instead of the first bet eating it. After a bad stretch, stakes scale down with today's drawdown from the day's peak (never below 25% of normal; `KALSHI_SPORTS_DRAWDOWN_THROTTLE`, 0 disables). Streaks never change stake size (a win doesn't make the next bet more likely). `/sports` shows bankroll, today's P&L, the stake scale and exposure. Compounding raises both upside and variance; no sizing rule guarantees a daily profit.
+
+**Kill switch:** sports bets are independent, self-settling wagers, so by default (`KALSHI_SPORTS_IGNORE_GLOBAL_HALT=true`) a global kill switch or daily halt tripped by other strategies does not stop sports betting, does not close open sports bets, and does not leave the scheduler paused for sports. Sports keeps its own limits (per-bet cap, total exposure budget, max open bets). Set the flag to `false` to make sports obey the global switch again. A manual `/pause` still pauses everything, sports included.
+
+**Parlays:** Kalshi combos are quoted on request (RFQ), not traded on an order book, so the bot never places them. Instead each scan suggests 2-4 leg parlays built only from legs it already finds profitable, from different games (independent), with the fair probability and the *maximum price worth paying*; place them in Kalshi's parlay builder. Betting the same legs separately with Kelly grows a bankroll faster than a parlay unless Kalshi's quote is below that price. `KALSHI_SPORTS_PARLAY_MAX_LEGS=0` turns suggestions off.
+
+A sportsbook line is required by default (`KALSHI_SPORTS_REQUIRE_MARKET_SIGNAL`): ESPN's predictor and records alone are not sharper than Kalshi's price. Telegram: `/sports` runs a scan and shows picks with probability ± uncertainty, net edge after fees, and line movement.
+
+Reality check from live testing (Oct 2026): DraftKings, Kalshi and ESPN agree to within a point or two on most games, so after the fee and spread there is usually no edge. Real edge needs more independent sharp sources (e.g. Pinnacle / multi-book lines, Polymarket prices) or catching Kalshi lagging a line move. Verified against live ESPN and Kalshi responses; if Kalshi renames a series, override it with `KALSHI_SPORTS_SERIES`. Soccer is unsupported (three-way outcomes). Sports betting carries real risk of loss; a positive modelled edge is not a guarantee.

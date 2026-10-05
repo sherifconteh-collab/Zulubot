@@ -35,6 +35,9 @@ from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
 from trading_bot.strategies.options import OptionsStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.kalshi_perpetuals import KalshiPerpetualsStrategy
+from trading_bot.strategies.kalshi_sports import KalshiSportsStrategy
+from trading_bot.clients_espn import EspnClient
+from trading_bot.clients_polymarket_sports import PolymarketSportsClient
 from trading_bot.strategies.stocks import StockValueStrategy
 
 try:
@@ -224,6 +227,23 @@ class TradingBotService:
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
 
+        # Kalshi sports strategy (ESPN schedule/odds/projections -> Kalshi game-winner markets)
+        self.espn_client = EspnClient(
+            timeout_seconds=config.request_timeout_seconds,
+            logger=logger,
+            retry_config=config.http_retry,
+        )
+        self.kalshi_sports_strategy = KalshiSportsStrategy(
+            config=config.kalshi_sports,
+            kalshi_client=self.kalshi_client,
+            espn_client=self.espn_client,
+            poly_client=PolymarketSportsClient(timeout_seconds=config.request_timeout_seconds, logger=logger)
+            if config.kalshi_sports.use_polymarket else None,
+            logger=logger,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+            calibration_path=config.data_dir / "sports_calibration.json",
+        )
+
         # Latency arbitrage strategy (Coinbase price feed → Kalshi execution)
         self.price_feed = CoinbasePriceFeed(
             client=self.coinbase_client,
@@ -387,6 +407,16 @@ class TradingBotService:
             module_results["kalshi_perps"] = self._run_module(
                 "kalshi_perps",
                 lambda: self.kalshi_perps_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
+        if command == "kalshi_sports" or (command == "all" and self.config.kalshi_sports.enabled):
+            module_results["kalshi_sports"] = self._run_module(
+                "kalshi_sports",
+                lambda: self.kalshi_sports_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,
@@ -963,6 +993,14 @@ class TradingBotService:
             if not positions:
                 return
 
+            # Contracts the bot placed itself (KX:/KS:/...) are already tracked;
+            # importing them again as "KL:" manual positions would double-count.
+            tracked = {
+                (str(p.meta.get("ticker", "")), str(p.meta.get("side", "")).upper())
+                for p in state.positions.values()
+                if p.asset_type == "prediction" and p.meta.get("source") != "kalshi_sync"
+            }
+
             synced = 0
             for pos in positions:
                 ticker = pos.get("ticker", "")
@@ -978,6 +1016,8 @@ class TradingBotService:
                         continue
 
                     symbol = f"KL:{ticker}:{side}"
+                    if (ticker, side) in tracked and symbol not in state.positions:
+                        continue
                     if symbol in state.positions:
                         # Update quantity for existing tracked position
                         state.positions[symbol].quantity = float(count)
@@ -987,25 +1027,8 @@ class TradingBotService:
                     entry_price = 0.50
                     try:
                         market = self.kalshi_client.get_market(ticker)
-                        # Kalshi market data includes yes_ask/yes_bid or last_price.
-                        # Prices may be in cents (1–99) or fractional [0,1]; normalise
-                        # to [0,1] before computing the NO-side complement.
-                        def _to_prob(raw: Any) -> float:
-                            v = float(raw)
-                            return v / 100.0 if v > 1 else v
-
-                        if side == "YES":
-                            raw = market.get("yes_ask") or market.get("last_price") or 0
-                            price = _to_prob(raw)
-                        else:
-                            # Prefer an explicit no_ask field; fall back to 1 - yes_bid
-                            no_raw = market.get("no_ask")
-                            if no_raw:
-                                price = _to_prob(no_raw)
-                            else:
-                                yes_bid_raw = market.get("yes_bid") or 0
-                                yes_bid = _to_prob(yes_bid_raw)
-                                price = 1.0 - yes_bid if yes_bid > 0 else 0.0
+                        # Handles both ``*_dollars`` and legacy cent fields.
+                        price = self._kalshi_position_price(market, side.lower())
                         if 0 < price < 1:
                             entry_price = price
                     except Exception:
@@ -1046,7 +1069,7 @@ class TradingBotService:
         closed: list[str] = []
         for symbol in symbols:
             position = state.positions.get(symbol)
-            if position is None:
+            if position is None or self._exempt_from_global_halt(position):
                 continue
             self.broker.close_position(
                 state, symbol=symbol, reason="trailing_stop", price=position.current_price,
@@ -1074,6 +1097,13 @@ class TradingBotService:
             )
         return snapshot
 
+    def _exempt_from_global_halt(self, position: Position) -> bool:
+        """Sports bets settle on their own and are not closed by the global kill switch."""
+        return (
+            position.strategy == "kalshi_sports"
+            and self.config.kalshi_sports.ignore_global_halt
+        )
+
     def _liquidate_all_positions(self, state: PortfolioState, *, reason: str) -> dict[str, list[str]]:
         closed: list[str] = []
         failed: list[str] = []
@@ -1081,6 +1111,9 @@ class TradingBotService:
         for symbol in list(state.positions.keys()):
             position = state.positions.get(symbol)
             if position is None:
+                continue
+            if self._exempt_from_global_halt(position):
+                self.logger.info("Keeping %s through %s: sports bets hold to settlement.", symbol, reason)
                 continue
 
             close_price = state.last_prices.get(symbol, position.current_price or position.entry_price)
@@ -1093,7 +1126,7 @@ class TradingBotService:
                         quantity=position.quantity,
                         reason=reason,
                     )
-                elif position.asset_type == "prediction" and symbol.startswith("KX:"):
+                elif position.asset_type == "prediction" and symbol.startswith(("KX:", "KS:")):
                     ticker = str(position.meta.get("ticker", ""))
                     side = str(position.meta.get("side", "yes")).lower()
                     contracts = max(1, int(position.quantity))

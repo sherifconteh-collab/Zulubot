@@ -229,6 +229,7 @@ class TradingTelegramBot:
             "latency_arb": "\u26a1",
             "markov": "\U0001f9ed",
             "options": "\U0001f4ca",
+            "kalshi_sports": "\U0001f3c8",
         }
         return icons.get(module_name, "\u2699\ufe0f")
 
@@ -360,6 +361,29 @@ class TradingTelegramBot:
             if resolved:
                 resolved_preview = ", ".join(html.escape(str(symbol)) for symbol in resolved[:3])
                 lines.append(f"   \U0001f3c1 Resolved: {resolved_preview}")
+            return
+
+        if module_name == "kalshi_sports":
+            lines.append(
+                f"   \U0001f3c8 Games: {int(module_data.get('games_scanned', 0) or 0)}  |  "
+                f"Matched: {int(module_data.get('markets_matched', 0) or 0)}/"
+                f"{int(module_data.get('markets_scanned', 0) or 0)}"
+            )
+            for pred in sorted(
+                module_data.get("predictions") or [], key=lambda p: p.get("edge", 0), reverse=True
+            )[:3]:
+                lines.append(
+                    f"   \u2022 {html.escape(str(pred.get('pick', '?')))} "
+                    f"({html.escape(str(pred.get('game', '')))}) edge {float(pred.get('edge', 0)):+.1%}"
+                )
+            resolved = module_data.get("resolved_closed", [])
+            if resolved:
+                lines.append(
+                    f"   \U0001f3c1 Resolved: {', '.join(html.escape(str(sym)) for sym in resolved[:3])}"
+                )
+            lines.append(
+                "   \U0001f4cc Execution: " + ("live Kalshi" if module_data.get("can_trade_live") else "paper")
+            )
             return
 
         if module_name == "polymarket":
@@ -558,7 +582,11 @@ class TradingTelegramBot:
 
         if self._paused:
             lines.append("")
-            lines.append("Paused — monitoring only.")
+            sports_on = bool(getattr(getattr(self._service, "config", None), "kalshi_sports", None)
+                             and self._service.config.kalshi_sports.enabled
+                             and self._service.config.kalshi_sports.ignore_global_halt
+                             and risk.get("kill_switch_active"))
+            lines.append("Paused — monitoring only." + (" Sports betting still active." if sports_on else ""))
 
         await self.send_message("\n".join(lines))
 
@@ -646,6 +674,7 @@ class TradingTelegramBot:
             "rotation": self._cmd_rotation,
             "predict": self._cmd_predictions,
             "perps": self._cmd_kalshi_perps,
+            "sports": self._cmd_kalshi_sports,
             "backtest": self._cmd_backtest,
             "ai": self._cmd_ai,
             "history": self._cmd_history,
@@ -680,7 +709,7 @@ class TradingTelegramBot:
             "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
-            "/crypto /stocks /rotation /predict /perps /polymarket /btc5min /markov /options\n"
+            "/crypto /stocks /rotation /predict /perps /sports /polymarket /btc5min /markov /options\n"
             "/backtest [range]\n"
             "\n"
             "<b>Control</b>\n"
@@ -959,6 +988,66 @@ class TradingTelegramBot:
             result = await asyncio.to_thread(self._service.run, "kalshi_perps")
             result["force_send"] = True
             await self.send_trade_alert(result)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_kalshi_sports(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run the sports strategy and reply with today's model picks."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            result = await asyncio.to_thread(self._service.run, "kalshi_sports")
+            module = (result.get("modules") or {}).get("kalshi_sports") or {}
+            if module.get("status") == "disabled":
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    "Sports strategy is disabled. Set KALSHI_SPORTS_ENABLED=true."
+                )
+                return
+            lines = [
+                "<b>Sports picks</b> — "
+                f"{int(module.get('games_scanned', 0) or 0)} games, "
+                f"{int(module.get('markets_matched', 0) or 0)} Kalshi markets matched"
+            ]
+            bank = module.get("bankroll") or {}
+            if bank:
+                lines.append(
+                    f"Bankroll ${float(bank.get('equity', 0)):.2f} (today {float(bank.get('day_pnl', 0)):+.2f}) | "
+                    f"stake scale {float(bank.get('stake_scale', 1)):.0%} | "
+                    f"open ${float(bank.get('open_exposure', 0)):.2f} of ${float(bank.get('exposure_budget', 0)):.2f}"
+                )
+            preds = sorted(module.get("predictions") or [], key=lambda p: p.get("edge", 0), reverse=True)
+            for pred in preds[:10]:
+                move = pred.get("line_move_to_yes")
+                move_txt = "" if move is None else f" | line {float(move):+.1%} toward {html.escape(str(pred.get('yes_team', '')))}"
+                net = pred.get("net_edge")
+                lines.append(
+                    f"\u2022 <b>{html.escape(str(pred.get('pick', '?')))}</b> "
+                    f"({html.escape(str(pred.get('game', '')))})\n"
+                    f"   {html.escape(str(pred.get('yes_team', '')))} win prob "
+                    f"{float(pred.get('p_yes', 0)):.1%} \u00b1{float(pred.get('sd', 0)):.1%}"
+                    f" | {html.escape(str(pred.get('side', '')).upper())} ask "
+                    f"{float(pred.get('yes_ask' if pred.get('side') == 'yes' else 'no_ask', 0)):.2f}"
+                    + (f" | net edge {float(net):+.1%}" if net is not None else " | no edge after fees")
+                    + move_txt
+                )
+            if not preds:
+                lines.append("No predictable games found right now.")
+            for parlay in (module.get("parlays") or [])[:2]:
+                legs = " + ".join(html.escape(str(l.get("pick", "?"))) for l in parlay.get("legs", []))
+                lines.append(
+                    f"\U0001f9fe <b>{len(parlay.get('legs', []))}-leg parlay idea</b>: {legs}\n"
+                    f"   fair {float(parlay.get('fair_prob', 0)):.1%} \u00b1{float(parlay.get('uncertainty_sd', 0)):.1%}"
+                    f" | pay at most ${float(parlay.get('max_price', 0)):.2f}"
+                    f" (decimal {float(parlay.get('fair_decimal_odds', 0)):.2f}). Manual only."
+                )
+            for sym in module.get("buys") or []:
+                lines.append(f"BUY  {html.escape(str(sym))}")
+            if module.get("error"):
+                lines.append(f"Error: {html.escape(_clip_text(module['error'], 140))}")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 

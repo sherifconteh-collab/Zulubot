@@ -46,6 +46,62 @@ PERP_SERIES: dict[str, str] = {
 }
 
 
+def _levels(raw: Any) -> list[tuple[float, float]]:
+    """Normalise a price-level list to [(price_dollars, size)], ascending by price.
+
+    Handles ``["0.4300", "10.0"]`` (new ``*_dollars`` layout), cents ``[43, 10]``
+    (legacy layout) and ``{"price": .., "quantity": ..}`` dict levels.
+    """
+    out: list[tuple[float, float]] = []
+    for level in raw or []:
+        try:
+            if isinstance(level, dict):
+                price, size = float(level.get("price", 0)), float(level.get("quantity", level.get("size", 0)))
+            else:
+                price, size = float(level[0]), float(level[1]) if len(level) > 1 else 0.0
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append((price, size))
+    return sorted(out)
+
+
+def parse_top_of_book(book: dict[str, Any]) -> dict[str, float]:
+    """Best bid/ask and size for both sides from a Kalshi orderbook response.
+
+    Kalshi's book lists only *bids* for YES and for NO. A NO bid at ``p`` is an
+    offer to sell YES at ``1 - p``, so::
+
+        yes_ask = 1 - best_no_bid        no_ask = 1 - best_yes_bid
+
+    Missing sides yield 0.0. Prices are in dollars (0-1).
+    """
+    if "orderbook_fp" in book:
+        ob = book["orderbook_fp"] or {}
+        yes_raw, no_raw, cents = ob.get("yes_dollars"), ob.get("no_dollars"), False
+    else:
+        ob = book.get("orderbook", book) or {}
+        yes_raw, no_raw = ob.get("yes_dollars") or ob.get("yes"), ob.get("no_dollars") or ob.get("no")
+        cents = "yes_dollars" not in ob and "no_dollars" not in ob
+    yes_bids, no_bids = _levels(yes_raw), _levels(no_raw)
+    if cents:  # legacy prices are integer cents
+        yes_bids = [(p / 100.0, q) for p, q in yes_bids]
+        no_bids = [(p / 100.0, q) for p, q in no_bids]
+
+    yes_bid, yes_bid_size = yes_bids[-1] if yes_bids else (0.0, 0.0)
+    no_bid, no_bid_size = no_bids[-1] if no_bids else (0.0, 0.0)
+    return {
+        "yes_bid": yes_bid,
+        "yes_bid_size": yes_bid_size,
+        "no_bid": no_bid,
+        "no_bid_size": no_bid_size,
+        # Size resting at our ask is the opposite side's best bid size.
+        "yes_ask": round(1.0 - no_bid, 4) if no_bid > 0 else 0.0,
+        "yes_ask_size": no_bid_size,
+        "no_ask": round(1.0 - yes_bid, 4) if yes_bid > 0 else 0.0,
+        "no_ask_size": yes_bid_size,
+    }
+
+
 class KalshiClient:
     """Client for the Kalshi prediction market API."""
 
@@ -198,6 +254,15 @@ class KalshiClient:
         """Get the orderbook for a market."""
         return self._get(f"/markets/{ticker}/orderbook")
 
+    def get_top_of_book(self, ticker: str) -> dict[str, float]:
+        """Best bid/ask (dollars) and sizes for YES and NO; see ``parse_top_of_book``."""
+        return parse_top_of_book(self.get_orderbook(ticker))
+
+    def get_recent_trades(self, ticker: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Public trade tape for a market, newest first."""
+        result = self._get("/markets/trades", params={"ticker": ticker, "limit": limit})
+        return result.get("trades", [])
+
     def discover_prediction_markets(
         self,
         categories: list[str] | None = None,
@@ -252,7 +317,13 @@ class KalshiClient:
             all_markets = filtered
 
         # Sort by volume (most active first) and cap
-        all_markets.sort(key=lambda m: int(m.get("volume", 0)), reverse=True)
+        def _volume(m: dict[str, Any]) -> float:
+            try:  # current API reports ``volume_fp`` (string); older payloads ``volume``
+                return float(m.get("volume_fp") or m.get("volume") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        all_markets.sort(key=_volume, reverse=True)
         result = all_markets[:max_markets]
 
         self.logger.info(
