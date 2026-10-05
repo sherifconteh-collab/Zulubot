@@ -288,3 +288,54 @@ class SourceCalibration:
             name: {"games": st["n"], "brier": round(st["brier"], 4), "sd": round(self.sd(name), 4)}
             for name, st in self.stats.items()
         }
+
+
+# ---------------------------------------------------------------------------
+# Bankroll tracking
+# ---------------------------------------------------------------------------
+
+def drawdown_scale(drawdown: float, throttle: float, floor: float = 0.25) -> float:
+    """Stake multiplier that eases off as today's bankroll falls from its peak.
+
+    Linear from 1.0 (no drawdown) down to ``floor`` and never below it, so betting
+    gets smaller after a bad stretch but never switches off. ``throttle`` is the
+    drawdown at which the scale reaches zero before the floor applies; 0 disables.
+    """
+    if throttle <= 0:
+        return 1.0
+    return max(floor, 1.0 - max(drawdown, 0.0) / throttle)
+
+
+class DailySession:
+    """Persists the day's starting and peak bankroll so sizing survives restarts."""
+
+    def __init__(self, path: Path | None = None, logger: logging.Logger | None = None) -> None:
+        self.path = path
+        self.logger = logger or logging.getLogger("sports_session")
+        self.date = ""
+        self.start = 0.0
+        self.peak = 0.0
+        if path is not None and path.exists():
+            try:
+                data = json.loads(path.read_text())
+                self.date = str(data.get("date", ""))
+                self.start = float(data.get("start", 0.0))
+                self.peak = float(data.get("peak", 0.0))
+            except (OSError, ValueError) as exc:
+                self.logger.warning("Could not load sports session (%s); starting fresh.", exc)
+
+    def update(self, today: str, equity: float) -> dict[str, float]:
+        """Record the current bankroll; returns day PnL and drawdown from the day's peak."""
+        if self.date != today:
+            self.date, self.start, self.peak = today, equity, equity
+        elif equity > self.peak:
+            self.peak = equity
+        if self.path is not None:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps({"date": self.date, "start": self.start, "peak": self.peak}))
+            except OSError as exc:
+                self.logger.warning("Could not save sports session: %s", exc)
+        drawdown = (self.peak - equity) / self.peak if self.peak > 0 and equity < self.peak else 0.0
+        return {"day_start": self.start, "day_peak": self.peak, "day_pnl": equity - self.start,
+                "drawdown": drawdown}

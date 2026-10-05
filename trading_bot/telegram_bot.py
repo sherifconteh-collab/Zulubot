@@ -1011,6 +1011,13 @@ class TradingTelegramBot:
                 f"{int(module.get('games_scanned', 0) or 0)} games, "
                 f"{int(module.get('markets_matched', 0) or 0)} Kalshi markets matched"
             ]
+            bank = module.get("bankroll") or {}
+            if bank:
+                lines.append(
+                    f"Bankroll ${float(bank.get('equity', 0)):.2f} (today {float(bank.get('day_pnl', 0)):+.2f}) | "
+                    f"stake scale {float(bank.get('stake_scale', 1)):.0%} | "
+                    f"open ${float(bank.get('open_exposure', 0)):.2f} of ${float(bank.get('exposure_budget', 0)):.2f}"
+                )
             preds = sorted(module.get("predictions") or [], key=lambda p: p.get("edge", 0), reverse=True)
             for pred in preds[:10]:
                 move = pred.get("line_move_to_yes")

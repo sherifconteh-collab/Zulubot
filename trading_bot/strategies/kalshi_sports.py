@@ -59,8 +59,10 @@ from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 from trading_bot.sports_model import (
     Signal,
+    DailySession,
     SourceCalibration,
     combine,
+    drawdown_scale,
     evaluate_side,
     microprice,
     parlay_value,
@@ -374,6 +376,9 @@ class KalshiSportsStrategy:
         self.espn = espn_client
         self.poly = poly_client
         self.calibration = SourceCalibration(calibration_path, logger)
+        self.session = DailySession(
+            calibration_path.with_name("sports_session.json") if calibration_path else None, logger,
+        )
         self.logger = logger.getChild("strategy.kalshi_sports")
         self.live_trading_enabled = live_trading_enabled
 
@@ -399,6 +404,7 @@ class KalshiSportsStrategy:
             "markets_matched": 0,
             "predictions": [],
             "parlays": [],
+            "bankroll": {},
             "decisions": [],
             "can_trade_live": self.live_trading_enabled,
         }
@@ -734,32 +740,55 @@ class KalshiSportsStrategy:
     ) -> None:
         cfg = self.config
         bucket = _CASH_BUCKET if self.live_trading_enabled else None
+        # Bankroll = current wallet + open bets, re-read every cycle: wins grow it
+        # (bigger stakes, more bets) and losses shrink it, with no fixed dollar amounts.
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
+        day = self.session.update(now.date().isoformat(), equity)
+        scale = drawdown_scale(day["drawdown"], cfg.drawdown_throttle)
         open_positions = self._open_positions(state)
         exposure = sum(p.quantity * p.entry_price for p in open_positions)
         exposure_cap = equity * cfg.capital_allocation_pct
         held_events = {str(p.meta.get("event_ticker", "")) for p in open_positions}
+        result["bankroll"] = {
+            "equity": round(equity, 2),
+            "day_start": round(day["day_start"], 2),
+            "day_pnl": round(day["day_pnl"], 2),
+            "day_drawdown": round(day["drawdown"], 4),
+            "stake_scale": round(scale, 3),
+            "open_exposure": round(exposure, 2),
+            "exposure_budget": round(exposure_cap, 2),
+        }
 
+        # Size every candidate first, then fit them into the exposure budget together
+        # (simultaneous Kelly): when opportunities pile up, each stake is trimmed
+        # proportionally instead of the first ones eating the whole budget.
+        slots = max(0, cfg.max_open_bets - len(open_positions))
+        plan: list[tuple[dict[str, Any], float]] = []
         for cand in candidates:
             market = cand["market"]
             ticker = str(market.get("ticker", ""))
             event_ticker = str(market.get("event_ticker", ""))
-
-            if len(open_positions) >= cfg.max_open_bets:
-                self._log_skip(result, ticker, "max_open_bets")
-                break
             if event_ticker and event_ticker in held_events:
                 self._log_skip(result, ticker, "already_bet_on_game")
                 continue
-
+            if len(plan) >= slots:
+                self._log_skip(result, ticker, "max_open_bets")
+                continue
             decision = cand["decision"]
-            notional = min(
-                equity * decision.stake_fraction,
-                equity * cfg.max_position_pct,
-                max(0.0, exposure_cap - exposure),
-            )
+            raw = min(equity * scale * decision.stake_fraction, equity * cfg.max_position_pct)
             if cand["depth"] > 0:  # can't buy more than what's offered at our price
-                notional = min(notional, cand["depth"] * decision.price)
+                raw = min(raw, cand["depth"] * decision.price)
+            plan.append((cand, raw))
+        wanted = sum(raw for _, raw in plan)
+        budget = max(0.0, exposure_cap - exposure)
+        fit = min(1.0, budget / wanted) if wanted > 0 else 1.0
+
+        for cand, raw in plan:
+            market = cand["market"]
+            ticker = str(market.get("ticker", ""))
+            event_ticker = str(market.get("event_ticker", ""))
+            decision = cand["decision"]
+            notional = raw * fit
             if notional < cfg.min_trade_usd:
                 self._log_skip(result, ticker, "stake_below_min", notional=round(notional, 2),
                                net_edge=round(decision.net_edge, 4), sd=round(decision.sd, 4))

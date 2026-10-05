@@ -464,11 +464,63 @@ class StrategyTests(unittest.TestCase):
         state, broker, result = _run(strat)
         exposure = sum(p.quantity * p.entry_price for p in state.positions.values())
         self.assertLessEqual(exposure, 10_000 * 0.003 + 1.0)
-        self.assertLess(len(result["buys"]), 5)
 
+    def test_simultaneous_bets_share_the_budget_proportionally(self):
+        games = [
+            _game(game_id=str(i), home=_team(str(i), f"City{i}", f"Team{i}", f"H{i}X"),
+                  away=_team(str(i + 100), f"Town{i}", f"Club{i}", f"A{i}X"),
+                  home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+            for i in range(4)
+        ]
+        markets = [
+            _market(f"City{i}", yes_ask=0.57, no_ask=0.45, title=f"Town{i} at City{i} Winner?",
+                    ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X-H{i}X", event_ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X")
+            for i in range(4)
+        ]
+        loose, _ = _strategy(_config(capital_allocation_pct=1.0), games, markets)
+        tight, _ = _strategy(_config(capital_allocation_pct=0.01), games, markets)
+        s1, _, r1 = _run(loose)
+        s2, _, r2 = _run(tight)
+        spent1 = sum(p.quantity * p.entry_price for p in s1.positions.values())
+        spent2 = sum(p.quantity * p.entry_price for p in s2.positions.values())
+        self.assertLessEqual(spent2, 10_000 * 0.01 + 1.0)
+        self.assertLess(spent2, spent1)
+        self.assertGreaterEqual(len(r2["buys"]), 2, "budget is shared, not hogged by the first bet")
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_stakes_grow_with_the_wallet(self):
+        def spend(cash):
+            game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+            strat, _ = _strategy(_config(max_position_pct=0.5, capital_allocation_pct=1.0), [game],
+                                 [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
+            state, _, r = _run(strat, PortfolioState(cash=cash))
+            return sum(p.quantity * p.entry_price for p in state.positions.values())
+        small, big = spend(1_000.0), spend(5_000.0)
+        self.assertAlmostEqual(big / small, 5.0, delta=0.6)
+
+    def test_stakes_shrink_after_a_drawdown_but_never_stop(self):
+        from trading_bot.sports_model import drawdown_scale
+        self.assertEqual(drawdown_scale(0.0, 0.5), 1.0)
+        self.assertAlmostEqual(drawdown_scale(0.25, 0.5), 0.5)
+        self.assertEqual(drawdown_scale(0.9, 0.5), 0.25)      # floor
+        self.assertEqual(drawdown_scale(0.4, 0.0), 1.0)       # disabled
+
+    def test_daily_session_tracks_peak_and_resets_each_day(self):
+        import tempfile, pathlib
+        from trading_bot.sports_model import DailySession
+        path = pathlib.Path(tempfile.mkdtemp()) / "s.json"
+        s = DailySession(path)
+        s.update("2026-10-04", 100.0)
+        up = s.update("2026-10-04", 130.0)
+        down = DailySession(path).update("2026-10-04", 104.0)      # survives restart
+        self.assertEqual(up["day_pnl"], 30.0)
+        self.assertAlmostEqual(down["drawdown"], 0.2)
+        self.assertEqual(DailySession(path).update("2026-10-05", 104.0)["day_pnl"], 0.0)
+
+    def test_result_reports_bankroll(self):
+        strat, _ = _strategy(_config(), [_game()], [_market("Baltimore")])
+        _, _, result = _run(strat)
+        self.assertEqual(result["bankroll"]["equity"], 10_000.0)
+        self.assertEqual(result["bankroll"]["stake_scale"], 1.0)
 
 
 def _soccer_game(**overrides) -> EspnGame:
