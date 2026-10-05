@@ -5,7 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from trading_bot.telegram_bot import TradingTelegramBot, _format_lead_line
+from trading_bot.telegram_bot import (
+    TradingTelegramBot,
+    _format_lead_line,
+    _format_sports_pick,
+    _format_sports_picks,
+)
 
 
 class TradingTelegramBotTests(unittest.IsolatedAsyncioTestCase):
@@ -355,6 +360,36 @@ class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
         update.message.reply_text.assert_awaited_once()
         message = update.message.reply_text.await_args.args[0]
         self.assertIn("Breaker    open (3/3 failures), retry in 120s", message)
+
+
+class SportsPickFormatTests(unittest.TestCase):
+    NO_BET = {"game": "A @ B", "yes_team": "B Team", "p_yes": 0.768, "sd": 0.016, "side": "no",
+              "pick": "A Team", "edge": 0.002, "net_edge": None, "yes_ask": 0.78, "no_ask": 0.22,
+              "line_move_to_yes": 0.031}
+    BET = {"game": "C @ D", "yes_team": "D Team", "p_yes": 0.40, "sd": 0.02, "side": "yes",
+           "pick": "D Team", "edge": 0.07, "net_edge": 0.05, "yes_ask": 0.33, "no_ask": 0.69}
+
+    def test_no_edge_game_reads_no_bet_and_names_no_pick(self):
+        line = _format_sports_pick(self.NO_BET)
+        self.assertIn("no bet", line)
+        self.assertNotIn("A Team", line)          # no misleading "pick"
+        self.assertNotIn("ask", line)
+        self.assertIn("B Team win prob 76.8%", line)
+
+    def test_a_bet_is_labelled_with_side_ask_and_edge(self):
+        line = _format_sports_pick(self.BET)
+        self.assertIn("BET: D Team", line)
+        self.assertIn("YES ask 0.33", line)
+        self.assertIn("net edge +5.0%", line)
+
+    def test_bets_sort_ahead_of_no_bet_games(self):
+        lines = _format_sports_picks([self.NO_BET, self.BET])
+        self.assertIn("BET:", lines[0])
+        self.assertIn("no bet", lines[1])
+
+    def test_team_names_are_html_escaped(self):
+        line = _format_sports_pick({**self.NO_BET, "game": "A & B <x>"})
+        self.assertIn("A &amp; B &lt;x&gt;", line)
 
 
 if __name__ == "__main__":
