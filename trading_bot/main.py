@@ -108,7 +108,7 @@ def _run_daemon(config: AppConfig, service: TradingBotService, logger, once: boo
 
     telegram = TradingTelegramBot(config.telegram, logger)
     telegram.set_service(service)
-    notifier = NotificationDispatcher(telegram, logger)
+    notifier = NotificationDispatcher(telegram, logger, digest_hours=config.telegram.digest_hours)
     scheduler = SchedulerService(config, service, telegram, notifier, logger)
 
     if once:

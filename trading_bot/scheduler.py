@@ -108,12 +108,14 @@ class SchedulerService:
         except Exception as exc:
             self.logger.error("Heartbeat in run_once failed: %s", exc)
 
-        # Clean shutdown
+        # Clean shutdown (send anything the digest is still holding first)
+        await self.notifier.flush()
         await self.telegram.stop()
 
         return result
 
     async def _tick(self) -> None:
+        await self.notifier.flush_if_due()
         now = datetime.now(self.config.timezone)
         module_results: list[dict[str, Any]] = []
         trade_notification_sent = False
