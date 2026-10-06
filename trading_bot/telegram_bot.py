@@ -235,7 +235,25 @@ class TradingTelegramBot:
 
     # ── Outbound messages ──────────────────────────────────────────
 
+    async def capture(self, send_fn: Any, *args: Any, **kwargs: Any) -> list[str]:
+        """Run an alert formatter and return the messages it would have sent, without sending.
+
+        Used by the notification digest. ``send_message`` does no real I/O while capturing, so
+        no other coroutine can interleave inside the window.
+        """
+        previous = getattr(self, "_capture", None)
+        self._capture = []
+        try:
+            await send_fn(*args, **kwargs)
+            return list(self._capture)
+        finally:
+            self._capture = previous
+
     async def send_message(self, text: str) -> None:
+        captured = getattr(self, "_capture", None)
+        if captured is not None:
+            captured.append(text)
+            return
         if not self.is_configured or self._app is None:
             self.logger.info("[TG-OFFLINE] %s", text)
             return
