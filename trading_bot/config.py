@@ -508,6 +508,7 @@ class KalshiSportsConfig:
     # wait for market makers to quote. A parlay is a long shot, so the default stake is small.
     user_parlay_default_pct: float = 0.02
     user_parlay_max_pct: float = 0.05
+    user_parlay_max_legs: int = 10
     parlay_quote_wait_seconds: float = 20.0
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
@@ -926,6 +927,7 @@ class AppConfig:
                 user_bet_max_pct=_env_float("KALSHI_SPORTS_USER_BET_MAX_PCT", 0.25),
                 user_parlay_default_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT", 0.02),
                 user_parlay_max_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_MAX_PCT", 0.05),
+                user_parlay_max_legs=_env_int("KALSHI_SPORTS_USER_PARLAY_MAX_LEGS", 10),
                 parlay_quote_wait_seconds=_env_float("KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS", 20.0),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),

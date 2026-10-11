@@ -15,6 +15,7 @@ from trading_bot.telegram_bot import (
     _format_parlay_result,
     _parse_bet_args,
     _parse_parlay_args,
+    _parse_stack_args,
     _format_sports_picks,
 )
 
@@ -658,6 +659,51 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(c.args[0] for c in update.message.reply_text.await_args_list)
         self.assertIn("3 player markets match 'hurts'", text)
         self.assertEqual([p["ticker"] for p in self.bot._props], ["T0", "T1", "T2"])
+
+    def test_parse_stack_args(self):
+        self.assertEqual(_parse_stack_args("eagles jaguars legs 9 p 85 2 max 20".split()),
+                         {"query": "eagles jaguars", "legs": 9, "leg_prob": 0.85, "amount": 2.0, "max_price": 0.2})
+        self.assertEqual(_parse_stack_args(["eagles"]), {"query": "eagles", "legs": 6, "leg_prob": 0.85,
+                                                         "amount": None, "max_price": None})
+        self.assertEqual(_parse_stack_args("eagles jaguars p 90 $1.50".split())["leg_prob"], 0.9)
+        self.assertEqual(_parse_stack_args("eagles jaguars p 90 $1.50".split())["amount"], 1.5)
+
+    async def test_stack_builds_previews_and_confirm_buys_it(self):
+        legs = [{"ticker": "A-1", "side": "yes"}, {"ticker": "S-1", "side": "no"}]
+        self.service.build_sports_stack = MagicMock(return_value={
+            "ok": True, "game": "Eagles @ Jaguars", "legs": legs, "leg_prob": 0.85, "reference": 0.7, "rows": []})
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args="eagles jaguars legs 2 p 85 3".split()))
+        self.service.build_sports_stack.assert_called_once_with("eagles jaguars", 2, 0.85)
+        self.assertEqual(self.service.quote_sports_parlay.call_args.args, (legs, 3.0, None))
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Stack for Eagles @ Jaguars: 2 legs", text)
+        self.assertIn("Parlay preview", text)
+        self.service.place_sports_parlay.assert_not_called()
+        await self.bot._cmd_confirm(self._update(), SimpleNamespace(args=[]))
+        self.assertEqual(self.service.place_sports_parlay.call_args.args[0], legs)
+
+    async def test_stack_errors_are_reported_and_nothing_is_pending(self):
+        self.service.build_sports_stack = MagicMock(return_value={"ok": False, "reason": "matches several games"})
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args=["a"]))
+        self.assertIn("matches several games", update.message.reply_text.await_args.args[0])
+        self.assertIsNone(self.bot._pending_bet)
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args=[]))
+        self.assertIn("Name the game", update.message.reply_text.await_args.args[0])
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args="eagles p 99".split()))
+        self.assertIn("between 5 and 97", update.message.reply_text.await_args.args[0])
+
+    async def test_spread_no_leg_keeps_its_side_from_props(self):
+        spread = {"ticker": "KXNFLSPREAD-X-BAL10", "side": "no", "player": "Spread", "stat": "BAL don't win by over 9.5",
+                  "yes_ask": 0.77, "game": "BUF @ BAL", "start_label": "x"}
+        self.bot._props = [spread, dict(spread, ticker="Y", side="yes")]
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="p1 + p2 2".split()))
+        legs = self.service.quote_sports_parlay.call_args.args[0]
+        self.assertEqual([l["side"] for l in legs], ["no", "yes"])
 
     async def test_unknown_prop_number_and_empty_search(self):
         self.service.list_sports_props = MagicMock(return_value=[])

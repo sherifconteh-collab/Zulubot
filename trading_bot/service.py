@@ -587,6 +587,13 @@ class TradingBotService:
             prop["start_label"] = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M %p}"
         return props
 
+    @_locked
+    def build_sports_stack(self, query: str, legs: int, leg_prob: float) -> dict[str, Any]:
+        """Pick a same-game stack of high-probability player legs; places nothing."""
+        if not self.config.kalshi_sports.enabled:
+            return {"ok": False, "reason": "The sports strategy is disabled (KALSHI_SPORTS_ENABLED)."}
+        return self.kalshi_sports_strategy.build_stack(datetime.now(self.config.timezone), query, legs, leg_prob)
+
     def _sports_bet_blocker(self, state: PortfolioState) -> str | None:
         cfg = self.config.kalshi_sports
         if not cfg.enabled:

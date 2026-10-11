@@ -295,6 +295,8 @@ KALSHI_SPORTS_USER_BET_MAX_PCT=0.25
 # how many seconds to wait for market makers to quote before giving up.
 KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT=0.02
 KALSHI_SPORTS_USER_PARLAY_MAX_PCT=0.05
+# Most legs in a parlay you build with /parlay or /stack (same sport; 0-1 turns them off).
+KALSHI_SPORTS_USER_PARLAY_MAX_LEGS=10
 KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS=20
 KALSHI_SPORTS_HOLD_TO_SETTLEMENT=true
 KALSHI_SPORTS_STOP_LOSS=0
@@ -371,6 +373,10 @@ You can choose the games and let the bot place the orders:
 | `/cancel` | Drops the preview. |
 
 Nothing is bought until `/confirm` (or a trailing `now`, as in `/bet browns 5 now`). The preview shows contracts, price, Kalshi's fee, what you win or lose, and the model's honest view: if it thinks the price is too high it says so, and the bet is still yours to make. Your picks are checked again at order time: the market must be open, the game not started, the price no more than 2 cents above the preview, one bet per game, at least `KALSHI_SPORTS_MIN_TRADE_USD`, at most `KALSHI_SPORTS_USER_BET_MAX_PCT` of the wallet (default 25%) and no more than the cash available. With no amount the stake is `KALSHI_SPORTS_USER_BET_DEFAULT_PCT` (default 5%). Orders are immediate-or-cancel, and only contracts that actually fill are booked. Hand-picked bets settle and count like any other sports bet, and are not blocked by the kill switch.
+
+### Same-game stacks (`/stack`)
+
+`/stack eagles jaguars legs 9 p 85 2` builds a same-game player-stat parlay like a sportsbook SGP (nine near-certain legs: low receptions, rushing and receiving yards, a passing floor, an alternate spread). For each player it picks the one Kalshi market whose mid price is closest to `p` (percent chance per leg, default 85), skipping one-sided or wide-spread markets, ranks players by closeness then trading volume, and adds one alternate-spread leg when it fits. Nine legs near 85% multiply to roughly +330. The trailing number is your stake; `max <cents>` sets the price ceiling. It then shows the same preview as `/parlay` and waits for `/confirm`. Spread markets are offered on both sides ("PHI don't win by over 3.5" is Eagles +3.5). Same-game legs are correlated, so the product of the legs' prices is only a guide. Up to `KALSHI_SPORTS_USER_PARLAY_MAX_LEGS` legs (default 10).
 
 ### Parlays (Kalshi combos)
 
