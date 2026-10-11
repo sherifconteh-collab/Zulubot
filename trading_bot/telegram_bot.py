@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 import json
 import logging
 import re
@@ -405,6 +406,18 @@ def _format_slip_summary(result: dict[str, Any]) -> str:
         for leg in unmatched:
             lines.append(f"  \u2022 {html.escape(str(leg['text']))} \u2014 {html.escape(str(leg['reason']))}")
     return "\n".join(lines)
+
+
+def _build_line() -> str:
+    """Which deploy is running, from Railway's own variables, so "is the new code live?" has an answer."""
+    sha = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
+    if not sha:
+        return "Build: unknown (not running on Railway, or it doesn't expose the commit)."
+    message = os.getenv("RAILWAY_GIT_COMMIT_MESSAGE", "").strip().splitlines()
+    text = f"Build: {html.escape(sha[:7])}"
+    if message and message[0]:
+        text += f" \u2014 {html.escape(_clip_text(message[0], 80))}"
+    return text
 
 
 def _sports_mode_line(service: Any, module: dict[str, Any]) -> str:
@@ -1492,6 +1505,7 @@ class TradingTelegramBot:
                 f"{int(module.get('markets_matched', 0) or 0)} Kalshi markets matched"
             ]
             lines.append(_sports_mode_line(self._service, module))
+            lines.append(_build_line())
             bank = module.get("bankroll") or {}
             if bank:
                 lines.append(
