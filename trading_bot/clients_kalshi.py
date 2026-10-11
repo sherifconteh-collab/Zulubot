@@ -462,38 +462,11 @@ class KalshiClient:
             "Kalshi order: %s %s %s x%d @ %s (V2 %s, %s)",
             action, side, ticker, count, payload["price"], payload["side"], payload["time_in_force"],
         )
-        try:
-            result = self._post("/portfolio/events/orders", payload)
-        except requests.HTTPError as exc:
-            status = getattr(exc.response, "status_code", None)
-            if status not in (404, 405, 410):
-                raise
-            # The V2 endpoint isn't there (an older API deployment): nothing was placed, so the
-            # legacy endpoint is safe to try with the same client order id.
-            self.logger.warning("Kalshi V2 order endpoint answered %s; trying the legacy endpoint.", status)
-            result = self._place_order_legacy(
-                ticker=ticker, side=side, action=action, count=count, yes_cents=yes_cents,
-                time_in_force=time_in_force, client_order_id=payload["client_order_id"],
-            )
-        else:
-            # Same shape the legacy response had, so callers read ``order.order_id`` / fill counts as before.
-            result = {"order": dict(result), **result}
+        result = self._post("/portfolio/events/orders", payload)
+        # Same shape the legacy response had, so callers read ``order.order_id`` / fill counts as before.
+        result = {"order": dict(result), **result}
         self.logger.info("Kalshi order result: %s", json.dumps(result, indent=2))
         return result
-
-    def _place_order_legacy(
-        self, *, ticker: str, side: str, action: str, count: int, yes_cents: int,
-        time_in_force: str | None, client_order_id: str,
-    ) -> dict[str, Any]:
-        """The pre-V2 ``POST /portfolio/orders`` (integer count and cents), kept only as a fallback."""
-        payload: dict[str, Any] = {
-            "ticker": ticker, "side": side, "action": action, "count": int(count),
-            "client_order_id": client_order_id, "type": "limit",
-        }
-        payload["yes_price" if side == "yes" else "no_price"] = yes_cents if side == "yes" else 100 - yes_cents
-        if time_in_force:
-            payload["time_in_force"] = time_in_force
-        return self._post("/portfolio/orders", payload)
 
     def sell_to_close(
         self,
@@ -521,8 +494,8 @@ class KalshiClient:
         )
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
-        """Cancel a resting order."""
-        return self._delete(f"/portfolio/orders/{order_id}")
+        """Cancel a resting order (V2: the legacy by-id path only supports GET now)."""
+        return self._delete(f"/portfolio/events/orders/{order_id}")
 
     # ------------------------------------------------------------------
     # Combos (multivariate events) and requests for quotes
