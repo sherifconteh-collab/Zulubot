@@ -16,6 +16,7 @@ from trading_bot.telegram_bot import (
     _parse_bet_args,
     _parse_parlay_args,
     _parse_slip_caption,
+    _route_to_command,
     _parse_stack_args,
     _format_slip_summary,
     _format_sports_picks,
@@ -790,3 +791,126 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _route(**fields):
+    base = {"action": "reply", "team": "", "legs": [], "game": "", "query": "", "filter": "", "amount": None,
+            "max_cents": None, "leg_count": None, "leg_percent": None, "reply_text": ""}
+    base.update(fields)
+    return base
+
+
+class PlainTextTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_plain_text"))
+        self.bot.set_service(SimpleNamespace(config=SimpleNamespace(trading_agents=SimpleNamespace(api_key="k"))))
+        self.calls = []
+        for name in ("games", "bet", "parlay", "stack", "props", "status", "positions", "confirm", "cancel"):
+            setattr(self.bot, f"_cmd_{name}", self._recorder(name))
+        self.bot._cmd_kalshi_sports = self._recorder("sports")
+        self.routes = []
+        self.bot._route_text = MagicMock(side_effect=lambda text, pending: self.routes.pop(0))
+
+    def _recorder(self, name):
+        async def run(update, context):
+            self.calls.append((name, list(context.args or [])))
+        return run
+
+    def _update(self, text, chat_id=123):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+                               message=SimpleNamespace(text=text, reply_text=AsyncMock()))
+
+    def _wait(self, label="single bet on Browns"):
+        import time
+        self.bot._pending_bet = {"kind": "bet", "label": label, "expires": time.monotonic() + 600}
+
+    def _ctx(self):
+        return SimpleNamespace(args=[], bot=None)
+
+    async def test_route_to_command_builds_slash_arguments(self):
+        self.assertEqual(_route_to_command(_route(action="bet", team="cleveland browns", amount=5.0)),
+                         ("bet", ["cleveland", "browns", "5"]))
+        self.assertEqual(_route_to_command(_route(action="parlay", legs=["hurts 200 passing", "browns"], amount=3.0,
+                                                  max_cents=12.0)),
+                         ("parlay", ["hurts", "200", "passing", "+", "browns", "3", "max", "12"]))
+        self.assertEqual(_route_to_command(_route(action="stack", game="eagles jaguars", leg_count=9, leg_percent=85.0,
+                                                  amount=2.0)),
+                         ("stack", ["eagles", "jaguars", "legs", "9", "p", "85", "2"]))
+        self.assertEqual(_route_to_command(_route(action="games", filter="nfl")), ("games", ["nfl"]))
+        self.assertEqual(_route_to_command(_route(action="status")), ("status", []))
+        self.assertIsNone(_route_to_command(_route(action="bet")))
+        self.assertIsNone(_route_to_command(_route(action="parlay", legs=["only one"])))
+
+    async def test_yes_and_no_use_the_waiting_bet_without_calling_the_model(self):
+        self._wait()
+        await self.bot._on_text(self._update("Yes!"), self._ctx())
+        self._wait()
+        await self.bot._on_text(self._update("never mind"), self._ctx())
+        self.assertEqual([c[0] for c in self.calls], ["confirm", "cancel"])
+        self.bot._route_text.assert_not_called()
+
+    async def test_yes_with_nothing_waiting_or_an_expired_preview_does_not_confirm(self):
+        self.routes = [_route(action="reply", reply_text="Nothing is waiting."), _route(action="confirm")]
+        update = self._update("yes")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(self.calls, [])
+        self._wait()
+        self.bot._pending_bet["expires"] -= 1000
+        update2 = self._update("yes")
+        await self.bot._on_text(update2, self._ctx())
+        self.assertEqual(self.calls, [])
+        self.assertIn("nothing waiting", update2.message.reply_text.await_args.args[0].lower())
+
+    async def test_a_spoken_bet_runs_the_bet_command_preview_only(self):
+        self.routes = [_route(action="bet", team="browns", amount=5.0)]
+        await self.bot._on_text(self._update("put five bucks on the browns"), self._ctx())
+        self.assertEqual(self.calls, [("bet", ["browns", "5"])])  # a preview; /confirm still needed
+
+    async def test_model_confirm_only_counts_when_a_bet_is_waiting(self):
+        self.routes = [_route(action="confirm")]
+        update = self._update("sounds good, go for it")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(self.calls, [])
+        self._wait()
+        self.routes = [_route(action="confirm")]
+        await self.bot._on_text(self._update("sounds good, go for it"), self._ctx())
+        self.assertEqual(self.calls, [("confirm", [])])
+
+    async def test_pause_and_kill_are_never_run_from_text(self):
+        self.routes = [_route(action="control")]
+        update = self._update("shut everything down")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(self.calls, [])
+        self.assertIn("/kill", update.message.reply_text.await_args.args[0])
+
+    async def test_replies_errors_and_missing_detail_are_sent_back(self):
+        self.routes = [_route(action="reply", reply_text="Try: bet $5 on the browns")]
+        update = self._update("hello")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(update.message.reply_text.await_args.args[0], "Try: bet $5 on the browns")
+        self.bot._route_text.side_effect = RuntimeError("needs ANTHROPIC_API_KEY")
+        update = self._update("bet")
+        await self.bot._on_text(update, self._ctx())
+        self.assertIn("ANTHROPIC_API_KEY", update.message.reply_text.await_args.args[0])
+        self.bot._route_text.side_effect = lambda text, pending: self.routes.pop(0)
+        self.routes = [_route(action="bet", reply_text="Which team?")]
+        update = self._update("bet something")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(update.message.reply_text.await_args.args[0], "Which team?")
+        self.assertEqual(self.calls, [])
+
+    async def test_other_chats_and_disabled_mode_are_ignored(self):
+        await self.bot._on_text(self._update("yes", chat_id=999), self._ctx())
+        self.bot._route_text.assert_not_called()
+        self.bot.config.natural_language = False
+        update = self._update("status")
+        await self.bot._on_text(update, self._ctx())
+        self.bot._route_text.assert_not_called()
+        self.assertIn("off", update.message.reply_text.await_args.args[0])
+
+    async def test_pending_label_is_given_to_the_router(self):
+        self._wait("2-leg parlay (A + B), $2.00")
+        self.routes = [_route(action="status")]
+        await self.bot._on_text(self._update("how am i doing"), self._ctx())
+        self.assertEqual(self.bot._route_text.call_args.args[1], "2-leg parlay (A + B), $2.00")

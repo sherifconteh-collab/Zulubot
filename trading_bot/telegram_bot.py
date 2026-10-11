@@ -14,10 +14,13 @@ import logging
 import re
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+from trading_bot.integrations import nl_router
 
 if TYPE_CHECKING:
     from trading_bot.config import TelegramConfig
@@ -283,6 +286,59 @@ def _parse_stack_args(args: list[str]) -> dict[str, Any]:
         amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
         tokens = tokens[:-1]
     return {"query": " ".join(tokens), "legs": legs, "leg_prob": leg_prob, "amount": amount, "max_price": max_price}
+
+
+_YES_WORDS = {"yes", "y", "yep", "yeah", "yup", "confirm", "confirmed", "ok", "okay", "go", "sure", "place it",
+              "do it", "send it", "lets go", "let's go", "go ahead", "bet it", "yes please", "confirm it"}
+_NO_WORDS = {"no", "n", "nope", "cancel", "stop", "nevermind", "never mind", "forget it", "dont", "don't",
+             "cancel it", "scrap it", "no thanks"}
+
+
+def _parlay_label(plan: dict[str, Any]) -> str:
+    picks = " + ".join(str(l["pick"]) for l in plan["legs"])
+    return f"{len(plan['legs'])}-leg parlay ({picks}), ${float(plan['stake']):.2f}"
+
+
+def _normalise_reply(text: str) -> str:
+    return " ".join(text.lower().replace("!", " ").replace(".", " ").split())
+
+
+def _route_to_command(route: dict[str, Any]) -> tuple[str, list[str]] | None:
+    """Turn a validated route into (command name, args), or None for actions handled elsewhere."""
+    action = route["action"]
+    args: list[str] = []
+    if action == "games":
+        args = route["filter"].split()
+    elif action == "props":
+        args = (route["query"] or route["team"]).split()
+    elif action == "bet":
+        if not route["team"]:
+            return None
+        args = route["team"].split()
+        if route["amount"] is not None:
+            args.append(f"{route['amount']:g}")
+    elif action == "parlay":
+        if len(route["legs"]) < 2:
+            return None
+        args = " + ".join(route["legs"]).split()
+        if route["amount"] is not None:
+            args.append(f"{route['amount']:g}")
+        if route["max_cents"] is not None:
+            args += ["max", f"{route['max_cents']:g}"]
+    elif action == "stack":
+        game = route["game"] or route["team"]
+        if not game:
+            return None
+        args = game.split()
+        if route["leg_count"] is not None:
+            args += ["legs", str(route["leg_count"])]
+        if route["leg_percent"] is not None:
+            args += ["p", f"{route['leg_percent']:g}"]
+        if route["amount"] is not None:
+            args.append(f"{route['amount']:g}")
+        if route["max_cents"] is not None:
+            args += ["max", f"{route['max_cents']:g}"]
+    return action, args
 
 
 def _parse_slip_caption(caption: str) -> dict[str, Any]:
@@ -1002,6 +1058,8 @@ class TradingTelegramBot:
             self._app.add_handler(CommandHandler(name, callback))
         # A photo (or image file) of a bet slip: read its legs and propose the matching Kalshi parlay.
         self._app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._on_photo))
+        # Plain text: "bet $5 on the browns", "how am I doing?", "yes".
+        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
     def _check_auth(self, update: Update) -> bool:
         if not update.effective_chat:
@@ -1032,6 +1090,7 @@ class TradingTelegramBot:
             "/games [league or team] — games you can bet on\n"
             "/bet &lt;team&gt; [$amount] — preview a bet (e.g. /bet cleveland 5)\n"
             "/props &lt;player or team&gt; — football player-stat markets (NFL)\n"
+            "Or just type what you want in plain words (\"bet $5 on the browns\", \"how am I doing?\", \"yes\")\n"
             "Send a screenshot of a bet slip (caption: stake, e.g. 2) — I match its legs to Kalshi and preview the parlay\n"
             "/stack &lt;game&gt; [legs N] [p %] [$stake] — auto-build a same-game player-stat parlay\n"
             "/parlay &lt;team or p#&gt; + &lt;team or p#&gt; [$amount] [max cents] — preview a same-sport parlay\n"
@@ -1440,6 +1499,7 @@ class TradingTelegramBot:
             self._pending_bet = {
                 "ticker": option["ticker"], "side": option["side"], "stake": float(quote["stake"]),
                 "ask": float(quote["ask"]), "pick": quote["pick"], "game": quote["game"],
+                "label": f"single bet on {quote['pick']} in {quote['game']}, ${float(quote['stake']):.2f}",
                 "expires": time.monotonic() + _BET_TTL_SECONDS,
             }
             await update.message.reply_text(_format_bet_preview(quote), parse_mode="HTML")  # type: ignore[union-attr]
@@ -1480,6 +1540,76 @@ class TradingTelegramBot:
         lines.append("\nParlay: /parlay p1 + p9 3  \u2014 or by name: /parlay hurts 200 passing + barkley 80 rushing 3")
         await _send_html_chunks(update, "\n".join(lines))
 
+    async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Plain-text messages: yes/no for a waiting bet, otherwise Claude picks the matching command."""
+        if not self._check_auth(update):
+            return
+        message = update.message
+        text = (message.text or "").strip() if message is not None else ""
+        if not text or self._service is None:
+            return
+        if not getattr(self.config, "natural_language", True):
+            await message.reply_text("Plain-text chat is off (TELEGRAM_NATURAL_LANGUAGE). Try /help.")
+            return
+        pending = self._pending_bet
+        waiting = pending is not None and time.monotonic() <= pending["expires"]
+        reply = _normalise_reply(text)
+        if waiting and reply in _YES_WORDS:
+            await self._cmd_confirm(update, context)
+            return
+        if waiting and reply in _NO_WORDS:
+            await self._cmd_cancel(update, context)
+            return
+        try:
+            route = await asyncio.to_thread(self._route_text, text, pending["label"] if waiting else None)
+        except RuntimeError as exc:
+            await message.reply_text(str(exc))
+            return
+        action = route["action"]
+        if action == "reply":
+            await message.reply_text(route["reply_text"] or "I'm not sure what you mean. Try /help.")
+            return
+        if action == "control":
+            await message.reply_text(
+                "I won't pause, resume or kill the bot from plain text. Send /pause, /resume or /kill yourself.",
+            )
+            return
+        if action == "confirm":
+            if waiting:
+                await message.reply_text("Placing it\u2026")
+                await self._cmd_confirm(update, context)
+            else:
+                await message.reply_text("There's nothing waiting to confirm. Tell me what you'd like to bet on.")
+            return
+        mapped = _route_to_command(route)
+        if mapped is None:
+            await message.reply_text(
+                route["reply_text"] or "I need a bit more detail, like the team or players and how much to bet.",
+            )
+            return
+        name, args = mapped
+        handler = self._text_commands().get(name)
+        if handler is None:
+            await message.reply_text("I'm not sure what you mean. Try /help.")
+            return
+        await handler(update, SimpleNamespace(args=args, bot=getattr(context, "bot", None)))
+
+    def _text_commands(self) -> dict[str, Any]:
+        return {
+            "status": self._cmd_status, "positions": self._cmd_positions, "risk": self._cmd_risk,
+            "history": self._cmd_history, "sports": self._cmd_kalshi_sports, "leads": self._cmd_leads,
+            "config": self._cmd_config, "help": self._cmd_help, "games": self._cmd_games,
+            "props": self._cmd_props, "bet": self._cmd_bet, "parlay": self._cmd_parlay,
+            "stack": self._cmd_stack, "cancel": self._cmd_cancel,
+        }
+
+    def _route_text(self, text: str, pending: str | None) -> dict[str, Any]:
+        cfg = self._service.config
+        return nl_router.route_message(
+            text, pending=pending, api_key=cfg.trading_agents.api_key,
+            model=getattr(self.config, "nl_model", "claude-haiku-4-5-20251001"), logger=self.logger,
+        )
+
     async def _on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Read a bet-slip screenshot and preview the matching Kalshi parlay (caption: stake, max cents)."""
         if not self._check_auth(update):
@@ -1514,7 +1644,7 @@ class TradingTelegramBot:
                 return
             self._pending_bet = {
                 "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
-                "expires": time.monotonic() + _BET_TTL_SECONDS,
+                "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
             }
             note = ""
             if result["unmatched"]:
@@ -1558,7 +1688,8 @@ class TradingTelegramBot:
                 return
             self._pending_bet = {
                 "kind": "parlay", "legs": built["legs"], "stake": float(plan["stake"]),
-                "max_price": float(plan["max_price"]), "expires": time.monotonic() + _BET_TTL_SECONDS,
+                "max_price": float(plan["max_price"]), "label": _parlay_label(plan),
+                "expires": time.monotonic() + _BET_TTL_SECONDS,
             }
             await update.message.reply_text(  # type: ignore[union-attr]
                 f"Stack for {html.escape(str(built['game']))}: {len(built['legs'])} legs, each about "
@@ -1633,7 +1764,7 @@ class TradingTelegramBot:
                 return
             self._pending_bet = {
                 "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
-                "expires": time.monotonic() + _BET_TTL_SECONDS,
+                "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
             }
             await update.message.reply_text(_format_parlay_preview(plan), parse_mode="HTML")  # type: ignore[union-attr]
         except Exception as exc:
