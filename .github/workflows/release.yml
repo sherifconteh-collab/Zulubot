@@ -1,0 +1,92 @@
+name: Release
+
+# Weekly release cut, in the same style as the maintainer's other repositories.
+#
+# Every pull request adds its entry under "## [Unreleased]" in CHANGELOG.md. On the weekly schedule
+# (Monday 09:00 UTC) this workflow turns those entries into a calendar-versioned release (YYYY.M.N),
+# prepends it to RELEASE_NOTES.md, points the README Release badge at it, commits that to main,
+# tags it and publishes a GitHub Release. An empty [Unreleased] cuts nothing, so a quiet week makes
+# no release. Run it by hand from the Actions tab to cut one early (optionally as a dry run).
+#
+# Needs write access to main for the github-actions bot. If you protect main with required pull
+# requests, allow the bot to bypass (branch protection settings), or this push is rejected.
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: report the version but change nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Cut release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Check release inputs
+        run: python scripts/release.py check
+
+      - name: Cut release
+        id: cut
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python scripts/release.py cut --dry-run
+          else
+            python scripts/release.py cut
+          fi
+
+      - name: Commit, tag and publish
+        if: steps.cut.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          NOTES_FILE: ${{ steps.cut.outputs.notes_file }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md RELEASE_NOTES.md README.md
+          git commit -m "docs(release): release notes for v${VERSION} [skip ci]"
+          git tag "v${VERSION}"
+          git push origin HEAD:"${GITHUB_REF_NAME}" "v${VERSION}"
+          gh release create "v${VERSION}" --title "Zulubot v${VERSION}" --notes-file "${NOTES_FILE}" --latest
+
+      - name: Summary
+        if: always()
+        env:
+          VERSION: ${{ steps.cut.outputs.version }}
+          CHANGED: ${{ steps.cut.outputs.changed }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          {
+            echo "### Release"
+            if [ -z "${VERSION}" ]; then
+              echo "[Unreleased] has no entries, so nothing was released."
+            elif [ "${DRY_RUN}" = "true" ]; then
+              echo "Dry run: would release **v${VERSION}**."
+            elif [ "${CHANGED}" = "true" ]; then
+              echo "Released **v${VERSION}**."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

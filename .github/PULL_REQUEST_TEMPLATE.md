@@ -52,7 +52,8 @@ python scripts/security_checks.py
 
 ## Docs
 
-- [ ] README / `.env.example` / `CHANGELOG.md` updated if user-facing
+- [ ] README / `.env.example` updated if user-facing
+- [ ] Entry added under `## [Unreleased]` in `CHANGELOG.md` (the weekly release job turns it into the release notes)
 
 ## Notes
 
