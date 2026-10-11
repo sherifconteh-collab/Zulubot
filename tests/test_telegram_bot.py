@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 from trading_bot.telegram_bot import (
     TradingTelegramBot,
     _format_auto_parlays,
+    _skip_examples,
     _skip_reason_summary,
     _sports_mode_line,
     _format_lead_line,
@@ -908,6 +909,17 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         broken = _sports_mode_line(live, {"can_trade_live": False})
         self.assertIn("even though PAPER_MODE=false", broken)
         self.assertIn("KALSHI_KEY_ID", broken)
+
+    def test_skip_examples_show_kalshi_s_own_error_text_once_each(self):
+        decisions = [
+            {"action": "skip_buy", "reason": "order_failed", "signals": {"error": "HTTP 404: <not found>"}},
+            {"action": "skip_buy", "reason": "order_failed", "signals": {"error": "HTTP 404: <not found>"}},
+            {"action": "skip_buy", "reason": "parlay_not_filled", "signals": {"why": "no quote at or under 50c"}},
+            {"action": "skip_buy", "reason": "no_edge_after_fees", "signals": {}},
+        ]
+        self.assertEqual(_skip_examples(decisions), [
+            "order_failed: HTTP 404: &lt;not found&gt;", "parlay_not_filled: no quote at or under 50c"])
+        self.assertEqual(_skip_examples(None), [])
 
     def test_preview_and_result_wording(self):
         text = _format_parlay_preview(self.PLAN)

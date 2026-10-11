@@ -440,6 +440,17 @@ class KalshiSportsStrategy:
         self._props_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
         self._combo_collections: tuple[float, list[tuple[str, frozenset[str]]]] | None = None
         self._sleep = time.sleep
+        # Live orders that failed or didn't fill this cycle, so /sports can say why nothing was bought.
+        self._order_issues: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _describe_order_error(exc: BaseException) -> str:
+        """Kalshi's own words for a rejected order (HTTP status and body), clipped."""
+        response = getattr(exc, "response", None)
+        if response is not None:
+            body = str(getattr(response, "text", "") or "")[:220]
+            return f"HTTP {getattr(response, 'status_code', '?')}: {body}".strip()
+        return str(exc)[:220]
 
     # ------------------------------------------------------------------
     # Entry point
@@ -471,6 +482,7 @@ class KalshiSportsStrategy:
         if not self.config.enabled:
             result["status"] = "disabled"
             return result
+        self._order_issues = []
 
         try:
             self._close_resolved_positions(state, broker, result)
@@ -495,6 +507,8 @@ class KalshiSportsStrategy:
                 result["status"] = "no_data"
             self._execute_candidates(state, broker, candidates, now, result)
             self._auto_parlays(state, broker, now, result)
+            for issue in self._order_issues[:6]:
+                self._log_skip(result, issue["ticker"], issue["reason"], error=issue["error"])
         except Exception as exc:
             self.logger.error("Kalshi sports cycle failed: %s", exc, exc_info=True)
             result["status"] = "error"
@@ -1109,12 +1123,16 @@ class KalshiSportsStrategy:
                 )
             except Exception as exc:
                 self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
+                self._order_issues.append({"ticker": ticker, "reason": "order_failed",
+                                           "error": self._describe_order_error(exc)})
                 return None
             order_id = str(order.get("order", {}).get("order_id", ""))
             filled = order_fill_count(order)
             if filled is not None:
                 if filled < 1:
                     self.logger.info("Kalshi sports order for %s did not fill; no bet booked.", ticker)
+                    self._order_issues.append({"ticker": ticker, "reason": "order_not_filled",
+                                               "error": f"no contracts filled at {ask:.2f}"})
                     return None
                 quantity = min(quantity, filled)
 

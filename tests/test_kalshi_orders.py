@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import unittest
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+
+import requests
 
 from trading_bot.broker import PaperBroker
 from trading_bot.clients_kalshi import KalshiClient, order_fill_count
@@ -19,38 +22,98 @@ _NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
 def _client() -> KalshiClient:
     c = KalshiClient(logger=logging.getLogger("t"))
-    c._post = MagicMock(return_value={"order": {"order_id": "o1", "fill_count": 3}})
+    # The V2 create-order response (https://docs.kalshi.com/api-reference/orders/create-order-v2).
+    c._post = MagicMock(return_value={
+        "order_id": "o1", "client_order_id": "c1", "fill_count": "3.00", "remaining_count": "0.00", "ts_ms": 1})
     return c
 
 
+def _http_error(status: int) -> requests.HTTPError:
+    return requests.HTTPError(f"{status}", response=SimpleNamespace(status_code=status, text="nope"))
+
+
 class PlaceOrderTests(unittest.TestCase):
-    def test_no_side_price_uses_no_price(self):
+    """Orders go to the V2 endpoint, which quotes everything from the YES side."""
+
+    def _payload(self, c):
+        path, payload = c._post.call_args.args
+        self.assertEqual(path, "/portfolio/events/orders")
+        return payload
+
+    def test_buy_yes_is_a_bid_at_the_yes_price(self):
+        c = _client()
+        c.place_order(ticker="T", side="yes", count=2, price_cents=57, time_in_force="immediate_or_cancel")
+        p = self._payload(c)
+        self.assertEqual((p["side"], p["price"], p["count"]), ("bid", "0.5700", "2.00"))
+        self.assertEqual(p["time_in_force"], "immediate_or_cancel")
+        self.assertEqual(p["self_trade_prevention_type"], "taker_at_cross")
+        self.assertEqual(p["ticker"], "T")
+        self.assertTrue(p["client_order_id"])
+        for legacy in ("action", "yes_price", "no_price", "type"):
+            self.assertNotIn(legacy, p)
+
+    def test_buy_no_is_an_ask_at_one_minus_the_no_price(self):
         c = _client()
         c.place_order(ticker="T", side="no", count=2, price_cents=45, time_in_force="immediate_or_cancel")
-        payload = c._post.call_args.args[1]
-        self.assertEqual(payload["no_price"], 45)
-        self.assertNotIn("yes_price", payload)
-        self.assertEqual(payload["time_in_force"], "immediate_or_cancel")
+        p = self._payload(c)
+        self.assertEqual((p["side"], p["price"]), ("ask", "0.5500"))     # buy NO @45 = sell YES @55
 
-    def test_yes_side_price_uses_yes_price(self):
+    def test_selling_is_the_mirror_image(self):
         c = _client()
-        c.place_order(ticker="T", side="yes", count=2, price_cents=57)
-        self.assertEqual(c._post.call_args.args[1]["yes_price"], 57)
+        c.place_order(ticker="T", side="yes", action="sell", count=1, price_cents=40)
+        self.assertEqual((self._payload(c)["side"], self._payload(c)["price"]), ("ask", "0.4000"))
+        c.place_order(ticker="T", side="no", action="sell", count=1, price_cents=40)
+        self.assertEqual((self._payload(c)["side"], self._payload(c)["price"]), ("bid", "0.6000"))  # sell NO @40 = buy YES @60
 
-    def test_price_is_required_and_clamped(self):
+    def test_yes_price_argument_is_always_the_yes_side_price(self):
+        c = _client()
+        c.place_order(ticker="T", side="no", count=1, yes_price=57)
+        p = self._payload(c)
+        self.assertEqual((p["side"], p["price"]), ("ask", "0.5700"))
+
+    def test_price_is_required_clamped_and_inputs_validated(self):
         c = _client()
         with self.assertRaises(ValueError):
             c.place_order(ticker="T", side="yes", count=1)
+        with self.assertRaises(ValueError):
+            c.place_order(ticker="T", side="maybe", count=1, price_cents=50)
         c.place_order(ticker="T", side="yes", count=1, price_cents=150)
-        self.assertEqual(c._post.call_args.args[1]["yes_price"], 99)
+        self.assertEqual(self._payload(c)["price"], "0.9900")
+        c.place_order(ticker="T", side="yes", count=1, price_cents=0)
+        self.assertEqual(self._payload(c)["price"], "0.0100")
+        self.assertEqual(self._payload(c)["time_in_force"], "good_till_canceled")
+
+    def test_response_keeps_the_shape_callers_read(self):
+        c = _client()
+        out = c.place_order(ticker="T", side="yes", count=3, price_cents=50)
+        self.assertEqual(out["order"]["order_id"], "o1")
+        self.assertEqual(order_fill_count(out), 3)
+        self.assertEqual(order_fill_count({"order_id": "x", "fill_count": "0.00"}), 0)
+
+    def test_legacy_endpoint_is_only_tried_when_v2_does_not_exist(self):
+        c = _client()
+        c._post.side_effect = [_http_error(404), {"order": {"order_id": "old", "fill_count": 2}}]
+        out = c.place_order(ticker="T", side="no", count=2, price_cents=45, client_order_id="same-id")
+        (v2_path, v2), (old_path, old) = c._post.call_args_list[0].args, c._post.call_args_list[1].args
+        self.assertEqual((v2_path, old_path), ("/portfolio/events/orders", "/portfolio/orders"))
+        self.assertEqual((old["side"], old["action"], old["count"], old["no_price"]), ("no", "buy", 2, 45))
+        self.assertEqual(old["client_order_id"], v2["client_order_id"])
+        self.assertEqual(out["order"]["order_id"], "old")
+
+    def test_a_rejected_order_is_never_retried_elsewhere(self):
+        c = _client()
+        c._post.side_effect = _http_error(400)
+        with self.assertRaises(requests.HTTPError):
+            c.place_order(ticker="T", side="yes", count=1, price_cents=50)
+        self.assertEqual(c._post.call_count, 1)
 
     def test_sell_to_close_prices_just_below_the_bid(self):
         c = _client()
         c.get_orderbook = MagicMock(return_value={"orderbook_fp": {
             "yes_dollars": [["0.4300", "50"]], "no_dollars": [["0.5500", "50"]]}})
         c.sell_to_close(ticker="T", side="yes", count=4)
-        p = c._post.call_args.args[1]
-        self.assertEqual((p["action"], p["side"], p["yes_price"]), ("sell", "yes", 40))   # 43c bid - 3c
+        p = self._payload(c)
+        self.assertEqual((p["side"], p["price"], p["count"]), ("ask", "0.4000", "4.00"))   # sell YES: 43c bid - 3c
         self.assertEqual(p["time_in_force"], "immediate_or_cancel")
 
     def test_sell_to_close_without_a_bid_raises(self):
@@ -146,6 +209,22 @@ class SportsLiveBookingTests(unittest.TestCase):
         _, state, pos = self._run(order_error=RuntimeError("400"))
         self.assertIsNone(pos)
         self.assertEqual(state.positions, {})
+
+    def test_rejected_and_unfilled_orders_are_recorded_with_kalshi_s_words(self):
+        err = requests.HTTPError("400", response=SimpleNamespace(status_code=400, text='{"error":"insufficient_balance"}'))
+        kalshi = MagicMock()
+        kalshi.place_order.side_effect = err
+        strat = _sports(kalshi)
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        self.assertIsNone(strat._place_bet(state, broker, _cand(), 20.0, _NOW, "kalshi"))
+        self.assertEqual(strat._order_issues[0]["reason"], "order_failed")
+        self.assertIn("HTTP 400", strat._order_issues[0]["error"])
+        self.assertIn("insufficient_balance", strat._order_issues[0]["error"])
+        kalshi.place_order.side_effect = None
+        kalshi.place_order.return_value = {"order": {"fill_count": 0}}
+        strat._place_bet(state, broker, _cand(), 20.0, _NOW, "kalshi")
+        self.assertEqual(strat._order_issues[1]["reason"], "order_not_filled")
 
     def test_unknown_response_shape_trusts_the_request_for_the_sync_backstop(self):
         _, _, pos = self._run({"order": {"order_id": "o", "status": "executed"}})

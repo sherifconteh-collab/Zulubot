@@ -434,32 +434,66 @@ class KalshiClient:
             Order result dict from Kalshi (see ``order_fill_count``).
         """
         side = side.lower()
+        action = action.lower()
         if price_cents is None and yes_price is None:
             raise ValueError("Kalshi orders need a limit price (price_cents or yes_price).")
+        if side not in ("yes", "no") or action not in ("buy", "sell"):
+            raise ValueError(f"Unsupported order: {action} {side}.")
+        # The current order endpoint (V2) quotes everything from the YES side: ``bid`` buys YES and
+        # ``ask`` sells YES, at a YES price. Buying NO at p is selling YES at 1 - p, and selling NO at p
+        # is buying YES at 1 - p. (https://docs.kalshi.com/api-reference/orders/create-order-v2)
+        if yes_price is not None and price_cents is None:
+            yes_cents = int(min(99, max(1, yes_price)))
+        else:
+            traded = int(min(99, max(1, price_cents)))  # type: ignore[arg-type]
+            yes_cents = traded if side == "yes" else 100 - traded
+        buying_yes_exposure = (action == "buy") == (side == "yes")
         payload: dict[str, Any] = {
             "ticker": ticker,
-            "side": side,
-            "action": action.lower(),
-            "count": int(count),
+            "side": "bid" if buying_yes_exposure else "ask",
+            "count": f"{int(count)}.00",
+            "price": f"{yes_cents / 100:.4f}",
+            "time_in_force": time_in_force or "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
             "client_order_id": client_order_id or str(uuid.uuid4()),
-            "type": "limit",
         }
-        if price_cents is not None:
-            cents = int(min(99, max(1, price_cents)))
-            payload["yes_price" if side == "yes" else "no_price"] = cents
-        else:
-            payload["yes_price"] = int(min(99, max(1, yes_price)))  # type: ignore[arg-type]
-        if time_in_force:
-            payload["time_in_force"] = time_in_force
 
         self.logger.info(
-            "Kalshi order: %s %s %s x%d @ %s cents (%s)",
-            action, side, ticker, count,
-            payload.get("yes_price", payload.get("no_price")), time_in_force or "gtc",
+            "Kalshi order: %s %s %s x%d @ %s (V2 %s, %s)",
+            action, side, ticker, count, payload["price"], payload["side"], payload["time_in_force"],
         )
-        result = self._post("/portfolio/orders", payload)
+        try:
+            result = self._post("/portfolio/events/orders", payload)
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status not in (404, 405, 410):
+                raise
+            # The V2 endpoint isn't there (an older API deployment): nothing was placed, so the
+            # legacy endpoint is safe to try with the same client order id.
+            self.logger.warning("Kalshi V2 order endpoint answered %s; trying the legacy endpoint.", status)
+            result = self._place_order_legacy(
+                ticker=ticker, side=side, action=action, count=count, yes_cents=yes_cents,
+                time_in_force=time_in_force, client_order_id=payload["client_order_id"],
+            )
+        else:
+            # Same shape the legacy response had, so callers read ``order.order_id`` / fill counts as before.
+            result = {"order": dict(result), **result}
         self.logger.info("Kalshi order result: %s", json.dumps(result, indent=2))
         return result
+
+    def _place_order_legacy(
+        self, *, ticker: str, side: str, action: str, count: int, yes_cents: int,
+        time_in_force: str | None, client_order_id: str,
+    ) -> dict[str, Any]:
+        """The pre-V2 ``POST /portfolio/orders`` (integer count and cents), kept only as a fallback."""
+        payload: dict[str, Any] = {
+            "ticker": ticker, "side": side, "action": action, "count": int(count),
+            "client_order_id": client_order_id, "type": "limit",
+        }
+        payload["yes_price" if side == "yes" else "no_price"] = yes_cents if side == "yes" else 100 - yes_cents
+        if time_in_force:
+            payload["time_in_force"] = time_in_force
+        return self._post("/portfolio/orders", payload)
 
     def sell_to_close(
         self,

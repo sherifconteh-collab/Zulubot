@@ -1,5 +1,9 @@
 # Release notes
 
+## 2026-10-11: Orders use Kalshi's current API (fixes live bets not being placed)
+- **Live orders now go to Kalshi's V2 endpoint** (`POST /portfolio/events/orders`, string count and dollar price, YES-side `bid`/`ask`). Kalshi's current API spec no longer defines the legacy `POST /portfolio/orders` the bot used, so live bets could not be placed. Buying NO at p is an `ask` at 1 - p; selling is the mirror image. The legacy endpoint is only tried if V2 answers 404/405/410 (nothing was placed). All strategies that place orders benefit.
+- **`/sports` now shows why an order failed** (Kalshi's HTTP status and message) and examples for unfilled parlays, instead of only counting skips.
+
 ## 2026-10-11: Automatic parlays, and `/sports` shows the mode
 - **Automatic parlays (live mode, on by default):** unless `KALSHI_SPORTS_AUTO_PARLAYS=false`, each cycle the bot builds same-game stacks of player-stat legs for upcoming football games and buys them through Kalshi's market makers at or under a price ceiling, then sends a Telegram alert. Defaults: 4 legs, 2% of bankroll per parlay, 3 a day, 10% of bankroll open at once, ceiling = Kalshi's own fair price + 10%. Never runs in paper mode. Reuses the verified hand-parlay path (ceiling enforced before accepting, position read-back, an uncertain outcome stops the cycle).
 - **`/sports` now says whether orders really go to Kalshi** (including `PAPER_MODE=false` with missing credentials, which runs on paper) and why nothing was bought (skip reasons).
