@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from trading_bot.integrations.anthropic_errors import explain_api_failure
+
 ACTIONS = (
     "status", "positions", "risk", "history", "sports", "leads", "config", "help",
     "games", "props", "bet", "parlay", "stack", "confirm", "cancel", "control", "reply",
@@ -127,4 +129,4 @@ def route_message(
         raise ValueError("no tool call in the reply")
     except Exception as exc:
         log.warning("Routing failed: %s", exc)
-        raise RuntimeError("I couldn't work out what you meant. Try /help.") from exc
+        raise RuntimeError(explain_api_failure(exc) or "I couldn't work out what you meant. Try /help.") from exc

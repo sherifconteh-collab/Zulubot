@@ -4,6 +4,9 @@
 - A typed or pasted list of legs (`Lawrence 150+ passing yards`, `Name anytime TD`, `the Eagles +16.5 spread`, ...) is read by a local parser and handled exactly like a screenshot: exact Kalshi matching, preview or one-shot placement with `bet $10`, and nothing placed unless every leg matched. Works with no Anthropic key or credit.
 - **Matching fixes** (also benefit screenshots): a surname shared by two players is reported instead of guessed (the game most legs point to settles it when the slip names none), and a spread for a team is only matched in that team's own game.
 
+## 2026-10-11: Clearer Anthropic errors in Telegram
+- When the Anthropic key is out of credit, invalid, rate limited or the API is overloaded, picture and plain-text messages now say so (and what to do) instead of "I couldn't work out what you meant" or a raw API error dump. The `/` commands are unaffected.
+
 ## 2026-10-11: Open-source readiness
 - **Security standards** (matching the practices in the maintainer's other public repository): `SECURITY.md` (private vulnerability reporting, threat model, controls, repository settings, incident response), `CONTRIBUTING.md`, `CODEOWNERS`, PR and issue templates, Dependabot for pip and GitHub Actions, and read-only workflow tokens with every action pinned to a commit SHA.
 - **New CI:** `security.yml` (`pip-audit`, Gitleaks over full history, license check, weekly schedule), `codeql.yml`, `sbom.yml` (CycloneDX), and `scripts/security_checks.py` with tests (blocks `eval`/`exec`, `shell=True`, pickle, weak crypto, disabled TLS verification, Telegram handlers without the chat check, unpinned actions, committed tunnel URLs).
