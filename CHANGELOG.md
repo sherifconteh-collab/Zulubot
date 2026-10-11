@@ -1,5 +1,8 @@
 # Release notes
 
+## 2026-10-11: `/sports` shows the running build
+- `/sports` now prints `Build: <commit> — <message>` from Railway's deploy variables, so you can tell whether the newest code is live.
+
 ## 2026-10-11: Orders use Kalshi's current API (fixes live bets not being placed)
 - **Live orders now go to Kalshi's V2 endpoint** (`POST /portfolio/events/orders`, string count and dollar price, YES-side `bid`/`ask`). Kalshi's current API spec no longer defines the legacy `POST /portfolio/orders` the bot used, so live bets could not be placed. Buying NO at p is an `ask` at 1 - p; selling is the mirror image. The legacy endpoint is only tried if V2 answers 404/405/410 (nothing was placed). All strategies that place orders benefit.
 - **`/sports` now shows why an order failed** (Kalshi's HTTP status and message) and examples for unfilled parlays, instead of only counting skips.
