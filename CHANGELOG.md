@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Orders on markets Kalshi routes to an unfunded shard
+- **Kalshi holds funds per exchange shard and routes each order to the shard its market lives on.** Some sports markets answered `404 insufficient_shard_balance (Exchange user not found)` or `400 insufficient_balance` even though the account total was enough. The bot now treats those as a property of the market series: it skips that series for 6 hours (instead of retrying every game) and keeps placing orders on markets that do work. Hand-picked bets are never skipped silently.
+- `/sports` shows `Kalshi balance by shard: #0 $X, #1 $Y` (from Kalshi's balance breakdown) so you can see where the money is, and order errors are no longer cut off (full Kalshi message, with the market ticker).
+- The earlier "stop after 3 rejected orders" now counts only non-shard failures; otherwise unfunded-shard markets, which sort first, would have blocked every cycle.
+
 ### Parlay stake floor and order-failure details
 - **Automatic parlays never stake under $5** (default; `KALSHI_SPORTS_AUTO_PARLAY_MIN_STAKE_USD`): the first live attempt at about $1.50 got no market-maker quote. Open-parlay cap raised to 25% of bankroll so three $5 parlays fit, kickoff window 12 hours, and quote requests for a game are spaced 45 minutes apart (`KALSHI_SPORTS_AUTO_PARLAY_RETRY_MINUTES`) instead of burning all three tries in 90 minutes. A parlay the account can't afford is skipped with a clear reason.
 - **Order failures show the order itself** in `/sports` (side, contracts, price, then Kalshi's message), and the bot stops trying more orders in a cycle after three rejections.

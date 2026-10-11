@@ -475,7 +475,7 @@ def _skip_examples(decisions: Any, limit: int = 3) -> list[str]:
         if label in seen:
             continue
         seen.add(label)
-        lines.append(html.escape(_clip_text(label, 200)))
+        lines.append(html.escape(_clip_text(label, 480)))
         if len(lines) >= limit:
             break
     return lines
@@ -1507,6 +1507,10 @@ class TradingTelegramBot:
             lines.append(_sports_mode_line(self._service, module))
             lines.append(_build_line())
             bank = module.get("bankroll") or {}
+            shards = bank.get("shards") or []
+            if len(shards) > 1:
+                lines.append("Kalshi balance by shard: " + ", ".join(
+                    f"#{int(s['index'])} ${float(s['balance']):.2f}" for s in shards))
             if bank:
                 lines.append(
                     f"Bankroll ${float(bank.get('equity', 0)):.2f} (today {float(bank.get('day_pnl', 0)):+.2f}) | "
