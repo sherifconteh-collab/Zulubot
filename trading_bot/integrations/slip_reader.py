@@ -14,6 +14,8 @@ import logging
 import re
 from typing import Any
 
+from trading_bot.integrations.anthropic_errors import explain_api_failure
+
 STAT_FAMILIES = (
     "passing yards", "rushing yards", "receiving yards", "receptions",
     "passing touchdowns", "touchdowns",
@@ -131,4 +133,4 @@ def read_slip(
         raise RuntimeError("I couldn't read legs from that picture. Send a clearer screenshot of the slip.") from exc
     except Exception as exc:
         log.warning("Slip reading failed: %s", exc)
-        raise RuntimeError(f"Reading the picture failed: {exc}") from exc
+        raise RuntimeError(explain_api_failure(exc) or "Reading the picture failed. Try again in a moment.") from exc
