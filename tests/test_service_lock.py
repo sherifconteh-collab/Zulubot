@@ -35,7 +35,7 @@ class ServiceLockTests(unittest.TestCase):
     def test_public_state_methods_are_locked(self):
         for name in ("run", "status", "engage_kill_switch", "clear_kill_switch",
                      "list_sports_games", "quote_sports_bet", "place_sports_bet",
-                     "quote_sports_parlay", "place_sports_parlay"):
+                     "quote_sports_parlay", "place_sports_parlay", "build_sports_stack", "list_sports_props"):
             self.assertTrue(hasattr(getattr(TradingBotService, name), "__wrapped__"), name)
 
     def test_reentrant_calls_do_not_deadlock(self):
@@ -93,6 +93,15 @@ class SportsBetServiceTests(unittest.TestCase):
         fake.kalshi_sports_strategy.place_user_parlay.return_value = {"ok": False, "reason": "no quote"}
         TradingBotService.place_sports_parlay.__wrapped__(fake, [], None, None)
         fake.state_store.save.assert_not_called()
+
+    def test_stack_builder_delegates_and_respects_disabled(self):
+        fake, _ = self._fake()
+        fake.kalshi_sports_strategy.build_stack.return_value = {"ok": True}
+        self.assertTrue(TradingBotService.build_sports_stack.__wrapped__(fake, "eagles jaguars", 9, 0.85)["ok"])
+        self.assertEqual(fake.kalshi_sports_strategy.build_stack.call_args.args[1:], ("eagles jaguars", 9, 0.85))
+        fake, _ = self._fake(enabled=False)
+        self.assertFalse(TradingBotService.build_sports_stack.__wrapped__(fake, "x", 5, 0.85)["ok"])
+        fake.kalshi_sports_strategy.build_stack.assert_not_called()
 
     def test_parlay_quote_respects_disabled_strategy(self):
         fake, _ = self._fake(enabled=False)

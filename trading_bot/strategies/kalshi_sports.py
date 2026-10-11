@@ -81,7 +81,13 @@ _RESOLVED_STATUSES = {"settled", "finalized", "determined"}
 # Kalshi player-stat series for football (one market per player and threshold, e.g. "Hurts: 250+ passing yards").
 FOOTBALL_PROP_SERIES = (
     "KXNFLPASSYDS", "KXNFLPASSTDS", "KXNFLRSHYDS", "KXNFLRECYDS", "KXNFLREC", "KXNFLTD",
+    "KXNFLSPREAD",  # alternate spreads: one per game in a combo, both sides offered
 )
+_SPREAD_SERIES = "KXNFLSPREAD"
+
+
+def _prop_key(ticker: str, side: str) -> str:
+    return f"{ticker}#{side}"
 
 
 def sport_of(league: str) -> str:
@@ -1224,19 +1230,36 @@ class KalshiSportsStrategy:
                 continue
             for market in markets:
                 game = games.get(str(market.get("event_ticker", "")).split("-", 1)[-1])
-                ask = _kalshi_price(market, "yes_ask")
-                if game is None or not 0.0 < ask < 1.0:
+                if game is None:
                     continue
-                bid = _kalshi_price(market, "yes_bid")
                 title = str(market.get("title") or market.get("yes_sub_title") or "")
-                player, _, stat = title.partition(":")
                 ticker = str(market.get("ticker", ""))
-                found[ticker] = {
-                    "ticker": ticker, "event_ticker": str(market.get("event_ticker", "")),
-                    "league": game["league"], "game": game["game"], "start": game["start"],
-                    "player": player.strip(), "stat": stat.strip() or title, "title": title,
-                    "yes_ask": ask, "yes_bid": bid,
-                }
+                spread = series == _SPREAD_SERIES
+                if spread:
+                    team, _, rest = title.partition(" wins by over ")
+                    margin = rest.split(" ")[0]
+                    labels = {"yes": (team.strip(), f"{team.strip()} win by over {margin}"),
+                              "no": (team.strip(), f"{team.strip()} don't win by over {margin}")}
+                else:
+                    player, _, stat = title.partition(":")
+                    labels = {"yes": (player.strip(), stat.strip() or title)}
+                for side, (player, stat) in labels.items():
+                    ask = _kalshi_price(market, f"{side}_ask")
+                    if not 0.0 < ask < 1.0:
+                        continue
+                    bid = _kalshi_price(market, f"{side}_bid")
+                    try:
+                        volume = float(market.get("volume_fp") or market.get("volume") or 0.0)
+                    except (TypeError, ValueError):
+                        volume = 0.0
+                    found[_prop_key(ticker, side)] = {
+                        "ticker": ticker, "side": side, "event_ticker": str(market.get("event_ticker", "")),
+                        "league": game["league"], "game": game["game"], "start": game["start"],
+                        "player": "Spread" if spread else player, "stat": stat, "title": title,
+                        "kind": "spread" if spread else "stat",
+                        "yes_ask": ask, "yes_bid": bid, "mid": (bid + ask) / 2.0 if bid > 0 else ask,
+                        "volume": volume,
+                    }
         if not failed:  # a partial listing would hide players for the whole cache window
             self._props_cache = (time.monotonic(), found)
         return found
@@ -1247,11 +1270,52 @@ class KalshiSportsStrategy:
         words = query.lower().split()
         found: dict[str, dict[str, Any]] = {}
         for ticker, prop in universe.items():
-            hay = f"{prop['title']} {prop['game']}".lower()
-            if all((f"{w}+" in hay) if w.isdigit() else (w in hay) for w in words):
+            hay = f"{prop['title']} {prop['stat']} {prop['game']}".lower()
+            if all(re.search(rf"(?<![\d.]){re.escape(w)}\+", hay) if w.replace(".", "", 1).isdigit() else (w in hay)
+                   for w in words):
                 found[ticker] = prop
         self.props.update(found)
-        return sorted(found.values(), key=lambda p: (p["start"], p["game"], p["player"], p["title"]))
+        return sorted(found.values(), key=lambda p: (p["start"], p["game"], p["player"], p["title"], p["side"]))
+
+    def build_stack(self, now: datetime, query: str, legs: int, leg_prob: float) -> dict[str, Any]:
+        """Assemble a same-game stack of high-probability legs, one per player (plus one spread).
+
+        For each player the market whose Kalshi mid price is closest to ``leg_prob`` is chosen
+        (so 9 legs near 85% multiply to roughly a +400 parlay), skipping thin markets with a wide
+        bid/ask. Players are ranked by closeness to the target, then by trading volume.
+        """
+        universe = self._load_props(now)
+        words = query.lower().split()
+        games: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for prop in universe.values():
+            if words and all(w in prop["game"].lower() for w in words):
+                games.setdefault((prop["game"], prop["start"]), []).append(prop)
+        if not games:
+            return {"ok": False, "reason": f"No upcoming football game matches '{query}'. Check /games."}
+        if len(games) > 1:
+            names = ", ".join(sorted({g for g, _ in games})[:6])
+            return {"ok": False, "reason": f"'{query}' matches several games ({names}). Name both teams."}
+        (game, _), props = next(iter(games.items()))
+        best: dict[str, dict[str, Any]] = {}
+        for prop in props:
+            if prop["yes_bid"] <= 0 or prop["yes_ask"] - prop["yes_bid"] > 0.10 or not 0.03 < prop["mid"] < 0.97:
+                continue  # one-sided or thin market: the mid price isn't a real price
+            key = "spread" if prop["kind"] == "spread" else prop["player"]
+            rank = (round(abs(prop["mid"] - leg_prob), 2), -prop["volume"])
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, prop)
+        chosen = [prop for _, prop in sorted(best.values(), key=lambda row: row[0])[:legs]]
+        if len(chosen) < 2:
+            return {"ok": False, "reason": f"Not enough liquid player markets for {game} yet."}
+        reference = 1.0
+        for prop in chosen:
+            reference *= prop["mid"]
+        for prop in chosen:
+            self.props[_prop_key(prop["ticker"], prop["side"])] = prop
+        return {
+            "ok": True, "game": game, "legs": [{"ticker": p["ticker"], "side": p["side"]} for p in chosen],
+            "rows": chosen, "reference": reference, "leg_prob": leg_prob,
+        }
 
     # ------------------------------------------------------------------
     # Hand-built parlays (Telegram /parlay): Kalshi combo + request for quote
@@ -1299,18 +1363,18 @@ class KalshiSportsStrategy:
         cfg = self.config
         if not self.live_trading_enabled:
             return {"ok": False, "reason": "Parlays use live Kalshi quotes, so they need live trading (PAPER_MODE=false)."}
-        if cfg.parlay_max_legs < 2:
-            return {"ok": False, "reason": "Parlays are turned off (KALSHI_SPORTS_PARLAY_MAX_LEGS)."}
-        if not 2 <= len(legs) <= cfg.parlay_max_legs:
-            return {"ok": False, "reason": f"A parlay needs 2 to {cfg.parlay_max_legs} legs from different games."}
+        if cfg.user_parlay_max_legs < 2:
+            return {"ok": False, "reason": "Parlays are turned off (KALSHI_SPORTS_USER_PARLAY_MAX_LEGS)."}
+        if not 2 <= len(legs) <= cfg.user_parlay_max_legs:
+            return {"ok": False, "reason": f"A parlay needs 2 to {cfg.user_parlay_max_legs} legs."}
 
         held = self._held_events(self._open_positions(state))
         rows: list[dict[str, Any]] = []
         for leg in legs:
             ticker, side = leg["ticker"], str(leg["side"]).lower()
             entry = self.board.get(ticker)
-            prop = self.props.get(ticker) if entry is None else None
-            if (entry is None and prop is None) or side not in ("yes", "no") or (prop is not None and side != "yes"):
+            prop = self.props.get(_prop_key(ticker, side)) if entry is None else None
+            if (entry is None and prop is None) or side not in ("yes", "no"):
                 return {"ok": False, "reason": "A leg isn't on the board any more. Send /games (or /props) to refresh."}
             source = entry or prop
             start = _parse_iso(source["start"])
@@ -1328,7 +1392,7 @@ class KalshiSportsStrategy:
             ask_now = _kalshi_price(market, f"{side}_ask")
             mid = (bid + ask_now) / 2.0 if bid > 0 and ask_now > 0 else ask_now
             if prop is not None:
-                p, pick = None, f"{prop['player']} {prop['stat']}"
+                p, pick = None, (prop["stat"] if prop["kind"] == "spread" else f"{prop['player']} {prop['stat']}")
             else:
                 p_yes = entry["p_yes"]
                 p = None if p_yes is None else (p_yes if side == "yes" else 1.0 - p_yes)
@@ -1391,6 +1455,7 @@ class KalshiSportsStrategy:
             return {"ok": False, "reason": f"${stake:.2f} doesn't buy a contract at up to ${ceiling:.2f}."}
         return {
             "ok": True, "kind": "parlay", "legs": rows, "collection": collection, "fair": fair, "reference": reference,
+            "same_game": len({r["event_ticker"].split("-", 1)[-1] for r in rows}) < len(rows),
             "max_price": ceiling, "contracts": contracts, "stake": stake,
             "max_cost": contracts * ceiling, "payout": float(contracts), "equity": equity, "live": True,
         }
