@@ -1,6 +1,9 @@
 # Release notes
 
 ## 2026-10-11: Open-source readiness
+- **Security standards** (matching the practices in the maintainer's other public repository): `SECURITY.md` (private vulnerability reporting, threat model, controls, repository settings, incident response), `CONTRIBUTING.md`, `CODEOWNERS`, PR and issue templates, Dependabot for pip and GitHub Actions, and read-only workflow tokens with every action pinned to a commit SHA.
+- **New CI:** `security.yml` (`pip-audit`, Gitleaks over full history, license check, weekly schedule), `codeql.yml`, `sbom.yml` (CycloneDX), and `scripts/security_checks.py` with tests (blocks `eval`/`exec`, `shell=True`, pickle, weak crypto, disabled TLS verification, Telegram handlers without the chat check, unpinned actions, committed tunnel URLs).
+- **Fixes found by the new checks:** the explicit `/confirm` command now checks the chat ID itself (defence in depth); a non-security MD5 cache key became SHA-256; optional requirements got version bounds and the TradingAgents dependency is pinned to a commit.
 - **License:** Apache-2.0 (`LICENSE`, `NOTICE`).
 - **README rewritten** for people: what it does, quick start, Railway deploy, Telegram commands, safety controls, how the sports model works. The full variable list lives in `.env.example`. Added a risk disclaimer.
 - **Security:** `cryptography` raised to `>=50.0.2` (fixes the known advisories on 46.x/47.x; the Kalshi RSA signing path was re-tested). Removed a personal Cloudflare tunnel URL from `railway.toml` (`OLLAMA_BASE_URL` is now blank; set your own in the Railway Variables panel).

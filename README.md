@@ -3,6 +3,7 @@
 A multi-strategy paper-trading bot with a **Kalshi sports-betting engine**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)) and trades simulated money by default.
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
+[![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
 
@@ -22,6 +23,7 @@ A multi-strategy paper-trading bot with a **Kalshi sports-betting engine**, cont
 - [How the sports model works](#how-the-sports-model-works)
 - [Project layout](#project-layout)
 - [Development](#development)
+- [Security](#security)
 - [License](#license)
 
 ## What it does
@@ -213,7 +215,8 @@ Market open, game not started, price within 2¢ of the preview (single bets), on
 - **Risk manager** (non-sports strategies): position caps, a daily halt at `DAILY_HALT_DRAWDOWN`, a kill switch at `KILL_SWITCH_DRAWDOWN` that liquidates, trailing stops, cooldown after consecutive losses, optional volatility targeting.
 - **Sports has its own limits**: per-bet cap, exposure budget, max open bets, and a stake throttle that shrinks bets as the day's drawdown grows.
 - **Telegram is single-user.** Messages from any other chat are ignored, and plain text can never pause, resume or kill the bot.
-- **Secrets stay out of git.** `.env` is ignored, a CI job and an optional pre-commit hook (`scripts/install-hooks.sh`) scan for keys.
+- **Secrets stay out of git.** `.env` is ignored; CI scans every push and the full history (Gitleaks), and an optional pre-commit hook (`scripts/install-hooks.sh`) scans before you commit.
+- **Automated security checks.** Dependency audit (`pip-audit`), CodeQL, an SBOM, weekly Dependabot, GitHub Actions pinned to commit SHAs, and `scripts/security_checks.py`, which fails the build on `eval`/`shell=True`/pickle, weak crypto, disabled TLS verification and any Telegram handler that skips the chat-ID check. See [SECURITY.md](SECURITY.md) for the policy, how to report a vulnerability privately, and the recommended repository settings.
 
 ## How the sports model works
 
@@ -250,7 +253,11 @@ tests/            unit tests (all network calls mocked)
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-CI runs the tests on Python 3.12 with a coverage floor of 50%, plus a secret scan. External APIs are mocked in tests. Configuration is always through environment variables, never hard-coded. Contributions are welcome: please keep `PAPER_MODE=true` as the default and never commit credentials.
+CI runs the tests on Python 3.12 with a coverage floor of 50%, plus a secret scan. External APIs are mocked in tests. Configuration is always through environment variables, never hard-coded. Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Please keep `PAPER_MODE=true` as the default and never commit credentials. Run `python scripts/security_checks.py` before opening a pull request.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for what the project protects, the CI controls, the recommended GitHub settings and how to report a vulnerability privately. Please don't open public issues for security problems.
 
 ## License
 
