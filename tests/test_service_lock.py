@@ -33,13 +33,109 @@ class ServiceLockTests(unittest.TestCase):
         self.assertEqual(fake.max_active, 1)
 
     def test_public_state_methods_are_locked(self):
-        for name in ("run", "status", "engage_kill_switch", "clear_kill_switch"):
+        for name in ("run", "status", "engage_kill_switch", "clear_kill_switch",
+                     "list_sports_games", "quote_sports_bet", "place_sports_bet",
+                     "quote_sports_parlay", "place_sports_parlay", "build_sports_stack", "list_sports_props"):
             self.assertTrue(hasattr(getattr(TradingBotService, name), "__wrapped__"), name)
 
     def test_reentrant_calls_do_not_deadlock(self):
         fake = _Fake()
         with fake._state_lock:
             fake.run()
+
+
+class SportsBetServiceTests(unittest.TestCase):
+    def _fake(self, **sports):
+        from datetime import timezone
+        from types import SimpleNamespace
+        from trading_bot.models import PortfolioState
+        cfg = dict(enabled=True, ignore_global_halt=True)
+        cfg.update(sports)
+        state = PortfolioState(cash=100.0)
+        fake = SimpleNamespace(
+            config=SimpleNamespace(kalshi_sports=SimpleNamespace(**cfg), paper_mode=True, timezone=timezone.utc),
+            state_store=MagicMock(), broker=MagicMock(), kalshi_sports_strategy=MagicMock(),
+            _hydrate_ai_budget=MagicMock(), refresh_open_positions=MagicMock(), _persist_ai_budget=MagicMock(),
+        )
+        fake.state_store.load.return_value = state
+        fake._sports_bet_state = lambda now: TradingBotService._sports_bet_state(fake, now)
+        fake._sports_bet_blocker = lambda st: TradingBotService._sports_bet_blocker(fake, st)
+        return fake, state
+
+    def test_successful_bet_is_saved(self):
+        fake, state = self._fake()
+        fake.kalshi_sports_strategy.place_user_bet.return_value = {"ok": True, "symbol": "KS:X:YES"}
+        out = TradingBotService.place_sports_bet.__wrapped__(fake, "X", "yes", 5.0, 0.4)
+        self.assertTrue(out["ok"])
+        fake.state_store.save.assert_called_once_with(state)
+        self.assertEqual(fake.kalshi_sports_strategy.place_user_bet.call_args.kwargs["max_ask"], 0.4)
+
+    def test_refused_bet_is_not_saved(self):
+        fake, _ = self._fake()
+        fake.kalshi_sports_strategy.place_user_bet.return_value = {"ok": False, "reason": "no"}
+        TradingBotService.place_sports_bet.__wrapped__(fake, "X", "yes", 5.0)
+        fake.state_store.save.assert_not_called()
+
+    def test_disabled_strategy_blocks_bets(self):
+        fake, _ = self._fake(enabled=False)
+        out = TradingBotService.place_sports_bet.__wrapped__(fake, "X", "yes", 5.0)
+        self.assertFalse(out["ok"])
+        fake.kalshi_sports_strategy.place_user_bet.assert_not_called()
+
+    def test_successful_parlay_is_saved_and_refused_one_is_not(self):
+        fake, state = self._fake()
+        fake.kalshi_sports_strategy.place_user_parlay.return_value = {"ok": True}
+        self.assertTrue(TradingBotService.place_sports_parlay.__wrapped__(fake, [{"ticker": "A", "side": "yes"}], 5.0, 0.3)["ok"])
+        fake.state_store.save.assert_called_once_with(state)
+        kwargs = fake.kalshi_sports_strategy.place_user_parlay.call_args.kwargs
+        self.assertEqual((kwargs["amount"], kwargs["max_price"]), (5.0, 0.3))
+        fake, _ = self._fake()
+        fake.kalshi_sports_strategy.place_user_parlay.return_value = {"ok": False, "reason": "no quote"}
+        TradingBotService.place_sports_parlay.__wrapped__(fake, [], None, None)
+        fake.state_store.save.assert_not_called()
+
+    def test_slip_reading_uses_the_key_and_model_and_matches_legs(self):
+        from unittest.mock import patch
+        fake, _ = self._fake()
+        fake.config.trading_agents = type("T", (), {"api_key": "sk-ant-x"})()
+        fake.config.kalshi_sports.slip_model = "m-1"
+        fake.logger = MagicMock()
+        fake._match_sports_slip = MagicMock(return_value={"matched": [1], "unmatched": [], "game": "g"})
+        slip = {"game": "g", "legs": []}
+        with patch("trading_bot.service.slip_reader.read_slip", return_value=slip) as read:
+            out = TradingBotService.read_sports_slip(fake, b"img", "image/png")
+        self.assertTrue(out["ok"])
+        self.assertEqual(read.call_args.kwargs["api_key"], "sk-ant-x")
+        self.assertEqual(read.call_args.kwargs["model"], "m-1")
+        fake._match_sports_slip.assert_called_once_with(slip)
+        with patch("trading_bot.service.slip_reader.read_slip", side_effect=RuntimeError("no key")):
+            out = TradingBotService.read_sports_slip(fake, b"img", "image/png")
+        self.assertEqual(out, {"ok": False, "reason": "no key"})
+
+    def test_stack_builder_delegates_and_respects_disabled(self):
+        fake, _ = self._fake()
+        fake.kalshi_sports_strategy.build_stack.return_value = {"ok": True}
+        self.assertTrue(TradingBotService.build_sports_stack.__wrapped__(fake, "eagles jaguars", 9, 0.85)["ok"])
+        self.assertEqual(fake.kalshi_sports_strategy.build_stack.call_args.args[1:], ("eagles jaguars", 9, 0.85))
+        fake, _ = self._fake(enabled=False)
+        self.assertFalse(TradingBotService.build_sports_stack.__wrapped__(fake, "x", 5, 0.85)["ok"])
+        fake.kalshi_sports_strategy.build_stack.assert_not_called()
+
+    def test_parlay_quote_respects_disabled_strategy(self):
+        fake, _ = self._fake(enabled=False)
+        out = TradingBotService.quote_sports_parlay.__wrapped__(fake, [], None, None)
+        self.assertFalse(out["ok"])
+        fake.kalshi_sports_strategy.quote_user_parlay.assert_not_called()
+
+    def test_kill_switch_blocks_only_when_sports_honours_it(self):
+        fake, state = self._fake(ignore_global_halt=False)
+        state.kill_switch_engaged = True
+        out = TradingBotService.quote_sports_bet.__wrapped__(fake, "X", "yes", 5.0)
+        self.assertFalse(out["ok"])
+        fake, state = self._fake(ignore_global_halt=True)
+        state.kill_switch_engaged = True
+        fake.kalshi_sports_strategy.quote_user_bet.return_value = {"ok": True}
+        self.assertTrue(TradingBotService.quote_sports_bet.__wrapped__(fake, "X", "yes", 5.0)["ok"])
 
 
 if __name__ == "__main__":
