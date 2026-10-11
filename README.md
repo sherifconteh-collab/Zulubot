@@ -6,6 +6,7 @@ A multi-strategy paper-trading bot with a **Kalshi sports-betting engine**, cont
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
 [![License: AGPL-3.0 or commercial](https://img.shields.io/badge/License-AGPL--3.0_or_commercial-blue.svg)](LICENSE)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
+[![Release](https://img.shields.io/badge/Release-pending-lightgrey.svg)](RELEASE_NOTES.md)
 
 > ### ⚠️ Read this first
 > **This is experimental software, not financial advice.** Trading and betting can lose money, including all of it. When `PAPER_MODE=false` the bot places **real orders with real money** on Kalshi. It is provided as is, with no warranty (see [LICENSE](LICENSE)). The sports model finds small edges at best; prediction markets are efficient and fees are real. Run it in paper mode first, read the code, start with small stakes, and only risk money you can afford to lose. You are responsible for following the laws and the terms of service that apply to you. Never commit your API keys.
@@ -299,6 +300,10 @@ python -m unittest discover -s tests -p "test_*.py"
 ```
 
 CI runs the tests on Python 3.12 with a coverage floor of 50%, plus a secret scan. External APIs are mocked in tests. Configuration is always through environment variables, never hard-coded. Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Please keep `PAPER_MODE=true` as the default and never commit credentials. Run `python scripts/security_checks.py` before opening a pull request.
+
+### Releases
+
+Releases are automatic. Every pull request adds its entry under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Each Monday 09:00 UTC the [release workflow](.github/workflows/release.yml) turns those entries into a calendar-versioned release (`YYYY.M.N`, e.g. `2026.10.0`), prepends it to [RELEASE_NOTES.md](RELEASE_NOTES.md), updates the Release badge above, tags it and publishes a GitHub Release. A week with no entries makes no release. Preview with `python scripts/release.py cut --dry-run`, or run the workflow by hand from the Actions tab.
 
 ## Security
 
