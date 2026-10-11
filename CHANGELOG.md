@@ -1,5 +1,8 @@
 # Release notes
 
+## 2026-10-11: Clearer Anthropic errors in Telegram
+- When the Anthropic key is out of credit, invalid, rate limited or the API is overloaded, picture and plain-text messages now say so (and what to do) instead of "I couldn't work out what you meant" or a raw API error dump. The `/` commands are unaffected.
+
 ## 2026-10-11: Open-source readiness
 - **Security standards** (matching the practices in the maintainer's other public repository): `SECURITY.md` (private vulnerability reporting, threat model, controls, repository settings, incident response), `CONTRIBUTING.md`, `CODEOWNERS`, PR and issue templates, Dependabot for pip and GitHub Actions, and read-only workflow tokens with every action pinned to a commit SHA.
 - **New CI:** `security.yml` (`pip-audit`, Gitleaks over full history, license check, weekly schedule), `codeql.yml`, `sbom.yml` (CycloneDX), and `scripts/security_checks.py` with tests (blocks `eval`/`exec`, `shell=True`, pickle, weak crypto, disabled TLS verification, Telegram handlers without the chat check, unpinned actions, committed tunnel URLs).
