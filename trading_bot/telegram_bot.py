@@ -341,6 +341,28 @@ def _route_to_command(route: dict[str, Any]) -> tuple[str, list[str]] | None:
     return action, args
 
 
+_BET_WORDS = re.compile(r"\b(bet|place|put|wager|play|lock|submit|take|do it|go for it|send it)\b", re.IGNORECASE)
+_PREVIEW_WORDS = re.compile(r"\b(preview|show|what|how much|would|price|check)\b", re.IGNORECASE)
+
+
+def _caption_wants_bet(caption: str) -> bool:
+    """A caption like "bet $10 on this" is an instruction to place the bet; "$10" alone just previews it."""
+    return bool(_BET_WORDS.search(caption or "")) and not _PREVIEW_WORDS.search(caption or "")
+
+
+def _slip_price(odds: str | None) -> float | None:
+    """Break-even price (dollars per $1) of American odds read from a slip, e.g. '+478' -> 0.173."""
+    try:
+        value = float(str(odds).replace("\u2212", "-").strip())
+    except (TypeError, ValueError):
+        return None
+    if value >= 100:
+        return 100.0 / (value + 100.0)
+    if value <= -100:
+        return -value / (-value + 100.0)
+    return None
+
+
 def _parse_slip_caption(caption: str) -> dict[str, Any]:
     """Photo caption such as ``2`` or ``$5 max 30``: the stake and an optional price ceiling in cents."""
     text = caption or ""
@@ -1577,7 +1599,7 @@ class TradingTelegramBot:
         if action == "confirm":
             if waiting:
                 await message.reply_text("Placing it\u2026")
-                await self._cmd_confirm(update, context)
+                await self._confirm_pending(update, stake=route["amount"])
             else:
                 await message.reply_text("There's nothing waiting to confirm. Tell me what you'd like to bet on.")
             return
@@ -1636,8 +1658,11 @@ class TradingTelegramBot:
                 await message.reply_text("Fewer than 2 legs matched, so there's no parlay to build.")
                 return
             legs = [{"ticker": m["ticker"], "side": m["side"]} for m in matched]
+            complete = not result["unmatched"]
+            # With every leg matched, the slip's own price is one the user already accepted.
+            anchor = _slip_price((result.get("slip") or {}).get("odds")) if complete else None
             plan = await asyncio.to_thread(
-                self._service.quote_sports_parlay, legs, options["amount"], options["max_price"],
+                self._service.quote_sports_parlay, legs, options["amount"], options["max_price"], anchor,
             )
             if not plan.get("ok"):
                 await message.reply_text(f"Can't place that parlay: {plan.get('reason', 'unknown reason')}")
@@ -1646,10 +1671,21 @@ class TradingTelegramBot:
                 "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
                 "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
             }
+            wants_bet = _caption_wants_bet(message.caption or "")
+            if wants_bet and complete:
+                # "bet $10 on this": the caption is the instruction, so no separate /confirm.
+                await message.reply_text(
+                    f"Placing ${float(plan['stake']):.2f} on this {len(legs)}-leg parlay "
+                    f"(paying up to {float(plan['max_price']) * 100:.0f}\u00a2 per $1).",
+                )
+                await self._confirm_pending(update)
+                return
             note = ""
             if result["unmatched"]:
                 note = (f"Heads up: this previews only the {len(matched)} matched legs, a shorter (and likelier) "
                         "parlay than your slip.\n")
+                if wants_bet:
+                    note += "I didn't place it because not every leg is on Kalshi. Reply yes to bet this shorter one.\n"
             await message.reply_text(note + _format_parlay_preview(plan), parse_mode="HTML")
         except Exception as exc:
             await message.reply_text(f"Error reading the picture: {exc}")
@@ -1771,6 +1807,10 @@ class TradingTelegramBot:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._confirm_pending(update)
+
+    async def _confirm_pending(self, update: Update, stake: float | None = None) -> None:
+        """Place the previewed bet; ``stake`` (dollars) replaces the previewed stake when the user restates it."""
         if not self._check_auth(update):
             return
         if self._service is None:
@@ -1786,7 +1826,8 @@ class TradingTelegramBot:
             await update.message.reply_text("Asking Kalshi market makers for a price (up to ~30 seconds)\u2026")  # type: ignore[union-attr]
             try:
                 outcome = await asyncio.to_thread(
-                    self._service.place_sports_parlay, pending["legs"], pending["stake"], pending["max_price"],
+                    self._service.place_sports_parlay, pending["legs"],
+                    pending["stake"] if stake is None else stake, pending["max_price"],
                 )
             except Exception as exc:
                 await update.message.reply_text(f"Error placing the parlay: {exc}")  # type: ignore[union-attr]
@@ -1796,7 +1837,7 @@ class TradingTelegramBot:
         try:
             outcome = await asyncio.to_thread(
                 self._service.place_sports_bet, pending["ticker"], pending["side"],
-                pending["stake"], pending["ask"] + _PRICE_SLIP,
+                pending["stake"] if stake is None else stake, pending["ask"] + _PRICE_SLIP,
             )
         except Exception as exc:
             await update.message.reply_text(f"Error placing the bet: {exc}")  # type: ignore[union-attr]

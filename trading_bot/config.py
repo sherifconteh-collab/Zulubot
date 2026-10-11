@@ -511,7 +511,7 @@ class KalshiSportsConfig:
     # Parlays you build in Telegram (/parlay): stake share of the wallet, and how long to
     # wait for market makers to quote. A parlay is a long shot, so the default stake is small.
     user_parlay_default_pct: float = 0.02
-    user_parlay_max_pct: float = 0.05
+    user_parlay_max_pct: float = 0.25
     user_parlay_max_legs: int = 10
     # Model that reads bet-slip screenshots posted to Telegram (needs ANTHROPIC_API_KEY).
     slip_model: str = "claude-sonnet-4-6"
@@ -934,7 +934,7 @@ class AppConfig:
                 user_bet_default_pct=_env_float("KALSHI_SPORTS_USER_BET_DEFAULT_PCT", 0.05),
                 user_bet_max_pct=_env_float("KALSHI_SPORTS_USER_BET_MAX_PCT", 0.25),
                 user_parlay_default_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT", 0.02),
-                user_parlay_max_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_MAX_PCT", 0.05),
+                user_parlay_max_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_MAX_PCT", 0.25),
                 user_parlay_max_legs=_env_int("KALSHI_SPORTS_USER_PARLAY_MAX_LEGS", 10),
                 slip_model=os.getenv("KALSHI_SPORTS_SLIP_MODEL", "claude-sonnet-4-6").strip(),
                 parlay_quote_wait_seconds=_env_float("KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS", 20.0),

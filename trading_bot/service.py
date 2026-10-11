@@ -665,6 +665,7 @@ class TradingBotService:
     @_locked
     def quote_sports_parlay(
         self, legs: list[dict[str, str]], amount: float | None, max_price: float | None,
+        anchor_price: float | None = None,
     ) -> dict[str, Any]:
         """Check a hand-built parlay and its price ceiling; places nothing."""
         now = datetime.now(self.config.timezone)
@@ -673,12 +674,13 @@ class TradingBotService:
         if blocker:
             return {"ok": False, "reason": blocker}
         return self.kalshi_sports_strategy.quote_user_parlay(
-            state, self.broker, legs=legs, amount=amount, max_price=max_price, now=now,
+            state, self.broker, legs=legs, amount=amount, max_price=max_price, now=now, anchor_price=anchor_price,
         )
 
     @_locked
     def place_sports_parlay(
         self, legs: list[dict[str, str]], amount: float | None, max_price: float | None,
+        anchor_price: float | None = None,
     ) -> dict[str, Any]:
         """Request quotes from Kalshi market makers and buy the parlay if one is at or under the ceiling."""
         now = datetime.now(self.config.timezone)
@@ -687,7 +689,7 @@ class TradingBotService:
         if blocker:
             return {"ok": False, "reason": blocker}
         outcome = self.kalshi_sports_strategy.place_user_parlay(
-            state, self.broker, legs=legs, amount=amount, max_price=max_price, now=now,
+            state, self.broker, legs=legs, amount=amount, max_price=max_price, now=now, anchor_price=anchor_price,
         )
         if outcome.get("ok"):
             self._persist_ai_budget(state)

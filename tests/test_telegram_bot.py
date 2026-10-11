@@ -16,7 +16,9 @@ from trading_bot.telegram_bot import (
     _parse_bet_args,
     _parse_parlay_args,
     _parse_slip_caption,
+    _caption_wants_bet,
     _route_to_command,
+    _slip_price,
     _parse_stack_args,
     _format_slip_summary,
     _format_sports_picks,
@@ -591,6 +593,14 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Parlay placed", update.message.reply_text.await_args.args[0])
         self.service.place_sports_bet.assert_not_called()
 
+    async def test_confirm_can_restate_the_stake(self):
+        await self.bot._cmd_parlay(self._update(), SimpleNamespace(args="2 browns + 1 guardians 5".split()))
+        update = self._update()
+        await self.bot._confirm_pending(update, stake=10.0)
+        args = self.service.place_sports_parlay.call_args.args
+        self.assertEqual(args[1], 10.0)
+        self.assertEqual(args[2], 0.25)  # the previewed price ceiling is kept
+
     async def test_needs_two_legs(self):
         update = self._update()
         await self.bot._cmd_parlay(update, SimpleNamespace(args=["browns", "5"]))
@@ -736,15 +746,64 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.bot._on_photo(update, SimpleNamespace(args=[]))
         data, media_type = self.service.read_sports_slip.call_args.args
         self.assertEqual((data, media_type), (b"\x89PNGdata", "image/jpeg"))
-        legs, amount, max_price = self.service.quote_sports_parlay.call_args.args
+        legs, amount, max_price, anchor = self.service.quote_sports_parlay.call_args.args
         self.assertEqual(legs, [{"ticker": "T1", "side": "yes"}, {"ticker": "T2", "side": "no"}])
         self.assertEqual((amount, max_price), (2.0, 0.3))
+        self.assertIsNone(anchor)  # a shorter parlay isn't comparable to the slip's price
         texts = [c.args[0] for c in update.message.reply_text.await_args_list]
         self.assertTrue(any("Read your slip" in t for t in texts))
         self.assertIn("only the 2 matched legs", texts[-1])
         self.assertIn("Parlay preview", texts[-1])
         self.service.place_sports_parlay.assert_not_called()  # reading a picture never buys anything
         self.assertEqual(self.bot._pending_bet["kind"], "parlay")
+
+    def test_caption_intent_and_slip_price(self):
+        self.assertTrue(_caption_wants_bet("bet $10 with this parlay"))
+        self.assertTrue(_caption_wants_bet("Put 10 on this"))
+        self.assertFalse(_caption_wants_bet("$10"))
+        self.assertFalse(_caption_wants_bet("what would a $10 bet pay"))
+        self.assertFalse(_caption_wants_bet(""))
+        self.assertAlmostEqual(_slip_price("+478"), 100 / 578)
+        self.assertAlmostEqual(_slip_price("-150"), 0.6)
+        self.assertIsNone(_slip_price(None))
+        self.assertIsNone(_slip_price("n/a"))
+
+    def _full_match(self, unmatched=()):
+        return {"ok": True, "slip": {"game": "PHI @ JAC", "odds": "+478"},
+                "matched": [{"pick": "A", "ask": 0.8, "ticker": "T1", "side": "yes"},
+                            {"pick": "B", "ask": 0.7, "ticker": "T2", "side": "no"}],
+                "unmatched": list(unmatched), "game": "PHI @ JAC"}
+
+    async def test_bet_caption_with_every_leg_matched_places_the_parlay_without_confirm(self):
+        self.service.read_sports_slip = MagicMock(return_value=self._full_match())
+        update = self._photo_update("bet $10 with this parlay")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        legs, amount, max_price, anchor = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual((amount, max_price), (10.0, None))
+        self.assertAlmostEqual(anchor, 100 / 578)  # the slip's own price is an acceptable ceiling
+        place_args = self.service.place_sports_parlay.call_args.args
+        self.assertEqual((place_args[0], place_args[1], place_args[2]), (legs, 5.0, 0.25))  # plan's stake and ceiling
+        texts = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any(t.startswith("Placing $5.00") for t in texts))
+        self.assertIn("Parlay placed", texts[-1])
+        self.assertIsNone(self.bot._pending_bet)
+
+    async def test_bet_caption_with_missing_legs_previews_instead_of_placing(self):
+        self.service.read_sports_slip = MagicMock(return_value=self._full_match(
+            unmatched=[{"text": "C", "reason": "not listed"}]))
+        update = self._photo_update("bet $10 on this")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIsNone(self.service.quote_sports_parlay.call_args.args[3])
+        self.assertIn("didn't place it", update.message.reply_text.await_args.args[0])
+        self.assertIsNotNone(self.bot._pending_bet)
+
+    async def test_plain_caption_still_only_previews(self):
+        self.service.read_sports_slip = MagicMock(return_value=self._full_match())
+        update = self._photo_update("10")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIn("Parlay preview", update.message.reply_text.await_args.args[0])
 
     async def test_photo_with_too_few_matches_or_a_read_error_leaves_nothing_pending(self):
         self.service.read_sports_slip = MagicMock(return_value={
@@ -809,6 +868,10 @@ class PlainTextTests(unittest.IsolatedAsyncioTestCase):
         for name in ("games", "bet", "parlay", "stack", "props", "status", "positions", "confirm", "cancel"):
             setattr(self.bot, f"_cmd_{name}", self._recorder(name))
         self.bot._cmd_kalshi_sports = self._recorder("sports")
+
+        async def confirm_pending(update, stake=None):
+            self.calls.append(("confirm", [] if stake is None else [stake]))
+        self.bot._confirm_pending = confirm_pending
         self.routes = []
         self.bot._route_text = MagicMock(side_effect=lambda text, pending: self.routes.pop(0))
 
@@ -876,6 +939,12 @@ class PlainTextTests(unittest.IsolatedAsyncioTestCase):
         self.routes = [_route(action="confirm")]
         await self.bot._on_text(self._update("sounds good, go for it"), self._ctx())
         self.assertEqual(self.calls, [("confirm", [])])
+
+    async def test_bet_an_amount_on_this_restates_the_stake_and_places(self):
+        self._wait("9-leg parlay, $2.00")
+        self.routes = [_route(action="confirm", amount=10.0)]
+        await self.bot._on_text(self._update("bet $10 on this parlay"), self._ctx())
+        self.assertEqual(self.calls, [("confirm", [10.0])])
 
     async def test_pause_and_kill_are_never_run_from_text(self):
         self.routes = [_route(action="control")]
