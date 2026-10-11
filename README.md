@@ -297,6 +297,8 @@ KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT=0.02
 KALSHI_SPORTS_USER_PARLAY_MAX_PCT=0.05
 # Most legs in a parlay you build with /parlay or /stack (same sport; 0-1 turns them off).
 KALSHI_SPORTS_USER_PARLAY_MAX_LEGS=10
+# Model that reads bet-slip screenshots sent to the Telegram bot (uses ANTHROPIC_API_KEY).
+KALSHI_SPORTS_SLIP_MODEL=claude-sonnet-4-6
 KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS=20
 KALSHI_SPORTS_HOLD_TO_SETTLEMENT=true
 KALSHI_SPORTS_STOP_LOSS=0
@@ -377,6 +379,10 @@ Nothing is bought until `/confirm` (or a trailing `now`, as in `/bet browns 5 no
 ### Same-game stacks (`/stack`)
 
 `/stack eagles jaguars legs 9 p 85 2` builds a same-game player-stat parlay like a sportsbook SGP (nine near-certain legs: low receptions, rushing and receiving yards, a passing floor, an alternate spread). For each player it picks the one Kalshi market whose mid price is closest to `p` (percent chance per leg, default 85), skipping one-sided or wide-spread markets, ranks players by closeness then trading volume, and adds one alternate-spread leg when it fits. Nine legs near 85% multiply to roughly +330. The trailing number is your stake; `max <cents>` sets the price ceiling. It then shows the same preview as `/parlay` and waits for `/confirm`. Spread markets are offered on both sides ("PHI don't win by over 3.5" is Eagles +3.5). Same-game legs are correlated, so the product of the legs' prices is only a guide. Up to `KALSHI_SPORTS_USER_PARLAY_MAX_LEGS` legs (default 10).
+
+### Copy a bet slip from a screenshot
+
+Send the Telegram bot a screenshot (photo or image file) of a bet slip, such as a sportsbook same-game parlay. Put your stake in the caption (`2`, or `2 max 30` for a 30-cent ceiling). Claude reads the legs (`ANTHROPIC_API_KEY`, model `KALSHI_SPORTS_SLIP_MODEL`, one image call per picture), and the bot maps each onto Kalshi **exactly**: same player, stat and number, or same team and spread line (Team +16.5 = the opponent does *not* win by over 16.5). It replies with what matched and what didn't, with Kalshi's nearest alternatives for near misses (for example "Kalshi doesn't list 15+ rushing yards for them, it has 20+, 25+..."). Nothing is silently swapped for a different bet. Unders, totals and legs Kalshi doesn't offer are reported as not matched. If at least two legs matched it shows the usual parlay preview for those legs and waits for `/confirm`; a note says when it is a shorter parlay than your slip. Text inside the picture is only read as data and can't trigger anything. Parlays are placed only after you send `/confirm`.
 
 ### Parlays (Kalshi combos)
 

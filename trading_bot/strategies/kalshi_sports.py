@@ -86,6 +86,22 @@ FOOTBALL_PROP_SERIES = (
 _SPREAD_SERIES = "KXNFLSPREAD"
 
 
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+_TITLE_THRESHOLD = re.compile(r"^(\d+(?:\.\d+)?)\+\s*(.*)$")
+_SPREAD_TITLE = re.compile(r"^(.*?) wins by over ([\d.]+)", re.IGNORECASE)
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Lowercase ASCII words of a name without punctuation or Jr./III suffixes."""
+    import unicodedata
+    plain = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
+    return [t for t in re.findall(r"[a-z]+", plain) if t not in _NAME_SUFFIXES]
+
+
+def _nickname(team: str) -> str:
+    words = _name_tokens(team)
+    return words[-1] if words else ""
+
 def _prop_key(ticker: str, side: str) -> str:
     return f"{ticker}#{side}"
 
@@ -1316,6 +1332,121 @@ class KalshiSportsStrategy:
             "ok": True, "game": game, "legs": [{"ticker": p["ticker"], "side": p["side"]} for p in chosen],
             "rows": chosen, "reference": reference, "leg_prob": leg_prob,
         }
+
+    def match_slip_legs(self, now: datetime, slip: dict[str, Any]) -> dict[str, Any]:
+        """Map legs read from a bet-slip picture onto Kalshi markets, exactly or not at all.
+
+        A leg is only matched when Kalshi lists the same player, stat and threshold (or the same
+        team and spread line). Near misses are reported with what Kalshi does offer rather than
+        silently swapped for a different bet.
+        """
+        universe = self._load_props(now)
+        board = list(self.board_games(now))
+        # Narrow to the slip's game when both of its teams can be found on the board.
+        slip_words = {w for w in _name_tokens(str(slip.get("game") or "")) if len(w) > 3}
+        game_label = None
+        best_hits = 1
+        for game in board:
+            hits = sum(1 for w in slip_words if w in game["game"].lower())
+            if hits > best_hits:
+                best_hits, game_label = hits, game["game"]
+        props = [p for p in universe.values() if game_label is None or p["game"] == game_label]
+
+        matched: list[dict[str, Any]] = []
+        unmatched: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(leg: dict[str, Any], prop: dict[str, Any]) -> None:
+            key = (prop["ticker"], prop["side"])
+            if key in seen:
+                return
+            seen.add(key)
+            if prop["kind"] != "moneyline":  # game winners are priced from the board
+                self.props[_prop_key(prop["ticker"], prop["side"])] = prop
+            matched.append({
+                "text": leg["text"], "ticker": prop["ticker"], "side": prop["side"],
+                "pick": prop["stat"] if prop["kind"] in ("spread", "moneyline") else f"{prop['player']} {prop['stat']}",
+                "ask": prop["yes_ask"],
+            })
+
+        for leg in slip.get("legs", []):
+            text = leg.get("text") or leg.get("player") or leg.get("team") or "(unreadable leg)"
+            kind = leg.get("type")
+            if kind == "player_stat":
+                reason = self._match_stat_leg(leg, props, add)
+            elif kind == "spread":
+                reason = self._match_spread_leg(leg, props, add)
+            elif kind == "moneyline":
+                reason = self._match_moneyline_leg(leg, board, game_label, add)
+            else:
+                reason = "this kind of leg (totals and others) isn't offered here yet"
+            if reason:
+                unmatched.append({"text": text, "reason": reason})
+        return {"matched": matched, "unmatched": unmatched, "game": game_label}
+
+    def _match_stat_leg(self, leg: dict[str, Any], props: list[dict[str, Any]], add: Any) -> str:
+        player, family, threshold = leg.get("player"), leg.get("stat"), leg.get("threshold")
+        if not player or not family or threshold is None:
+            return "couldn't tell the player, stat and number"
+        if leg.get("direction") == "under":
+            return "unders aren't offered here (Kalshi's player markets are 'N or more')"
+        wanted = _name_tokens(player)
+        pool = [p for p in props if p["kind"] == "stat" and wanted and set(wanted) <= set(_name_tokens(p["player"]))]
+        if not pool:
+            return "no Kalshi market for that player in this game (props appear closer to kickoff)"
+        same_stat: list[tuple[float, dict[str, Any]]] = []
+        for prop in pool:
+            m = _TITLE_THRESHOLD.match(prop["stat"])
+            if m and m.group(2).strip().lower() == family:
+                same_stat.append((float(m.group(1)), prop))
+        if not same_stat:
+            return f"Kalshi has no {family} market for them"
+        for value, prop in same_stat:
+            if abs(value - float(threshold)) < 1e-9:
+                add(leg, prop)
+                return ""
+        have = ", ".join(f"{v:g}+" for v, _ in sorted(same_stat))
+        return f"Kalshi doesn't list {threshold:g}+ {family} for them (it has {have})"
+
+    def _match_spread_leg(self, leg: dict[str, Any], props: list[dict[str, Any]], add: Any) -> str:
+        team, line = leg.get("team"), leg.get("line")
+        if not team or line is None:
+            return "couldn't tell the team and spread"
+        nick = _nickname(team)
+        margin = abs(float(line))
+        underdog = float(line) > 0
+        offered: list[float] = []
+        for prop in props:
+            if prop["kind"] != "spread":
+                continue
+            m = _SPREAD_TITLE.match(prop["title"])
+            if not m:
+                continue
+            is_team = nick in _name_tokens(m.group(1))
+            # Team +N: the opponent must not win by over N (NO on the opponent's market).
+            # Team -N: the team must win by over N (YES on its own market).
+            if underdog and not is_team and prop["side"] == "no" or not underdog and is_team and prop["side"] == "yes":
+                offered.append(float(m.group(2)))
+                if abs(float(m.group(2)) - margin) < 1e-9:
+                    add(leg, prop)
+                    return ""
+        have = ", ".join(f"{v:g}" for v in sorted(set(offered))[:12])
+        return f"Kalshi doesn't list a {margin:g}-point spread for {team} (lines: {have or 'none'})"
+
+    def _match_moneyline_leg(self, leg: dict[str, Any], board: list[dict[str, Any]], game_label: str | None, add: Any) -> str:
+        nick = _nickname(str(leg.get("team") or ""))
+        for game in board:
+            if game_label is not None and game["game"] != game_label:
+                continue
+            for option in game["options"]:
+                if nick and nick in _name_tokens(option["label"]):
+                    add(leg, {
+                        "ticker": option["ticker"], "side": option["side"], "kind": "moneyline", "player": option["label"],
+                        "stat": f"{option['label']} to win", "yes_ask": option["ask"], "title": option["label"],
+                        "event_ticker": option["event_ticker"], "game": game["game"], "start": game["start"],
+                    })
+                    return ""
+        return "no Kalshi winner market found for that team"
 
     # ------------------------------------------------------------------
     # Hand-built parlays (Telegram /parlay): Kalshi combo + request for quote

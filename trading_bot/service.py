@@ -37,6 +37,7 @@ from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
 from trading_bot.strategies.options import OptionsStrategy
 from trading_bot.strategies.polymarket import PolymarketStrategy
 from trading_bot.strategies.kalshi_perpetuals import KalshiPerpetualsStrategy
+from trading_bot.integrations import slip_reader
 from trading_bot.strategies.kalshi_sports import KalshiSportsStrategy
 from trading_bot.clients_espn import EspnClient
 from trading_bot.clients_polymarket_sports import PolymarketSportsClient
@@ -593,6 +594,24 @@ class TradingBotService:
         if not self.config.kalshi_sports.enabled:
             return {"ok": False, "reason": "The sports strategy is disabled (KALSHI_SPORTS_ENABLED)."}
         return self.kalshi_sports_strategy.build_stack(datetime.now(self.config.timezone), query, legs, leg_prob)
+
+    def read_sports_slip(self, image: bytes, media_type: str) -> dict[str, Any]:
+        """Read a bet-slip screenshot and map its legs onto Kalshi markets; places nothing."""
+        cfg = self.config.kalshi_sports
+        if not cfg.enabled:
+            return {"ok": False, "reason": "The sports strategy is disabled (KALSHI_SPORTS_ENABLED)."}
+        try:
+            slip = slip_reader.read_slip(
+                image, media_type, api_key=self.config.trading_agents.api_key, model=cfg.slip_model,
+                timeout_seconds=60.0, logger=self.logger,
+            )
+        except RuntimeError as exc:
+            return {"ok": False, "reason": str(exc)}
+        return {"ok": True, "slip": slip, **self._match_sports_slip(slip)}
+
+    @_locked
+    def _match_sports_slip(self, slip: dict[str, Any]) -> dict[str, Any]:
+        return self.kalshi_sports_strategy.match_slip_legs(datetime.now(self.config.timezone), slip)
 
     def _sports_bet_blocker(self, state: PortfolioState) -> str | None:
         cfg = self.config.kalshi_sports

@@ -15,7 +15,9 @@ from trading_bot.telegram_bot import (
     _format_parlay_result,
     _parse_bet_args,
     _parse_parlay_args,
+    _parse_slip_caption,
     _parse_stack_args,
+    _format_slip_summary,
     _format_sports_picks,
 )
 
@@ -704,6 +706,62 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.bot._cmd_parlay(update, SimpleNamespace(args="p1 + p2 2".split()))
         legs = self.service.quote_sports_parlay.call_args.args[0]
         self.assertEqual([l["side"] for l in legs], ["no", "yes"])
+
+    def test_slip_caption_and_summary(self):
+        self.assertEqual(_parse_slip_caption("$5 max 30"), {"amount": 5.0, "max_price": 0.3})
+        self.assertEqual(_parse_slip_caption(""), {"amount": None, "max_price": None})
+        text = _format_slip_summary({
+            "slip": {"game": "PHI @ JAC", "odds": "+478"},
+            "matched": [{"pick": "Jalen Hurts 125+ passing yards", "ask": 0.85}],
+            "unmatched": [{"text": "Strange 25+ <Yards>", "reason": "Kalshi has 20+, 30+"}]})
+        self.assertIn("2 legs", text)
+        self.assertIn("(+478 at the book)", text)
+        self.assertIn("Jalen Hurts 125+ passing yards \u2014 85\u00a2", text)
+        self.assertIn("Strange 25+ &lt;Yards&gt;", text)
+
+    def _photo_update(self, caption="2", chat_id=123):
+        tg_file = SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"\x89PNGdata")))
+        photo = SimpleNamespace(get_file=AsyncMock(return_value=tg_file))
+        message = SimpleNamespace(photo=[photo, photo], document=None, caption=caption, reply_text=AsyncMock())
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id), message=message)
+
+    async def test_photo_of_a_slip_previews_the_matched_parlay(self):
+        self.service.read_sports_slip = MagicMock(return_value={
+            "ok": True, "slip": {"game": "PHI @ JAC", "odds": "+478"},
+            "matched": [{"pick": "A", "ask": 0.8, "ticker": "T1", "side": "yes"},
+                        {"pick": "B", "ask": 0.7, "ticker": "T2", "side": "no"}],
+            "unmatched": [{"text": "C 25+", "reason": "not listed"}], "game": "PHI @ JAC"})
+        update = self._photo_update("2 max 30")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        data, media_type = self.service.read_sports_slip.call_args.args
+        self.assertEqual((data, media_type), (b"\x89PNGdata", "image/jpeg"))
+        legs, amount, max_price = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual(legs, [{"ticker": "T1", "side": "yes"}, {"ticker": "T2", "side": "no"}])
+        self.assertEqual((amount, max_price), (2.0, 0.3))
+        texts = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any("Read your slip" in t for t in texts))
+        self.assertIn("only the 2 matched legs", texts[-1])
+        self.assertIn("Parlay preview", texts[-1])
+        self.service.place_sports_parlay.assert_not_called()  # reading a picture never buys anything
+        self.assertEqual(self.bot._pending_bet["kind"], "parlay")
+
+    async def test_photo_with_too_few_matches_or_a_read_error_leaves_nothing_pending(self):
+        self.service.read_sports_slip = MagicMock(return_value={
+            "ok": True, "slip": {}, "matched": [{"pick": "A", "ask": 0.8, "ticker": "T1", "side": "yes"}], "unmatched": []})
+        update = self._photo_update()
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.assertIn("Fewer than 2", update.message.reply_text.await_args.args[0])
+        self.service.quote_sports_parlay.assert_not_called()
+        self.service.read_sports_slip.return_value = {"ok": False, "reason": "needs ANTHROPIC_API_KEY"}
+        update = self._photo_update()
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.assertIn("needs ANTHROPIC_API_KEY", update.message.reply_text.await_args.args[0])
+        self.assertIsNone(self.bot._pending_bet)
+
+    async def test_photo_from_another_chat_is_ignored(self):
+        self.service.read_sports_slip = MagicMock()
+        await self.bot._on_photo(self._photo_update(chat_id=999), SimpleNamespace(args=[]))
+        self.service.read_sports_slip.assert_not_called()
 
     async def test_unknown_prop_number_and_empty_search(self):
         self.service.list_sports_props = MagicMock(return_value=[])

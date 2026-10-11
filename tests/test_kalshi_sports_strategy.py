@@ -1379,3 +1379,87 @@ class StackTests(unittest.TestCase):
                                       legs=built["legs"], amount=10.0, max_price=None, now=_NOW)
         self.assertFalse(out["ok"])
         self.assertIn("2 to 3 legs", out["reason"])
+
+
+class SlipMatchTests(unittest.TestCase):
+    """Legs read from a screenshot are matched exactly or reported, never silently swapped."""
+
+    _setup = ParlayRfqTests._setup
+    _state = ParlayRfqTests._state
+    _stack_setup = StackTests._stack_setup
+    COMBO = ParlayRfqTests.COMBO
+
+    def _slip(self, *legs, game="Buffalo Bills @ Baltimore Ravens"):
+        return {"game": game, "odds": "+478", "legs": [dict({"type": "player_stat", "player": None, "team": None,
+                "stat": None, "threshold": None, "line": None, "direction": None, "text": "leg"}, **l) for l in legs]}
+
+    def test_exact_player_stats_match_and_names_ignore_suffixes_and_accents(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"player": "Josh Allen", "stat": "passing yards", "threshold": 200, "text": "Allen 200+"},
+            {"player": "Lamar Jackson Jr.", "stat": "passing yards", "threshold": 150, "text": "Jackson 150+"},
+            {"player": "Keon Coleman", "stat": "receptions", "threshold": 2, "text": "Coleman 2+"},
+        ))
+        self.assertEqual(out["unmatched"], [])
+        self.assertEqual([m["pick"] for m in out["matched"]], [
+            "Josh Allen 200+ passing yards", "Lamar Jackson 150+ passing yards", "Keon Coleman 2+ receptions"])
+        self.assertEqual(out["game"], "Buffalo Bills @ Baltimore Ravens")
+        self.assertTrue(all(m["side"] == "yes" for m in out["matched"]))
+
+    def test_a_missing_threshold_is_reported_with_what_kalshi_has(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"player": "Josh Allen", "stat": "passing yards", "threshold": 225, "text": "Allen 225+"}))
+        self.assertEqual(out["matched"], [])
+        self.assertIn("200+, 250+", out["unmatched"][0]["reason"])
+
+    def test_unknown_player_wrong_stat_under_and_total_are_unmatched(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"player": "Nobody Special", "stat": "receptions", "threshold": 2, "text": "nobody"},
+            {"player": "Josh Allen", "stat": "rushing yards", "threshold": 20, "text": "allen rush"},
+            {"player": "Josh Allen", "stat": "passing yards", "threshold": 200, "direction": "under", "text": "allen under"},
+            {"type": "total", "line": 45.5, "text": "over 45.5"},
+        ))
+        self.assertEqual(out["matched"], [])
+        reasons = [u["reason"] for u in out["unmatched"]]
+        self.assertIn("no Kalshi market for that player", reasons[0])
+        self.assertIn("no rushing yards market", reasons[1])
+        self.assertIn("unders aren't offered", reasons[2])
+        self.assertIn("isn't offered here", reasons[3])
+
+    def test_spreads_map_underdog_to_the_opponents_no_and_favourite_to_yes(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"type": "spread", "team": "Baltimore Ravens", "line": 9.5, "text": "Ravens +9.5"},
+            {"type": "spread", "team": "Buffalo Bills", "line": -9.5, "text": "Bills -9.5"},
+        ))
+        self.assertEqual(out["unmatched"], [])
+        first, second = out["matched"]
+        # Ravens +9.5 = the Bills do NOT win by over 9.5
+        self.assertEqual((first["ticker"].rsplit("-", 1)[-1], first["side"]), ("BUF10", "no"))
+        # (the Ravens market is a different ticker: Bills -9.5 = YES on 'BUF wins by over 9.5')
+        self.assertEqual((second["ticker"].rsplit("-", 1)[-1], second["side"]), ("BUF10", "yes"))
+
+    def test_unlisted_spread_line_is_reported(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip({"type": "spread", "team": "Baltimore Ravens", "line": 16.5, "text": "+16.5"}))
+        self.assertIn("lines: 9.5", out["unmatched"][0]["reason"])
+
+    def test_moneyline_leg_uses_the_board(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip({"type": "moneyline", "team": "Baltimore Ravens", "text": "Ravens ML"}))
+        self.assertEqual(len(out["matched"]), 1)
+        self.assertEqual(out["matched"][0]["pick"], "Baltimore Ravens to win")
+
+    def test_duplicates_collapse_and_matches_feed_the_parlay_quote(self):
+        strat, _ = self._stack_setup()
+        leg = {"player": "Josh Allen", "stat": "passing yards", "threshold": 200, "text": "Allen 200+"}
+        out = strat.match_slip_legs(_NOW, self._slip(
+            leg, dict(leg), {"player": "Lamar Jackson", "stat": "passing yards", "threshold": 150, "text": "Jackson"}))
+        self.assertEqual(len(out["matched"]), 2)
+        legs = [{"ticker": m["ticker"], "side": m["side"]} for m in out["matched"]]
+        plan = strat.quote_user_parlay(self._state(), PaperBroker(True, logging.getLogger("t")),
+                                       legs=legs, amount=10.0, max_price=None, now=_NOW)
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(len(plan["legs"]), 2)
