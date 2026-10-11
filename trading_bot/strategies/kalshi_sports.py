@@ -654,7 +654,8 @@ class KalshiSportsStrategy:
                     continue
                 key = f"{game.league}:{game.game_id}"
                 current = best_per_game.get(key)
-                if current is None or evaluation["edge"] > current["edge"]:
+                rank = (not evaluation.get("action"), evaluation["edge"])   # a real edge beats an action pick
+                if current is None or rank > (not current.get("action"), current["edge"]):
                     best_per_game[key] = evaluation
 
         # Both team markets of a game yield the same pick; keep the better one for display.
@@ -664,7 +665,7 @@ class KalshiSportsStrategy:
             if key not in unique or pred["edge"] > unique[key]["edge"]:
                 unique[key] = pred
         result["predictions"] = sorted(unique.values(), key=lambda p: p["edge"], reverse=True)
-        return sorted(best_per_game.values(), key=lambda c: c["edge"], reverse=True)
+        return sorted(best_per_game.values(), key=lambda c: (not c.get("action"), c["edge"]), reverse=True)
 
     def _evaluate_market(
         self,
@@ -752,18 +753,34 @@ class KalshiSportsStrategy:
             options.append((no_decision, other, _kalshi_size(market, "no_ask_size")))
 
         if not options:
-            # Report the better-valued side even though it isn't a bet, for the picks list.
-            best_p, best_ask, best_side, best_team = max(
-                [(post.p, yes_ask, "yes", backed), (1.0 - post.p, no_ask, "no", other)],
-                key=lambda o: o[0] - (o[1] or 1.0),
+            # Nothing is mispriced. Pick the best-value side anyway (highest win probability
+            # relative to its all-in cost); the strategy may place it as a small "action pick".
+            sides = [(post.p, yes_ask, "yes", backed, "yes_ask_size"),
+                     (1.0 - post.p, no_ask, "no", other, "no_ask_size")]
+            priced = [o for o in sides if o[1] > 0]
+            best_p, best_ask, best_side, best_team, size_key = max(
+                priced or sides,
+                key=lambda o: o[0] - o[1] - kalshi_fee(o[1], cfg.fee_rate, mult) if o[1] > 0 else -1.0,
             )
+            fee = kalshi_fee(best_ask, cfg.fee_rate, mult)
+            net = best_p - best_ask - fee if best_ask > 0 else 0.0
             prediction.update({"pick": best_team.display_name, "side": best_side,
                                "edge": round(best_p - best_ask, 4) if best_ask else 0.0,
-                               "net_edge": None})
+                               "net_edge": None, "action_value": round(net, 4)})
             result["predictions"].append(prediction)
             self._log_skip(result, ticker, "no_edge_after_fees", game=game.label,
                            p=round(post.p, 4), sd=round(post.sd, 4))
-            return None
+            if not cfg.action_bets or best_ask <= 0 or best_ask >= 1 or best_p < cfg.action_min_win_prob:
+                return None
+            decision = BetDecision(
+                side=best_side, price=best_ask, p=best_p, sd=max(post.sd, 0.012), fee=fee, net_edge=net,
+                stake_fraction=0.0, confidence=0.0,
+            )
+            return {
+                "market": market, "game": game, "decision": decision, "posterior": post,
+                "pick": best_team.display_name, "depth": _kalshi_size(market, size_key),
+                "edge": net, "action": True, "prediction": prediction,
+            }
 
         decision, pick_team, depth = max(options, key=lambda o: o[0].stake_fraction * o[0].net_edge)
         prediction.update({
@@ -783,6 +800,8 @@ class KalshiSportsStrategy:
             "pick": pick_team.display_name,
             "depth": depth,
             "edge": decision.stake_fraction * decision.net_edge,  # expected growth: ranking key
+            "action": False,
+            "prediction": prediction,
         }
 
     def _suggest_parlays(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -794,7 +813,7 @@ class KalshiSportsStrategy:
         in a parlay unless Kalshi's quoted parlay price is below ``max_price``.
         """
         cfg = self.config
-        legs = sorted(candidates, key=lambda c: c["edge"], reverse=True)
+        legs = sorted((c for c in candidates if not c.get("action")), key=lambda c: c["edge"], reverse=True)
         suggestions: list[dict[str, Any]] = []
         for size in range(2, min(cfg.parlay_max_legs, len(legs)) + 1):
             chosen = legs[:size]
@@ -878,7 +897,7 @@ class KalshiSportsStrategy:
         # proportionally instead of the first ones eating the whole budget.
         slots = max(0, cfg.max_open_bets - len(open_positions))
         plan: list[tuple[dict[str, Any], float]] = []
-        for cand in candidates:
+        for cand in (c for c in candidates if not c.get("action")):
             market = cand["market"]
             ticker = str(market.get("ticker", ""))
             event_ticker = str(market.get("event_ticker", ""))
@@ -935,6 +954,109 @@ class KalshiSportsStrategy:
                     "sources": cand["posterior"].to_dict()["sources"],
                 },
             })
+
+        if cfg.action_bets:
+            self._place_action_picks(
+                state, broker, [c for c in candidates if c.get("action")], now, result,
+                equity=equity, scale=scale, bucket=bucket, exposure=exposure, exposure_cap=exposure_cap,
+                held_events=held_events, open_positions=open_positions,
+            )
+
+    def _place_action_picks(
+        self,
+        state: PortfolioState,
+        broker: PaperBroker,
+        picks: list[dict[str, Any]],
+        now: datetime,
+        result: dict[str, Any],
+        *,
+        equity: float,
+        scale: float,
+        bucket: str | None,
+        exposure: float,
+        exposure_cap: float,
+        held_events: set[str],
+        open_positions: list[Any],
+    ) -> None:
+        """Small bets on the best-value side of the best games when nothing is mispriced.
+
+        These have no edge after Kalshi's fee, so each costs a little in expectation. They
+        are limited per scan and per day, sized as a small share of the bankroll, and ranked
+        by value (win probability against all-in cost), so favourites and underdogs are chosen
+        by the numbers, not by a rule.
+        """
+        cfg = self.config
+        allowance = min(cfg.action_max_per_scan, max(0, cfg.action_bets_per_day - self.session.actions))
+        if allowance <= 0 or not picks:
+            return
+        placed = 0
+        ranked = sorted(picks, key=lambda c: c["edge"], reverse=True)
+        # Don't let the ranking turn into "always the underdog": at most half of the day's action
+        # picks may back an underdog (win prob < 50%), as long as a favourite is available.
+        favourites_available = any(c["decision"].p >= 0.5 for c in ranked)
+        dog_cap = math.ceil(cfg.action_bets_per_day / 2)
+        for cand in ranked:
+            if placed >= allowance or len(open_positions) >= cfg.max_open_bets:
+                break
+            market = cand["market"]
+            event_ticker = str(market.get("event_ticker", ""))
+            if event_ticker and event_ticker in held_events:
+                continue
+            decision = cand["decision"]
+            is_dog = decision.p < 0.5
+            if is_dog and favourites_available and self.session.dogs >= dog_cap:
+                self._log_skip(result, str(market.get("ticker", "")), "underdog_cap_for_today")
+                continue
+            notional = min(
+                equity * scale * cfg.action_stake_pct,
+                equity * cfg.max_position_pct,
+                max(0.0, exposure_cap - exposure),
+            )
+            if cand["depth"] > 0:
+                notional = min(notional, cand["depth"] * decision.price)
+            if notional < cfg.min_trade_usd:
+                self._log_skip(result, str(market.get("ticker", "")), "action_stake_below_min",
+                               notional=round(notional, 2))
+                continue
+            position = self._place_bet(state, broker, cand, notional, now, bucket)
+            if position is None:
+                continue
+            position.meta["action_bet"] = True
+            exposure += position.quantity * position.entry_price
+            open_positions.append(position)
+            held_events.add(event_ticker)
+            self.session.record_action(underdog=is_dog)
+            placed += 1
+            self._mark_placed(result, cand, decision)
+            result["buys"].append(position.symbol)
+            result["decisions"].append({
+                "strategy": "kalshi_sports",
+                "symbol": position.symbol,
+                "action": "buy",
+                "reason": "action_pick",
+                "signals": {
+                    "game": cand["game"].label,
+                    "pick": cand["pick"],
+                    "side": decision.side,
+                    "model_prob": round(decision.p, 4),
+                    "ask": round(decision.price, 4),
+                    "fee": round(decision.fee, 4),
+                    "expected_edge_after_fees": round(decision.net_edge, 4),
+                    "notional": round(position.quantity * position.entry_price, 2),
+                },
+            })
+
+    @staticmethod
+    def _mark_placed(result: dict[str, Any], cand: dict[str, Any], decision: BetDecision) -> None:
+        """Show an action pick that was actually placed as a bet in the picks list."""
+        pred = cand["prediction"]
+        pred.update({"net_edge": round(decision.net_edge, 4), "action": True,
+                     "pick": cand["pick"], "side": decision.side})
+        for i, existing in enumerate(result["predictions"]):
+            if (existing["game"], existing["start"], existing["league"]) == (
+                pred["game"], pred["start"], pred["league"]
+            ):
+                result["predictions"][i] = pred
 
     def _place_bet(
         self,
