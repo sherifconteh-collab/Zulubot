@@ -4,7 +4,7 @@ A multi-strategy paper-trading bot with a **Kalshi sports-betting engine**, cont
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0 or commercial](https://img.shields.io/badge/License-AGPL--3.0_or_commercial-blue.svg)](LICENSE)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
 
 > ### ⚠️ Read this first
@@ -261,4 +261,9 @@ See [SECURITY.md](SECURITY.md) for what the project protects, the CI controls, t
 
 ## License
 
-[Apache License 2.0](LICENSE). Copyright 2026 sherifconteh-collab. See [NOTICE](NOTICE).
+Dual-licensed. See [LICENSE](LICENSE) for the full terms.
+
+- **Open source:** [GNU AGPL v3](LICENSES/AGPL-3.0-only.txt). You may use, modify and distribute Zulubot under the AGPL. If you run a modified version as a network service, you must make your modifications available under the same license.
+- **Commercial license** (Conteh Consulting LLC) for organizations that can't accept the AGPL's copyleft terms. Contact contehconsulting@gmail.com.
+
+By contributing you agree to the [Contributor License Agreement](CLA.md). Signing is automated: the CLA bot (see [`.github/workflows/cla.yml`](.github/workflows/cla.yml)) asks you on your first pull request. Copyright (c) 2026 Conteh Consulting LLC. See [NOTICE](NOTICE).
