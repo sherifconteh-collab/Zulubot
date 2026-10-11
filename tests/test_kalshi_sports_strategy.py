@@ -776,3 +776,150 @@ class OrderBookTests(unittest.TestCase):
         yes_ask, no_ask = strat._get_market_prices("X")
         self.assertAlmostEqual(yes_ask, 0.45)
         self.assertAlmostEqual(no_ask, 0.57)
+
+
+class UserBetTests(unittest.TestCase):
+    """Bets chosen by hand in Telegram: board, quote and placement."""
+
+    def _board(self, **cfg):
+        game = _game(home_moneyline=-110.0, away_moneyline=-110.0)
+        markets = [_market("Baltimore", yes_ask=0.52, no_ask=0.50), _market("Buffalo", yes_ask=0.50, no_ask=0.52)]
+        strat, kalshi = _strategy(_config(**cfg), [game], markets)
+        kalshi.get_market.side_effect = lambda t: next(m for m in markets if m["ticker"] == t)
+        games = strat.refresh_board(_NOW)
+        return strat, kalshi, games, markets
+
+    def _bet(self, strat, ticker, side="yes", amount=5.0, cash=1000.0, max_ask=None, state=None):
+        state = state or PortfolioState(cash=cash)
+        broker = PaperBroker(True, logging.getLogger("test_kalshi_sports.user"))
+        return state, strat.place_user_bet(state, broker, ticker=ticker, side=side, amount=amount, now=_NOW, max_ask=max_ask)
+
+    def test_board_lists_each_team_once_with_cheapest_route(self):
+        _, _, games, _ = self._board()
+        self.assertEqual(len(games), 1)
+        options = {o["label"]: o for o in games[0]["options"]}
+        self.assertEqual(set(options), {"Baltimore Ravens", "Buffalo Bills"})
+        # Baltimore: YES 0.52 on its own market vs NO 0.52 on Buffalo's market: same price either way
+        self.assertAlmostEqual(options["Baltimore Ravens"]["ask"], 0.52)
+        self.assertIsNotNone(options["Baltimore Ravens"]["p"])
+        self.assertGreater(options["Baltimore Ravens"]["fee"], 0)
+
+    def test_board_includes_games_without_a_model_view(self):
+        game = _game(home_moneyline=None, away_moneyline=None)
+        strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.52, no_ask=0.50)])
+        games = strat.refresh_board(_NOW)
+        self.assertEqual(len(games), 1)
+        self.assertTrue(all(o["p"] is None for o in games[0]["options"]))
+
+    def test_started_games_leave_the_board(self):
+        strat, _, _, _ = self._board()
+        self.assertEqual(strat.board_games(_NOW + timedelta(hours=6)), [])
+
+    def test_paper_bet_is_booked_with_user_flag(self):
+        strat, _, games, _ = self._board()
+        option = next(o for o in games[0]["options"] if o["label"] == "Baltimore Ravens")
+        state, out = self._bet(strat, option["ticker"], option["side"], amount=50.0)
+        self.assertTrue(out["ok"], out)
+        position = state.positions[out["symbol"]]
+        self.assertTrue(position.meta["user_bet"])
+        self.assertEqual(position.meta["pick"], "Baltimore Ravens")
+        self.assertLessEqual(out["spent"], 50.0 + 1e-6)
+        self.assertGreater(out["spent"], 45.0)
+
+    def test_default_stake_is_a_share_of_the_bankroll(self):
+        strat, _, games, _ = self._board()
+        ticker = games[0]["options"][0]["ticker"]
+        state, out = self._bet(strat, ticker, games[0]["options"][0]["side"], amount=None, cash=1000.0)
+        self.assertTrue(out["ok"], out)
+        self.assertAlmostEqual(out["stake"], 50.0)  # 5% default
+
+    def test_over_the_cap_is_refused(self):
+        strat, _, games, _ = self._board()
+        option = games[0]["options"][0]
+        state, out = self._bet(strat, option["ticker"], option["side"], amount=300.0, cash=1000.0)
+        self.assertFalse(out["ok"])
+        self.assertIn("per-bet limit", out["reason"])
+        self.assertEqual(state.positions, {})
+
+    def test_below_minimum_is_refused(self):
+        strat, _, games, _ = self._board()
+        option = games[0]["options"][0]
+        _, out = self._bet(strat, option["ticker"], option["side"], amount=0.5)
+        self.assertFalse(out["ok"])
+        self.assertIn("Minimum", out["reason"])
+
+    def test_one_bet_per_game(self):
+        strat, _, games, _ = self._board()
+        a, b = games[0]["options"]
+        state, first = self._bet(strat, a["ticker"], a["side"], amount=20.0)
+        self.assertTrue(first["ok"])
+        _, second = self._bet(strat, b["ticker"], b["side"], amount=20.0, state=state)
+        self.assertFalse(second["ok"])
+        self.assertIn("already have a bet", second["reason"])
+
+    def test_closed_market_and_started_game_are_refused(self):
+        strat, kalshi, games, markets = self._board()
+        option = games[0]["options"][0]
+        for m in markets:
+            m["status"] = "closed"
+        _, out = self._bet(strat, option["ticker"], option["side"])
+        self.assertFalse(out["ok"])
+        self.assertIn("closed", out["reason"])
+        for m in markets:
+            m["status"] = "active"
+        state = PortfolioState(cash=1000.0)
+        late = strat.quote_user_bet(
+            state, PaperBroker(True, logging.getLogger("x")), ticker=option["ticker"],
+            side=option["side"], amount=5.0, now=_NOW + timedelta(hours=6),
+        )
+        self.assertFalse(late["ok"])
+        self.assertIn("started", late["reason"])
+
+    def test_unknown_ticker_asks_for_refresh(self):
+        strat, _, _, _ = self._board()
+        _, out = self._bet(strat, "NOPE", "yes")
+        self.assertFalse(out["ok"])
+        self.assertIn("/games", out["reason"])
+
+    def test_price_move_beyond_agreed_ask_is_refused(self):
+        strat, _, games, markets = self._board()
+        option = games[0]["options"][0]
+        market = next(m for m in markets if m["ticker"] == option["ticker"])
+        market[f"{option['side']}_ask_dollars"] = str(option["ask"] + 0.05)
+        state, out = self._bet(strat, option["ticker"], option["side"], max_ask=option["ask"] + 0.02)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out.get("moved"))
+        self.assertEqual(state.positions, {})
+
+    def test_live_bet_places_ioc_order_and_books_only_fills(self):
+        strat, kalshi, games, _ = self._board()
+        strat.live_trading_enabled = True
+        kalshi.place_order.return_value = {"order": {"order_id": "o1", "fill_count": 4}}
+        option = games[0]["options"][0]
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        _, out = self._bet(strat, option["ticker"], option["side"], amount=10.0, state=state)
+        self.assertTrue(out["ok"], out)
+        kwargs = kalshi.place_order.call_args.kwargs
+        self.assertEqual(kwargs["time_in_force"], "immediate_or_cancel")
+        self.assertEqual(kwargs["action"], "buy")
+        self.assertEqual(out["filled"], 4)
+        self.assertEqual(state.positions[out["symbol"]].meta["kalshi_order_id"], "o1")
+        self.assertTrue(out["live"])
+
+    def test_live_unfilled_order_books_nothing(self):
+        strat, kalshi, games, _ = self._board()
+        strat.live_trading_enabled = True
+        kalshi.place_order.return_value = {"order": {"order_id": "o2", "fill_count": 0}}
+        option = games[0]["options"][0]
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        _, out = self._bet(strat, option["ticker"], option["side"], amount=10.0, state=state)
+        self.assertFalse(out["ok"])
+        self.assertEqual(state.positions, {})
+
+    def test_scan_still_blocks_a_second_bet_on_a_hand_picked_game(self):
+        strat, _, games, _ = self._board()
+        option = games[0]["options"][0]
+        state, out = self._bet(strat, option["ticker"], option["side"], amount=20.0)
+        self.assertTrue(out["ok"])
+        _, _, result = _run(strat, state=state)
+        self.assertEqual(result["buys"], [])

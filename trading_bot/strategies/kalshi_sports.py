@@ -58,6 +58,7 @@ from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState
 from trading_bot.risk import RiskManager
 from trading_bot.sports_model import (
+    BetDecision,
     Signal,
     DailySession,
     SourceCalibration,
@@ -358,6 +359,17 @@ class _Label:
         self.display_name = name
 
 
+class _BoardGame:
+    """The few game fields ``_place_bet`` records, for bets chosen from the board."""
+
+    odds_provider = ""
+
+    def __init__(self, league: str, label: str, start_time: datetime) -> None:
+        self.league = league
+        self.label = label
+        self.start_time = start_time
+
+
 class KalshiSportsStrategy:
     """Bets on Kalshi game-winner markets using ESPN schedule, odds and projections."""
 
@@ -383,6 +395,8 @@ class KalshiSportsStrategy:
         )
         self.logger = logger.getChild("strategy.kalshi_sports")
         self.live_trading_enabled = live_trading_enabled
+        # ticker -> every matched market from the last scan (for hand-picked bets).
+        self.board: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Entry point
@@ -526,6 +540,7 @@ class KalshiSportsStrategy:
     def _build_candidates(self, now: datetime, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Score every matched market; return tradeable candidates (best edge per game)."""
         best_per_game: dict[str, dict[str, Any]] = {}
+        self.board = {}
 
         for spec, series_list in self._league_specs():
             try:
@@ -615,6 +630,36 @@ class KalshiSportsStrategy:
     ) -> dict[str, Any] | None:
         cfg = self.config
         ticker = str(market.get("ticker", ""))
+
+        # Display names for the two sides of the contract. With draws possible, NO on
+        # "X wins" means "X doesn't win", not "the other team wins".
+        if team_side == "draw":
+            backed, other = _Label("Draw"), _Label("No draw")
+        else:
+            backed = game.home if team_side == "home" else game.away
+            other = _Label(f"Not {backed.display_name}") if game.three_way else (
+                game.away if team_side == "home" else game.home)
+        yes_ask = _kalshi_price(market, "yes_ask")
+        no_ask = _kalshi_price(market, "no_ask")
+        mult = float(market.get("_fee_multiplier", 1.0))
+        # Every matched market goes on the board for hand-picked bets, with or without a model view.
+        board_entry: dict[str, Any] = {
+            "ticker": ticker,
+            "event_ticker": str(market.get("event_ticker", "")),
+            "league": game.league,
+            "game": game.label,
+            "start": game.start_time.isoformat(),
+            "three_way": bool(game.three_way),
+            "yes_team": backed.display_name,
+            "no_team": other.display_name,
+            "yes_ask": yes_ask,
+            "no_ask": no_ask,
+            "fee_multiplier": mult,
+            "p_yes": None,
+            "sd": None,
+        }
+        self.board[ticker] = board_entry
+
         signals = build_signals(game, team_side, market, cfg, self.calibration)
         if cfg.require_market_signal and not any(s.name == "sportsbook" for s in signals):
             self._log_skip(result, ticker, "no_sportsbook_line", game=game.label)
@@ -629,17 +674,9 @@ class KalshiSportsStrategy:
             self._log_skip(result, ticker, "sources_conflict", game=game.label,
                            sources={s.name: round(s.p, 3) for s in post.used})
             return None
+        board_entry["p_yes"] = post.p
+        board_entry["sd"] = post.sd
 
-        # Display names for the two sides of the contract. With draws possible, NO on
-        # "X wins" means "X doesn't win", not "the other team wins".
-        if team_side == "draw":
-            backed, other = _Label("Draw"), _Label("No draw")
-        else:
-            backed = game.home if team_side == "home" else game.away
-            other = _Label(f"Not {backed.display_name}") if game.three_way else (
-                game.away if team_side == "home" else game.home)
-        yes_ask = _kalshi_price(market, "yes_ask")
-        no_ask = _kalshi_price(market, "no_ask")
         move = line_movement(game) if team_side in ("home", "away") else None
         if move is not None and team_side == "away":
             move = -move  # express movement toward the YES team
@@ -660,7 +697,6 @@ class KalshiSportsStrategy:
         }
 
         options = []
-        mult = float(market.get("_fee_multiplier", 1.0))
         yes_decision = evaluate_side(post, "yes", post.p, yes_ask, fee_rate=cfg.fee_rate,
                                      kelly_fraction=cfg.kelly_fraction, fee_multiplier=mult) if yes_ask > 0 else None
         no_decision = evaluate_side(post, "no", 1.0 - post.p, no_ask, fee_rate=cfg.fee_rate,
@@ -854,8 +890,10 @@ class KalshiSportsStrategy:
         notional: float,
         now: datetime,
         bucket: str | None,
+        quantity: int | None = None,
     ) -> Any | None:
         market, game, decision = cand["market"], cand["game"], cand["decision"]
+        posterior = cand.get("posterior")
         cfg_fee_rate = self.config.fee_rate
         side, ask = decision.side, decision.price
         ticker = str(market.get("ticker", ""))
@@ -868,7 +906,8 @@ class KalshiSportsStrategy:
         entry_price = ask if self.live_trading_enabled else ask + decision.fee
         if self.live_trading_enabled:
             notional = min(notional, broker.get_cash_balance(state, cash_bucket=_CASH_BUCKET) * 0.95)
-        quantity = math.floor(notional / entry_price)
+        if quantity is None:
+            quantity = math.floor(notional / entry_price)
         if quantity < 1:
             return None
         if not self.live_trading_enabled:
@@ -916,9 +955,11 @@ class KalshiSportsStrategy:
             "net_edge": round(decision.net_edge, 4),
             "ask": round(ask, 4),
             "fee": round(entry_price - ask, 4) if not self.live_trading_enabled else round(decision.fee, 4),
-            "sources": cand["posterior"].to_dict()["sources"],
+            "sources": posterior.to_dict()["sources"] if posterior is not None else {},
             "odds_provider": game.odds_provider,
         }
+        if cand.get("user_bet"):
+            meta["user_bet"] = True
         if order_id:
             meta["kalshi_order_id"] = order_id
         position = broker.open_position(
@@ -944,6 +985,185 @@ class KalshiSportsStrategy:
         )
 
         return position
+
+    # ------------------------------------------------------------------
+    # Hand-picked bets (Telegram /games, /bet, /confirm)
+    # ------------------------------------------------------------------
+
+    def refresh_board(self, now: datetime) -> list[dict[str, Any]]:
+        """Re-scan ESPN + Kalshi and return the bettable games (no bets are placed)."""
+        result: dict[str, Any] = {
+            "decisions": [], "predictions": [], "games_scanned": 0,
+            "markets_scanned": 0, "markets_matched": 0,
+        }
+        try:
+            self._build_candidates(now, result)
+        finally:
+            self.calibration.save()
+        return self.board_games(now)
+
+    def board_games(self, now: datetime) -> list[dict[str, Any]]:
+        """Group the last scan's markets into games with one option per team (or draw).
+
+        Each option is the cheapest way to back that outcome: YES on its own market or, in
+        two-way sports, NO on the opponent's market.
+        """
+        cfg = self.config
+        games: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for entry in self.board.values():
+            start = _parse_iso(entry["start"])
+            if start is None or start <= now + timedelta(minutes=cfg.min_minutes_to_start):
+                continue
+            sides = [(entry["yes_team"], "yes", entry["yes_ask"], entry["p_yes"])]
+            if not entry["three_way"]:
+                sides.append((entry["no_team"], "no", entry["no_ask"],
+                              None if entry["p_yes"] is None else 1.0 - entry["p_yes"]))
+            game = games.setdefault((entry["league"], entry["game"], entry["start"]), {
+                "league": entry["league"], "game": entry["game"], "start": entry["start"], "options": {},
+            })
+            for label, side, ask, p in sides:
+                if not 0.0 < ask < 1.0:
+                    continue
+                current = game["options"].get(label)
+                if current is not None and current["ask"] <= ask:
+                    continue
+                game["options"][label] = {
+                    "label": label, "side": side, "ticker": entry["ticker"],
+                    "event_ticker": entry["event_ticker"], "ask": ask,
+                    "fee": kalshi_fee(ask, cfg.fee_rate, entry["fee_multiplier"]),
+                    "p": p, "sd": entry["sd"],
+                }
+        out = []
+        for game in games.values():
+            game["options"] = sorted(game["options"].values(), key=lambda o: o["label"])
+            if game["options"]:
+                out.append(game)
+        return sorted(out, key=lambda g: (g["start"], g["game"]))
+
+    def quote_user_bet(
+        self,
+        state: PortfolioState,
+        broker: PaperBroker,
+        *,
+        ticker: str,
+        side: str,
+        amount: float | None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Price a hand-picked bet against the live order book and the safety limits.
+
+        Returns ``{"ok": False, "reason": ...}`` or ``{"ok": True, ...}`` with the contract
+        count, all-in cost and, when the model has a view, its probability for this side.
+        """
+        cfg = self.config
+        side = side.lower()
+        entry = self.board.get(ticker)
+        if entry is None or side not in ("yes", "no"):
+            return {"ok": False, "reason": "That game isn't on the board any more. Send /games to refresh."}
+        start = _parse_iso(entry["start"])
+        if start is None or start <= now:
+            return {"ok": False, "reason": "That game has already started."}
+        try:
+            market = self.kalshi.get_market(ticker)
+        except Exception as exc:
+            return {"ok": False, "reason": f"Couldn't read the Kalshi market: {exc}"}
+        if str(market.get("status", "")).lower() not in ("open", "active"):
+            return {"ok": False, "reason": "Kalshi has closed this market."}
+        ask = _kalshi_price(market, f"{side}_ask")
+        if not 0.0 < ask < 1.0:
+            return {"ok": False, "reason": "Nobody is selling that side on Kalshi right now."}
+        mult = float(entry["fee_multiplier"])
+
+        bucket = _CASH_BUCKET if self.live_trading_enabled else None
+        held = {str(p.meta.get("event_ticker", "")) for p in self._open_positions(state)}
+        if entry["event_ticker"] and entry["event_ticker"] in held:
+            return {"ok": False, "reason": "You already have a bet on this game."}
+        equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
+        cash = broker.get_cash_balance(state, cash_bucket=bucket)
+        stake = equity * cfg.user_bet_default_pct if amount is None else float(amount)
+        limit = equity * cfg.user_bet_max_pct
+        if stake < cfg.min_trade_usd:
+            return {"ok": False, "reason": f"Minimum bet is ${cfg.min_trade_usd:.2f}."}
+        if stake > limit + 1e-9:
+            return {"ok": False, "reason": (
+                f"${stake:.2f} is over the per-bet limit of ${limit:.2f} "
+                f"({cfg.user_bet_max_pct:.0%} of your ${equity:.2f} bankroll).")}
+        if stake > cash * 0.95 + 1e-9:
+            return {"ok": False, "reason": f"Only ${cash:.2f} is available to bet."}
+
+        quantity = math.floor(stake / (ask + kalshi_fee(ask, cfg.fee_rate, mult)))
+        while quantity > 0 and quantity * ask + kalshi_fee(ask, cfg.fee_rate, mult, quantity) * quantity > stake + 1e-9:
+            quantity -= 1
+        depth = _kalshi_size(market, f"{side}_ask_size")
+        if depth > 0:
+            quantity = min(quantity, int(depth))
+        if quantity < 1:
+            return {"ok": False, "reason": f"${stake:.2f} doesn't buy a contract at ${ask:.2f} plus fee."}
+        fee_each = kalshi_fee(ask, cfg.fee_rate, mult, quantity)
+        p_yes = entry["p_yes"]
+        p_side = None if p_yes is None else (p_yes if side == "yes" else 1.0 - p_yes)
+        label = entry["yes_team"] if side == "yes" else entry["no_team"]
+        return {
+            "ok": True, "ticker": ticker, "event_ticker": entry["event_ticker"], "side": side,
+            "pick": label, "game": entry["game"], "league": entry["league"], "start": entry["start"],
+            "ask": ask, "fee_each": fee_each, "quantity": quantity,
+            "cost": quantity * (ask + fee_each), "payout": float(quantity),
+            "model_prob": p_side, "sd": entry["sd"], "equity": equity, "stake": stake, "live": self.live_trading_enabled, "market": market,
+            "fee_multiplier": mult,
+        }
+
+    def place_user_bet(
+        self,
+        state: PortfolioState,
+        broker: PaperBroker,
+        *,
+        ticker: str,
+        side: str,
+        amount: float | None,
+        now: datetime,
+        max_ask: float | None = None,
+    ) -> dict[str, Any]:
+        """Re-quote a hand-picked bet and place it (live order on Kalshi, or paper booking).
+
+        ``max_ask`` is the price the user agreed to; if the book has moved above it the
+        bet is refused instead of placed.
+        """
+        quote = self.quote_user_bet(state, broker, ticker=ticker, side=side, amount=amount, now=now)
+        if not quote["ok"]:
+            return quote
+        if max_ask is not None and quote["ask"] > max_ask + 1e-9:
+            quote.pop("market", None)
+            return {"ok": False, "reason": (
+                f"The price moved from {max_ask * 100:.0f}¢ to {quote['ask'] * 100:.0f}¢. "
+                "Nothing was bought; send /bet again to re-check."), "moved": True, "quote": quote}
+        entry = self.board[ticker]
+        ask, p_side = quote["ask"], quote["model_prob"]
+        sd = float(quote["sd"] or 0.0)
+        decision = BetDecision(
+            side=quote["side"], price=ask, p=ask if p_side is None else p_side, sd=sd,
+            fee=quote["fee_each"], net_edge=0.0 if p_side is None else p_side - ask - quote["fee_each"],
+            stake_fraction=0.0, confidence=0.0,
+        )
+        start = _parse_iso(entry["start"]) or now
+        cand = {
+            "market": quote["market"],
+            "game": _BoardGame(entry["league"], entry["game"], start),
+            "decision": decision,
+            "pick": quote["pick"],
+            "user_bet": True,
+        }
+        bucket = _CASH_BUCKET if self.live_trading_enabled else None
+        position = self._place_bet(
+            state, broker, cand, quote["cost"], now, bucket, quantity=quote["quantity"],
+        )
+        if position is None:
+            return {"ok": False, "reason": (
+                "Kalshi didn't fill the order (the price moved or it was rejected). Nothing was bought.")}
+        quote["filled"] = int(round(position.quantity))
+        quote["symbol"] = position.symbol
+        quote["spent"] = position.quantity * position.entry_price
+        quote.pop("market", None)
+        return quote
 
     # ------------------------------------------------------------------
     # Position management

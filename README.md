@@ -287,6 +287,10 @@ KALSHI_SPORTS_IGNORE_GLOBAL_HALT=true
 KALSHI_SPORTS_USE_POLYMARKET=true
 # Max legs in suggested parlays (0 = off). Suggestions only: never placed automatically.
 KALSHI_SPORTS_PARLAY_MAX_LEGS=4
+# Bets you place yourself from Telegram (/games, /bet, /confirm): default stake and the
+# largest single bet, as a share of the wallet.
+KALSHI_SPORTS_USER_BET_DEFAULT_PCT=0.05
+KALSHI_SPORTS_USER_BET_MAX_PCT=0.25
 KALSHI_SPORTS_HOLD_TO_SETTLEMENT=true
 KALSHI_SPORTS_STOP_LOSS=0
 KALSHI_SPORTS_TAKE_PROFIT=0
@@ -349,6 +353,19 @@ OPTIONS_MIN_VOLUME=100          # skip contracts with volume below this
 OPTIONS_MIN_OPEN_INTEREST=500   # skip contracts with OI below this
 OPTIONS_MAX_IV=1.50             # skip contracts with implied volatility above 150%
 - **Coinbase is data-only by default.** `COINBASE_TRADING_ENABLED=false` (the default) means the bot never sends Coinbase an order, skips the Coinbase balance sync (cash is treated as 0), and does not run the crypto/rotation strategies live; prices from Coinbase still feed the Kalshi strategies. All live trading happens on Kalshi. Set it to `true` only if you really trade crypto on Coinbase.
+
+## Picking your own sports bets in Telegram
+
+You can choose the games and let the bot place the orders:
+
+| Command | What it does |
+| --- | --- |
+| `/games [league or team]` | Rescans ESPN + Kalshi and lists numbered, upcoming games with each side's Kalshi price and the model's win probability. |
+| `/bet <team> [$amount]` | Previews a bet, e.g. `/bet browns 5` or `/bet 3 browns`. If the name matches several teams (Cleveland Browns, Guardians) it asks you to be specific. |
+| `/confirm` | Places the previewed bet (a live Kalshi order when `PAPER_MODE=false`). Previews expire after 10 minutes. |
+| `/cancel` | Drops the preview. |
+
+Nothing is bought until `/confirm` (or a trailing `now`, as in `/bet browns 5 now`). The preview shows contracts, price, Kalshi's fee, what you win or lose, and the model's honest view: if it thinks the price is too high it says so, and the bet is still yours to make. Your picks are checked again at order time: the market must be open, the game not started, the price no more than 2 cents above the preview, one bet per game, at least `KALSHI_SPORTS_MIN_TRADE_USD`, at most `KALSHI_SPORTS_USER_BET_MAX_PCT` of the wallet (default 25%) and no more than the cash available. With no amount the stake is `KALSHI_SPORTS_USER_BET_DEFAULT_PCT` (default 5%). Orders are immediate-or-cancel, and only contracts that actually fill are booked. Hand-picked bets settle and count like any other sports bet, and are not blocked by the kill switch.
 
 ## Telegram digest
 

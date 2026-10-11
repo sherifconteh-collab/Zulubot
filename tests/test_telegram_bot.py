@@ -3,12 +3,15 @@ from __future__ import annotations
 import logging
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from trading_bot.telegram_bot import (
     TradingTelegramBot,
     _format_lead_line,
     _format_sports_pick,
+    _find_bet_options,
+    _format_bet_preview,
+    _parse_bet_args,
     _format_sports_picks,
 )
 
@@ -390,6 +393,147 @@ class SportsPickFormatTests(unittest.TestCase):
     def test_team_names_are_html_escaped(self):
         line = _format_sports_pick({**self.NO_BET, "game": "A & B <x>"})
         self.assertIn("A &amp; B &lt;x&gt;", line)
+
+
+_GAMES = [
+    {"league": "mlb", "game": "Guardians at Tigers", "start": "2026-10-12T18:00:00+00:00", "start_label": "Sun Oct 12 1:00 PM",
+     "options": [
+         {"label": "Cleveland Guardians", "side": "yes", "ticker": "KXMLB-CLE", "ask": 0.45, "fee": 0.02, "p": 0.47},
+         {"label": "Detroit Tigers", "side": "no", "ticker": "KXMLB-CLE", "ask": 0.57, "fee": 0.02, "p": 0.53}]},
+    {"league": "nfl", "game": "Browns at Steelers", "start": "2026-10-12T20:00:00+00:00", "start_label": "Sun Oct 12 3:00 PM",
+     "options": [
+         {"label": "Cleveland Browns", "side": "yes", "ticker": "KXNFL-CLE", "ask": 0.38, "fee": 0.02, "p": 0.41},
+         {"label": "Pittsburgh Steelers", "side": "yes", "ticker": "KXNFL-PIT", "ask": 0.64, "fee": 0.02, "p": 0.59}]},
+]
+
+
+class BetParsingTests(unittest.TestCase):
+    def test_parse_variants(self):
+        self.assertEqual(_parse_bet_args(["cleveland", "5"]),
+                         {"game_no": None, "query": "cleveland", "amount": 5.0, "now": False})
+        self.assertEqual(_parse_bet_args(["2", "browns", "$7.50", "now"]),
+                         {"game_no": 2, "query": "browns", "amount": 7.5, "now": True})
+        self.assertEqual(_parse_bet_args(["cleveland", "browns"])["amount"], None)
+        self.assertEqual(_parse_bet_args(["3"])["query"], "3")
+
+    def test_find_matches_team_names_across_games(self):
+        rows = _find_bet_options(_GAMES, None, "cleveland")
+        self.assertEqual([r[2]["label"] for r in rows], ["Cleveland Guardians", "Cleveland Browns"])
+        self.assertEqual(len(_find_bet_options(_GAMES, None, "cleveland browns")), 1)
+        self.assertEqual(len(_find_bet_options(_GAMES, 2, "cleveland")), 1)
+        self.assertEqual(_find_bet_options(_GAMES, None, "lakers"), [])
+
+    def test_preview_is_honest_when_model_disagrees(self):
+        quote = {"ask": 0.38, "fee_each": 0.02, "quantity": 10, "cost": 4.0, "model_prob": 0.30,
+                 "pick": "Cleveland Browns", "game": "Browns at Steelers", "league": "nfl", "live": True}
+        text = _format_bet_preview(quote)
+        self.assertIn("LIVE money", text)
+        self.assertIn("Heads up", text)
+        self.assertIn("/confirm", text)
+        quote["model_prob"] = 0.50
+        self.assertIn("Model agrees", _format_bet_preview(quote))
+        quote["model_prob"] = None
+        self.assertIn("purely your call", _format_bet_preview(quote))
+
+
+class ManualBetFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_manual_bets"))
+        self.service = SimpleNamespace(
+            list_sports_games=MagicMock(return_value=_GAMES),
+            quote_sports_bet=MagicMock(return_value={
+                "ok": True, "ask": 0.38, "fee_each": 0.02, "quantity": 12, "cost": 4.8, "stake": 5.0,
+                "model_prob": 0.41, "pick": "Cleveland Browns", "game": "Browns at Steelers",
+                "league": "nfl", "live": True}),
+            place_sports_bet=MagicMock(return_value={
+                "ok": True, "live": True, "filled": 12, "quantity": 12, "ask": 0.38, "spent": 4.8,
+                "pick": "Cleveland Browns", "game": "Browns at Steelers"}),
+        )
+        self.bot.set_service(self.service)
+
+    def _update(self, chat_id="123"):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=int(chat_id)),
+                               message=SimpleNamespace(reply_text=AsyncMock()))
+
+    def _texts(self, update):
+        return [c.args[0] for c in update.message.reply_text.await_args_list]
+
+    async def test_games_lists_numbered_games_and_filters(self):
+        update = self._update()
+        await self.bot._cmd_games(update, SimpleNamespace(args=[]))
+        text = "\n".join(self._texts(update))
+        self.assertIn("1. <b>MLB</b>", text)
+        self.assertIn("Cleveland Browns 38\u00a2 (model 41%)", text)
+        update = self._update()
+        await self.bot._cmd_games(update, SimpleNamespace(args=["nfl"]))
+        self.assertEqual(len(self.bot._games), 1)
+
+    async def test_ambiguous_team_asks_which_one(self):
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["cleveland", "5"]))
+        self.assertIn("2 matches", self._texts(update)[-1])
+        self.service.quote_sports_bet.assert_not_called()
+        self.assertIsNone(self.bot._pending_bet)
+
+    async def test_preview_then_confirm_places_the_bet(self):
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["browns", "5"]))
+        self.service.quote_sports_bet.assert_called_once_with("KXNFL-CLE", "yes", 5.0)
+        self.service.place_sports_bet.assert_not_called()  # preview alone never trades
+        self.assertIn("Bet preview", self._texts(update)[-1])
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        args = self.service.place_sports_bet.call_args.args
+        self.assertEqual(args[:3], ("KXNFL-CLE", "yes", 5.0))
+        self.assertAlmostEqual(args[3], 0.40)  # agreed ask + slip tolerance
+        self.assertIn("Bet placed", self._texts(update)[-1])
+        self.assertIsNone(self.bot._pending_bet)
+        # a second /confirm has nothing to place
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.assertEqual(self.service.place_sports_bet.call_count, 1)
+
+    async def test_cancel_drops_the_pending_bet(self):
+        await self.bot._cmd_bet(self._update(), SimpleNamespace(args=["browns"]))
+        update = self._update()
+        await self.bot._cmd_cancel(update, SimpleNamespace(args=[]))
+        await self.bot._cmd_confirm(self._update(), SimpleNamespace(args=[]))
+        self.service.place_sports_bet.assert_not_called()
+
+    async def test_expired_preview_is_not_placed(self):
+        await self.bot._cmd_bet(self._update(), SimpleNamespace(args=["browns"]))
+        self.bot._pending_bet["expires"] -= 1000
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.service.place_sports_bet.assert_not_called()
+        self.assertIn("Nothing to confirm", self._texts(update)[-1])
+
+    async def test_now_flag_places_immediately(self):
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["browns", "5", "now"]))
+        self.service.place_sports_bet.assert_called_once()
+
+    async def test_refused_quote_creates_no_pending_bet(self):
+        self.service.quote_sports_bet.return_value = {"ok": False, "reason": "You already have a bet on this game."}
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["browns"]))
+        self.assertIsNone(self.bot._pending_bet)
+        self.assertIn("already have a bet", self._texts(update)[-1])
+
+    async def test_failed_placement_is_reported(self):
+        self.service.place_sports_bet.return_value = {"ok": False, "reason": "price moved"}
+        await self.bot._cmd_bet(self._update(), SimpleNamespace(args=["browns"]))
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.assertIn("Not placed: price moved", self._texts(update)[-1])
+
+    async def test_other_chats_cannot_bet(self):
+        for handler in (self.bot._cmd_games, self.bot._cmd_bet, self.bot._cmd_confirm, self.bot._cmd_cancel):
+            await handler(self._update(chat_id="999"), SimpleNamespace(args=["browns"]))
+        self.service.list_sports_games.assert_not_called()
+        self.service.quote_sports_bet.assert_not_called()
+        self.service.place_sports_bet.assert_not_called()
 
 
 if __name__ == "__main__":
