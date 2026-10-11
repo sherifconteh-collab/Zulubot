@@ -1104,12 +1104,34 @@ class ParlayRfqTests(unittest.TestCase):
         strat, _ = self._setup()
         broker = PaperBroker(True, logging.getLogger("t"))
         legs = self._legs(strat)
-        over = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=200.0, max_price=None, now=_NOW)
+        over = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=300.0, max_price=None, now=_NOW)
         self.assertIn("parlay limit", over["reason"])
         under = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=0.5, max_price=None, now=_NOW)
         self.assertIn("Minimum", under["reason"])
         default = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=None, max_price=None, now=_NOW)
         self.assertAlmostEqual(default["stake"], 20.0)  # 2% of 1000
+
+    def test_a_slip_price_can_raise_the_default_ceiling_but_never_an_explicit_max(self):
+        strat, _ = self._setup()
+        broker = PaperBroker(True, logging.getLogger("t"))
+        legs = self._legs(strat)
+        base = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=None, now=_NOW)
+        higher = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=None, now=_NOW,
+                                         anchor_price=base["max_price"] + 0.05)
+        self.assertAlmostEqual(higher["max_price"], base["max_price"] + 0.05)
+        lower = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=None, now=_NOW,
+                                        anchor_price=base["max_price"] - 0.05)
+        self.assertAlmostEqual(lower["max_price"], base["max_price"])  # never below Kalshi's own reference
+        explicit = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=0.1, now=_NOW,
+                                           anchor_price=0.9)
+        self.assertAlmostEqual(explicit["max_price"], 0.1)
+
+    def test_a_ten_dollar_parlay_is_within_the_default_limit(self):
+        strat, _ = self._setup()
+        plan = strat.quote_user_parlay(PortfolioState(cash=0.0, cash_reserves={"kalshi": 74.0}),
+                                       PaperBroker(True, logging.getLogger("t")),
+                                       legs=self._legs(strat), amount=10.0, max_price=None, now=_NOW)
+        self.assertTrue(plan["ok"], plan)
 
     def test_without_a_model_view_the_reference_is_kalshis_own_price(self):
         strat, _ = self._setup()

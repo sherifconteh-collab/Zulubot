@@ -29,7 +29,7 @@ Actions:
 - bet: preview ONE bet on a team to win. team = the team the user names (e.g. "cleveland browns"), amount = dollars if stated.
 - parlay: preview a parlay. legs = each leg as short plain text ("hurts 200 passing yards", "barkley 80 rushing yards", "browns"), amount = dollars, max_cents = price ceiling in cents if stated.
 - stack: auto-build a same-game player-stat parlay. game = the two teams ("eagles jaguars"), leg_count, leg_percent (chance per leg as a percent, e.g. 85), amount, max_cents.
-- confirm: only when the user clearly agrees to place the previewed bet. cancel: drop the previewed bet.
+- confirm: only when the user clearly agrees to place the previewed bet, or tells you to bet an amount on "this"/"it"/"that parlay" while one is waiting (then set amount to the dollars they say, e.g. "bet $10 on it" -> amount 10). cancel: drop the previewed bet.
 - control: the user wants to pause, resume or kill/stop the bot or liquidate (never do it; the user must use the slash command).
 - reply: anything else (questions, chit-chat, unclear requests). Put a short helpful answer in reply_text, and suggest what they could say.
 Convert spoken amounts to numbers ("five bucks" -> 5). If an amount isn't stated leave it out. Keep every text field short."""

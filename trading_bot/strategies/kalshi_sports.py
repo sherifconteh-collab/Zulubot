@@ -1484,6 +1484,7 @@ class KalshiSportsStrategy:
         amount: float | None,
         max_price: float | None,
         now: datetime,
+        anchor_price: float | None = None,
     ) -> dict[str, Any]:
         """Check a hand-built parlay and work out the most we'd pay; places nothing.
 
@@ -1557,6 +1558,9 @@ class KalshiSportsStrategy:
             for r in rows:
                 reference *= r["ref"]
         ceiling = max_price if max_price is not None else reference
+        if max_price is None and anchor_price is not None and 0.0 < anchor_price < 1.0:
+            # The price the user was shown elsewhere (a sportsbook slip) is one they'd already accept.
+            ceiling = max(ceiling or 0.0, anchor_price)
         if ceiling is None:
             return {"ok": False, "reason": (
                 "One of those markets has no price right now, so there's no reference value. "
@@ -1600,9 +1604,12 @@ class KalshiSportsStrategy:
         amount: float | None,
         max_price: float | None,
         now: datetime,
+        anchor_price: float | None = None,
     ) -> dict[str, Any]:
         """Ask Kalshi market makers for a price on the parlay and buy it if one is at or under the ceiling."""
-        plan = self.quote_user_parlay(state, broker, legs=legs, amount=amount, max_price=max_price, now=now)
+        plan = self.quote_user_parlay(
+            state, broker, legs=legs, amount=amount, max_price=max_price, now=now, anchor_price=anchor_price,
+        )
         if not plan["ok"]:
             return plan
         cfg = self.config
