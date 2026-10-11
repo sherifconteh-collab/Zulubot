@@ -177,9 +177,9 @@ TRADING_AGENTS_ENABLED = "true"
 TRADING_AGENTS_LLM_PROVIDER = "ollama"
 TRADING_AGENTS_QUICK_MODEL = "qwen3:8b"
 TRADING_AGENTS_DEEP_MODEL = "qwen3:8b"
-# Remote Ollama endpoint for Railway. If this variable does not appear in an
-# existing Railway service, add it manually in the service Variables panel.
-OLLAMA_BASE_URL = "https://example-tunnel.trycloudflare.com"
+# Remote Ollama endpoint (only used when TRADING_AGENTS_LLM_PROVIDER=ollama). Leave blank
+# here and set your own URL in the Railway Variables panel; never commit a tunnel URL.
+OLLAMA_BASE_URL = ""
 TRADING_AGENTS_CONFIRMATION_MODE = "boost"
 TRADING_AGENTS_CACHE_TTL_HOURS = "4"
 TRADING_AGENTS_MAX_COST_PER_RUN = "0.50"
