@@ -202,6 +202,25 @@ Send a screenshot (photo or image file) of a bet slip, such as a sportsbook same
 - **Caption `10`** (or `what would $10 pay`) shows the preview and waits for `/confirm`.
 - If some legs aren't on Kalshi the bot **never** auto-places the shorter parlay: it shows the preview and asks you to reply yes.
 
+### Automatic parlays (opt in)
+
+Set `KALSHI_SPORTS_AUTO_PARLAYS=true` (live mode only) and the bot also buys parlays on its own, with no message from you. It is **off by default** because it spends real money without asking. Every cycle (30 minutes) it looks at upcoming football games (kickoff 15 minutes to 24 hours away), builds a same-game stack of high-probability player-stat legs like `/stack` does, asks Kalshi's market makers for a price and buys it only at or under a ceiling. You get a Telegram alert for each one.
+
+The limits (`KALSHI_SPORTS_AUTO_PARLAY*` in `.env.example`):
+
+| Limit | Default |
+|---|---|
+| Legs per parlay / target chance per leg | 4 / 85% |
+| Stake per parlay | 2% of bankroll |
+| Parlays per day | 3 |
+| Open parlay cost at once | 10% of bankroll |
+| Price ceiling | Kalshi's own fair price for the legs plus 10% |
+| Quote requests per game per day | 3 |
+
+It never buys the same game twice, never pays above the ceiling, and an outcome it can't confirm stops it for the cycle. **Expect it to lose a little on average:** the model has no view on player props, so these are priced at Kalshi's own odds, and you pay the fee and up to the 10% premium. The point is consistent action within a small, fixed budget, not an edge. Singles on game winners (when the model finds an edge or picks the best value) are separate and unchanged.
+
+Send `/sports` to see the mode (**LIVE** or **PAPER**, including the case where `PAPER_MODE=false` but the Kalshi credentials are missing, which silently runs on paper), what was bought and why nothing was.
+
 ### Paste a list of legs instead (no AI, no API cost)
 
 Type or paste the legs one per line (bullets and numbers are fine), with your stake and a bet word above them:

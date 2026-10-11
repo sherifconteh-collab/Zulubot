@@ -524,6 +524,20 @@ class KalshiSportsConfig:
     # Model that reads bet-slip screenshots posted to Telegram (needs ANTHROPIC_API_KEY).
     slip_model: str = "claude-sonnet-4-6"
     parlay_quote_wait_seconds: float = 20.0
+    # Automatic parlays: each cycle (before kickoff) the bot builds a same-game stack of high-probability
+    # player-stat legs for upcoming football games and buys it through Kalshi's market makers. There is no
+    # model view on player props, so the reference price is Kalshi's own (the legs' mid prices multiplied);
+    # the bot pays at most that plus ``auto_parlay_max_premium``. Hard caps below bound the damage.
+    auto_parlays: bool = False               # opt in: KALSHI_SPORTS_AUTO_PARLAYS=true
+    auto_parlay_legs: int = 4
+    auto_parlay_leg_prob: float = 0.85       # target Kalshi probability of each leg
+    auto_parlay_stake_pct: float = 0.02      # per parlay, % of bankroll
+    auto_parlays_per_day: int = 3
+    auto_parlay_exposure_pct: float = 0.10   # cap on open parlay cost, % of bankroll
+    auto_parlay_max_premium: float = 0.10    # pay up to this much above the legs' own fair price
+    auto_parlay_hours_ahead: float = 24.0    # only games starting within this window
+    auto_parlay_min_minutes: float = 15.0    # leave time for quotes before kickoff
+    auto_parlay_tries_per_game: int = 3      # quote requests per game per day
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
     take_profit_pct: float = 0.0
@@ -951,6 +965,16 @@ class AppConfig:
                 user_parlay_max_legs=_env_int("KALSHI_SPORTS_USER_PARLAY_MAX_LEGS", 10),
                 slip_model=os.getenv("KALSHI_SPORTS_SLIP_MODEL", "claude-sonnet-4-6").strip(),
                 parlay_quote_wait_seconds=_env_float("KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS", 20.0),
+                auto_parlays=_env_bool("KALSHI_SPORTS_AUTO_PARLAYS", False),
+                auto_parlay_legs=_env_int("KALSHI_SPORTS_AUTO_PARLAY_LEGS", 4),
+                auto_parlay_leg_prob=_env_float("KALSHI_SPORTS_AUTO_PARLAY_LEG_PROB", 0.85),
+                auto_parlay_stake_pct=_env_float("KALSHI_SPORTS_AUTO_PARLAY_STAKE_PCT", 0.02),
+                auto_parlays_per_day=_env_int("KALSHI_SPORTS_AUTO_PARLAYS_PER_DAY", 3),
+                auto_parlay_exposure_pct=_env_float("KALSHI_SPORTS_AUTO_PARLAY_EXPOSURE_PCT", 0.10),
+                auto_parlay_max_premium=_env_float("KALSHI_SPORTS_AUTO_PARLAY_MAX_PREMIUM", 0.10),
+                auto_parlay_hours_ahead=_env_float("KALSHI_SPORTS_AUTO_PARLAY_HOURS_AHEAD", 24.0),
+                auto_parlay_min_minutes=_env_float("KALSHI_SPORTS_AUTO_PARLAY_MIN_MINUTES", 15.0),
+                auto_parlay_tries_per_game=_env_int("KALSHI_SPORTS_AUTO_PARLAY_TRIES_PER_GAME", 3),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
