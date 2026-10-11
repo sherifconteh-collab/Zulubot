@@ -564,6 +564,23 @@ class KalshiClient:
         # Balance is in cents
         return float(result.get("balance", 0)) / 100.0
 
+    def get_balance_breakdown(self) -> list[tuple[int, float]]:
+        """Available balance per exchange shard, ``[(exchange_index, dollars), ...]`` (empty if not reported).
+
+        Funds are held per shard and an order is routed to the shard its market lives on, so the total
+        from ``get_balance`` can be more than what is spendable on a given market.
+        """
+        if not self.can_trade:
+            return []
+        result = self._get("/portfolio/balance", auth=True)
+        rows: list[tuple[int, float]] = []
+        for item in result.get("balance_breakdown") or []:
+            try:
+                rows.append((int(item["exchange_index"]), float(item["balance"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return sorted(rows)
+
     # ------------------------------------------------------------------
     # Perpetuals (requires auth for trading; discovery is public)
     # ⚠️ Exact endpoints need verification against Kalshi Perps API docs.

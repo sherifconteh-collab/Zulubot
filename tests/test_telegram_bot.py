@@ -911,6 +911,18 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("even though PAPER_MODE=false", broken)
         self.assertIn("KALSHI_KEY_ID", broken)
 
+    async def test_sports_shows_the_balance_by_shard(self):
+        module = {"games_scanned": 1, "markets_matched": 1, "predictions": [], "buys": [], "decisions": [],
+                  "can_trade_live": True, "bankroll": {"equity": 76.7, "cash": 58.61, "day_pnl": 0, "stake_scale": 1,
+                  "open_exposure": 0, "exposure_budget": 38, "shards": [{"index": 0, "balance": 58.61}, {"index": 1, "balance": 0.0}]}}
+        self.service.run = MagicMock(return_value={"modules": {"kalshi_sports": module}})
+        self.service.config = SimpleNamespace(paper_mode=False)
+        update = self._update()
+        await self.bot._cmd_kalshi_sports(update, SimpleNamespace(args=[]))
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Kalshi balance by shard: #0 $58.61, #1 $0.00", text)
+        self.assertIn("cash $58.61", text)
+
     def test_skip_examples_show_kalshi_s_own_error_text_once_each(self):
         decisions = [
             {"action": "skip_buy", "reason": "order_failed", "signals": {"error": "HTTP 404: <not found>"}},
