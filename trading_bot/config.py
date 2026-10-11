@@ -504,6 +504,14 @@ class KalshiSportsConfig:
     # legs from different games. 0 disables. Kalshi combos are quoted on request, not
     # via an order book, so they are placed manually in Kalshi's parlay builder.
     parlay_max_legs: int = 4
+    # Action picks: when no game has a mispricing, still bet the best-value side of the best games
+    # so the bot isn't idle. They have no edge after Kalshi's fee (the fee is a small, certain
+    # cost per bet), so they are kept small and capped per scan and per day.
+    action_bets: bool = True
+    action_bets_per_day: int = 5
+    action_max_per_scan: int = 2
+    action_stake_pct: float = 0.03           # per action pick, % of bankroll
+    action_min_win_prob: float = 0.35        # never back a long shot just to have a bet
     # Bets you pick yourself in Telegram (/games, /bet): default stake and per-bet cap, as a
     # share of the wallet. Your call overrides the model's, so the cap is the only guard.
     user_bet_default_pct: float = 0.05
@@ -931,6 +939,11 @@ class AppConfig:
                 ignore_global_halt=_env_bool("KALSHI_SPORTS_IGNORE_GLOBAL_HALT", True),
                 use_polymarket=_env_bool("KALSHI_SPORTS_USE_POLYMARKET", True),
                 parlay_max_legs=_env_int("KALSHI_SPORTS_PARLAY_MAX_LEGS", 4),
+                action_bets=_env_bool("KALSHI_SPORTS_ACTION_BETS", True),
+                action_bets_per_day=_env_int("KALSHI_SPORTS_ACTION_BETS_PER_DAY", 5),
+                action_max_per_scan=_env_int("KALSHI_SPORTS_ACTION_MAX_PER_SCAN", 2),
+                action_stake_pct=_env_float("KALSHI_SPORTS_ACTION_STAKE_PCT", 0.03),
+                action_min_win_prob=_env_float("KALSHI_SPORTS_ACTION_MIN_WIN_PROB", 0.35),
                 user_bet_default_pct=_env_float("KALSHI_SPORTS_USER_BET_DEFAULT_PCT", 0.05),
                 user_bet_max_pct=_env_float("KALSHI_SPORTS_USER_BET_MAX_PCT", 0.25),
                 user_parlay_default_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT", 0.02),

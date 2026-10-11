@@ -133,6 +133,12 @@ def _format_sports_pick(pred: dict[str, Any]) -> str:
         return f"\u2022 {game} \u2014 <b>no bet</b>\n   {prob}{move_txt}"
     side = str(pred.get("side", "")).lower()
     ask = float(pred.get("yes_ask" if side == "yes" else "no_ask", 0))
+    if pred.get("action"):
+        return (
+            f"\u2022 <b>PICK: {html.escape(str(pred.get('pick', '?')))}</b> ({game})\n"
+            f"   {prob} | {side.upper()} ask {ask:.2f} | no mispricing, small action bet "
+            f"(expected {float(net):+.1%} after fees){move_txt}"
+        )
     return (
         f"\u2022 <b>BET: {html.escape(str(pred.get('pick', '?')))}</b> ({game})\n"
         f"   {prob} | {side.upper()} ask {ask:.2f} | net edge {float(net):+.1%}{move_txt}"
@@ -757,8 +763,9 @@ class TradingTelegramBot:
             if not bets:
                 lines.append("   No bets this scan.")
             for pred in sorted(bets, key=lambda p: p.get("edge", 0), reverse=True)[:3]:
+                label = "PICK" if pred.get("action") else "BET"
                 lines.append(
-                    f"   \u2022 BET {html.escape(str(pred.get('pick', '?')))} "
+                    f"   \u2022 {label} {html.escape(str(pred.get('pick', '?')))} "
                     f"({html.escape(str(pred.get('game', '')))}) net edge {float(pred.get('net_edge', 0)):+.1%}"
                 )
             resolved = module_data.get("resolved_closed", [])
@@ -1425,11 +1432,14 @@ class TradingTelegramBot:
                     f"open ${float(bank.get('open_exposure', 0)):.2f} of ${float(bank.get('exposure_budget', 0)):.2f}"
                 )
             preds = module.get("predictions") or []
-            bets = [p for p in preds if p.get("net_edge") is not None]
-            lines.append(
-                f"{len(bets)} bet{'s' if len(bets) != 1 else ''} worth placing"
-                if bets else "No bets right now: prices match the books after fees."
-            )
+            value_bets = [p for p in preds if p.get("net_edge") is not None and not p.get("action")]
+            picks = [p for p in preds if p.get("action")]
+            parts = []
+            if value_bets:
+                parts.append(f"{len(value_bets)} value bet{'s' if len(value_bets) != 1 else ''}")
+            if picks:
+                parts.append(f"{len(picks)} action pick{'s' if len(picks) != 1 else ''} placed")
+            lines.append(", ".join(parts) if parts else "No bets right now: prices match the books after fees.")
             lines.extend(_format_sports_picks(preds))
             if not preds:
                 lines.append("No predictable games found right now.")
