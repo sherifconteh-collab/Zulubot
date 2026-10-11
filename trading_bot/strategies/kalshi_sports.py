@@ -1473,6 +1473,9 @@ class KalshiSportsStrategy:
             if hits > best_hits:
                 best_hits, game_label = hits, game["game"]
         props = [p for p in universe.values() if game_label is None or p["game"] == game_label]
+        # No game on the slip (a typed list): use the game most legs point at only to settle
+        # bare surnames, never to drop legs from other games.
+        hint_game = game_label or self._infer_slip_game(slip, props)
 
         matched: list[dict[str, Any]] = []
         unmatched: list[dict[str, str]] = []
@@ -1495,7 +1498,7 @@ class KalshiSportsStrategy:
             text = leg.get("text") or leg.get("player") or leg.get("team") or "(unreadable leg)"
             kind = leg.get("type")
             if kind == "player_stat":
-                reason = self._match_stat_leg(leg, props, add)
+                reason = self._match_stat_leg(leg, props, add, hint_game)
             elif kind == "spread":
                 reason = self._match_spread_leg(leg, props, add)
             elif kind == "moneyline":
@@ -1506,7 +1509,31 @@ class KalshiSportsStrategy:
                 unmatched.append({"text": text, "reason": reason})
         return {"matched": matched, "unmatched": unmatched, "game": game_label}
 
-    def _match_stat_leg(self, leg: dict[str, Any], props: list[dict[str, Any]], add: Any) -> str:
+    @staticmethod
+    def _infer_slip_game(slip: dict[str, Any], props: list[dict[str, Any]]) -> str | None:
+        """The one game that the most legs point to (at least 2, strictly ahead of the rest), else None."""
+        hits: dict[str, int] = {}
+        games = {p["game"] for p in props}
+        for leg in slip.get("legs", []):
+            kind = leg.get("type")
+            if kind == "player_stat" and leg.get("player"):
+                wanted = set(_name_tokens(str(leg["player"])))
+                for game in {p["game"] for p in props if p["kind"] == "stat" and wanted
+                             and wanted <= set(_name_tokens(p["player"]))}:
+                    hits[game] = hits.get(game, 0) + 1
+            elif kind in ("spread", "moneyline") and leg.get("team"):
+                nick = _nickname(str(leg["team"]))
+                for game in games:
+                    if nick and nick in _name_tokens(game):
+                        hits[game] = hits.get(game, 0) + 1
+        ranked = sorted(hits.items(), key=lambda row: -row[1])
+        if ranked and ranked[0][1] >= 2 and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+            return ranked[0][0]
+        return None
+
+    def _match_stat_leg(
+        self, leg: dict[str, Any], props: list[dict[str, Any]], add: Any, hint_game: str | None = None,
+    ) -> str:
         player, family, threshold = leg.get("player"), leg.get("stat"), leg.get("threshold")
         if not player or not family or threshold is None:
             return "couldn't tell the player, stat and number"
@@ -1521,6 +1548,12 @@ class KalshiSportsStrategy:
             m = _TITLE_THRESHOLD.match(prop["stat"])
             if m and m.group(2).strip().lower() == family:
                 same_stat.append((float(m.group(1)), prop))
+        players = {prop["player"] for _, prop in same_stat}
+        if len(players) > 1 and hint_game:
+            same_stat = [(v, p) for v, p in same_stat if p["game"] == hint_game] or same_stat
+            players = {prop["player"] for _, prop in same_stat}
+        if len(players) > 1:
+            return f"more than one player matches ({', '.join(sorted(players)[:4])}); use the full name"
         if not same_stat:
             return f"Kalshi has no {family} market for them"
         for value, prop in same_stat:
@@ -1542,7 +1575,7 @@ class KalshiSportsStrategy:
             if prop["kind"] != "spread":
                 continue
             m = _SPREAD_TITLE.match(prop["title"])
-            if not m:
+            if not m or nick not in _name_tokens(prop["game"]):
                 continue
             is_team = nick in _name_tokens(m.group(1))
             # Team +N: the opponent must not win by over N (NO on the opponent's market).
