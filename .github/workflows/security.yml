@@ -1,0 +1,81 @@
+name: Security Checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"   # weekly: new advisories appear without any code change
+
+# Read-only token for every job (least privilege).
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit (runtime requirements)
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --progress-spinner off
+
+  secret-scanning:
+    name: Scan Full History for Secrets
+    runs-on: ubuntu-latest
+    # gitleaks-action lists the PR's commits through the API, which needs pull-requests: read.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  static-controls:
+    name: Static Security Controls
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Blocks: eval/exec, shell=True, pickle, weak crypto, disabled TLS verification,
+      # Telegram handlers without the chat-ID check, unpinned actions, committed tunnel URLs.
+      # Advisory: dynamic imports, base64 decoding, non-HTTPS URLs, loose extra requirements.
+      - name: Run scripts/security_checks.py
+        run: python scripts/security_checks.py
+
+  license-check:
+    name: Check Dependency Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime requirements and pip-licenses
+        run: |
+          pip install -r requirements.txt pip-licenses
+
+      - name: Fail on copyleft licenses in runtime dependencies
+        run: |
+          pip-licenses --format=csv --fail-on="GNU General Public License v3 (GPLv3);GNU Affero General Public License v3 (AGPLv3);GNU General Public License v2 (GPLv2)" > /dev/null
+          pip-licenses --format=markdown --order=license | tee -a "$GITHUB_STEP_SUMMARY"

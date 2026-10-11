@@ -1817,6 +1817,8 @@ class TradingTelegramBot:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
     async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
         await self._confirm_pending(update)
 
     async def _confirm_pending(self, update: Update, stake: float | None = None) -> None:

@@ -1,0 +1,13 @@
+# Gitleaks configuration (picked up automatically by the Security Checks workflow).
+title = "Zulubot gitleaks config"
+
+[extend]
+useDefault = true
+
+# Empty template assignments such as "ROBINHOOD_PASSWORD=" in .env.example make the generic
+# rule treat the NEXT line as the secret value. Allow only that shape: a variable name, "=",
+# and nothing after it. Real values (anything after the "=") are still detected.
+[allowlist]
+description = "Empty KEY= placeholders in env templates"
+regexTarget = "match"
+regexes = ['''(?i)[a-z_]*(password|secret|key|token|passphrase)=\s*\n''']

@@ -779,7 +779,7 @@ class AppConfig:
                 default_output_cost_per_m=_env_float("TRADING_AGENTS_DEFAULT_OUTPUT_COST_PER_M", 15.0),
                 estimated_input_tokens_per_call=_env_int("TRADING_AGENTS_ESTIMATED_INPUT_TOKENS_PER_CALL", 1500),
                 estimated_output_tokens_per_call=_env_int("TRADING_AGENTS_ESTIMATED_OUTPUT_TOKENS_PER_CALL", 300),
-                ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip(),
+                ollama_base_url=(os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434").strip(),
                 model_pricing=_env_model_pricing("TRADING_AGENTS_MODEL_PRICING_JSON", _default_model_pricing()),
             ),
             altcoin_rotation=AltcoinRotationConfig(

@@ -769,7 +769,7 @@ class TradingAgentsService:
             f"{market_description[:300]}\n{sorted_tags}".encode("utf-8")
         ).hexdigest()[:12]
         cache_key = (
-            f"polymarket:{hashlib.md5(market_question.encode()).hexdigest()[:12]}:"
+            f"polymarket:{hashlib.sha256(market_question.encode()).hexdigest()[:12]}:"
             f"meta{meta_hash}:"
             f"yp{_bucket(yes_price, 0.02)}:"
             f"fg{_bucket(fear_greed_value, 5)}"
