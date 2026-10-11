@@ -546,6 +546,7 @@ class StrategyTests(unittest.TestCase):
         _, _, result = _run(strat)
         self.assertEqual(result["bankroll"]["equity"], 10_000.0)
         self.assertEqual(result["bankroll"]["stake_scale"], 1.0)
+        self.assertIsNone(result["bankroll"]["cash"])           # paper: no Kalshi cash to report
 
 
 def _soccer_game(**overrides) -> EspnGame:

@@ -1,5 +1,9 @@
 # Release notes
 
+## 2026-10-11: Show Kalshi's real order errors; show cash in `/sports`
+- Removed the fallback to Kalshi's old order endpoint. It answers `410 deprecated_v1_order_endpoint`, which hid the real V2 error behind a misleading one. V2 errors now surface as they are. `cancel_order` uses the V2 path too.
+- `/sports` shows `cash $X`, what the bot believes Kalshi has available, so it can be compared with the Kalshi app when orders fail with `insufficient_balance`.
+
 ## 2026-10-11: `/sports` shows the running build
 - `/sports` now prints `Build: <commit> — <message>` from Railway's deploy variables, so you can tell whether the newest code is live.
 

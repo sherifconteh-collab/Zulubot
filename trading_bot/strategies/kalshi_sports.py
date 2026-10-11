@@ -906,6 +906,8 @@ class KalshiSportsStrategy:
             "stake_scale": round(scale, 3),
             "open_exposure": round(exposure, 2),
             "exposure_budget": round(exposure_cap, 2),
+            # What the bot believes Kalshi has available to bet right now (live only), to compare with the app.
+            "cash": round(broker.get_cash_balance(state, cash_bucket=bucket), 2) if bucket else None,
         }
 
         # Size every candidate first, then fit them into the exposure budget together

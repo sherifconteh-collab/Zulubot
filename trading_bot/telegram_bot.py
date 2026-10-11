@@ -1510,7 +1510,8 @@ class TradingTelegramBot:
             if bank:
                 lines.append(
                     f"Bankroll ${float(bank.get('equity', 0)):.2f} (today {float(bank.get('day_pnl', 0)):+.2f}) | "
-                    f"stake scale {float(bank.get('stake_scale', 1)):.0%} | "
+                    + (f"cash ${float(bank['cash']):.2f} | " if bank.get("cash") is not None else "")
+                    + f"stake scale {float(bank.get('stake_scale', 1)):.0%} | "
                     f"open ${float(bank.get('open_exposure', 0)):.2f} of ${float(bank.get('exposure_budget', 0)):.2f}"
                 )
             preds = module.get("predictions") or []
