@@ -29,6 +29,10 @@ python scripts/security_checks.py
 - Update `README.md` and `CHANGELOG.md` for user-facing changes.
 - Keep pull requests focused: one change per PR.
 
+## Changelog and releases
+
+Add an entry under `## [Unreleased]` in `CHANGELOG.md` in every pull request that changes behavior: a `###` title and a few bullets saying what changed and why. Releases are automatic. Every Monday 09:00 UTC `.github/workflows/release.yml` runs `scripts/release.py`, which turns the `[Unreleased]` entries into a dated, calendar-versioned release (`YYYY.M.N`, for example `2026.10.0`, then `2026.10.1` in the same month), prepends it to `RELEASE_NOTES.md`, points the README release badge at it, tags it and publishes a GitHub Release. An empty `[Unreleased]` cuts nothing. You can preview with `python scripts/release.py cut --dry-run`, or run the workflow by hand from the Actions tab.
+
 ## Contributor License Agreement
 
 Before a pull request can be merged you must sign the [CLA](CLA.md). The CLA bot prompts you on your first PR: comment `I have read the CLA Document and I hereby sign the CLA`. You keep the copyright in your contribution; the CLA lets the maintainers license it under both the AGPL-3.0 and the commercial license (see [LICENSE](LICENSE)).
