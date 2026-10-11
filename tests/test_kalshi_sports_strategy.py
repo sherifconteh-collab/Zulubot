@@ -81,7 +81,8 @@ def _market(side_team="Buffalo", yes_ask=0.40, no_ask=0.62, **overrides) -> dict
 
 
 def _config(**overrides) -> KalshiSportsConfig:
-    defaults = dict(enabled=True, leagues=["nfl"], min_trade_usd=1.0)
+    # Value-bet-only by default so these tests isolate the mispricing logic; action picks have their own tests.
+    defaults = dict(enabled=True, leagues=["nfl"], min_trade_usd=1.0, action_bets=False)
     defaults.update(overrides)
     return KalshiSportsConfig(**defaults)
 
@@ -667,6 +668,130 @@ class PolymarketTests(unittest.TestCase):
         strat, _ = _strategy(_config(), [game], [_market("Baltimore", yes_ask=0.64, no_ask=0.38)])
         _, _, result = _run(strat)
         self.assertIn("polymarket", result["predictions"][0]["dropped"])
+
+
+def _fav_and_dog_games(n=4):
+    """Fair-priced games (no edge): Kalshi asks match the book, so only action picks can bet."""
+    games, markets = [], []
+    for i in range(n):
+        games.append(_game(
+            game_id=str(i), home=_team(str(i), f"City{i}", f"Team{i}", f"H{i}X"),
+            away=_team(str(i + 100), f"Town{i}", f"Club{i}", f"A{i}X"),
+            home_moneyline=-150.0, away_moneyline=130.0))
+        markets.append(_market(
+            f"City{i}", yes_ask=0.60, no_ask=0.42, title=f"Town{i} at City{i} Winner?",
+            ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X-H{i}X", event_ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X"))
+    return games, markets
+
+
+class ActionPickTests(unittest.TestCase):
+    def test_bets_a_side_when_nothing_is_mispriced(self):
+        games, markets = _fav_and_dog_games(1)
+        strat, _ = _strategy(_config(action_bets=True), games, markets)
+        state, _, result = _run(strat)
+        self.assertEqual(len(result["buys"]), 1)
+        self.assertTrue(state.positions[result["buys"][0]].meta["action_bet"])
+        self.assertTrue(result["predictions"][0]["action"])
+        self.assertLess(result["predictions"][0]["net_edge"], 0)         # honest: no edge after fees
+
+    def test_off_switch_restores_value_bets_only(self):
+        games, markets = _fav_and_dog_games(1)
+        strat, _ = _strategy(_config(action_bets=False), games, markets)
+        _, _, result = _run(strat)
+        self.assertEqual(result["buys"], [])
+
+    def test_limited_per_scan_and_per_day(self):
+        games, markets = _fav_and_dog_games(6)
+        strat, _ = _strategy(_config(action_bets=True, action_max_per_scan=2, action_bets_per_day=3,
+                                     capital_allocation_pct=1.0), games, markets)
+        state = PortfolioState(cash=10_000.0)
+        _, _, first = _run(strat, state)
+        _, _, second = _run(strat, state)
+        _, _, third = _run(strat, state)
+        self.assertEqual((len(first["buys"]), len(second["buys"]), len(third["buys"])), (2, 1, 0))
+
+    def test_stake_is_a_small_share_of_the_bankroll(self):
+        games, markets = _fav_and_dog_games(1)
+        strat, _ = _strategy(_config(action_bets=True, action_stake_pct=0.02), games, markets)
+        state, _, result = _run(strat)
+        pos = state.positions[result["buys"][0]]
+        self.assertLessEqual(pos.quantity * pos.entry_price, 10_000 * 0.02 + 1.0)
+
+    def test_never_backs_a_long_shot(self):
+        # Book: Baltimore 20%. Both sides are fairly priced; the favourite (NO on Baltimore) is picked, never the 20% side.
+        game = _game(home_moneyline=400.0, away_moneyline=-500.0)
+        strat, _ = _strategy(_config(action_bets=True, action_min_win_prob=0.35), [game],
+                             [_market("Baltimore", yes_ask=0.20, no_ask=0.82)])
+        state, _, result = _run(strat)
+        if result["buys"]:
+            self.assertEqual(state.positions[result["buys"][0]].meta["side"], "no")
+        game2 = _game(home_moneyline=400.0, away_moneyline=-500.0)
+        strat2, _ = _strategy(_config(action_bets=True, action_min_win_prob=0.90), [game2],
+                              [_market("Baltimore", yes_ask=0.20, no_ask=0.82)])
+        self.assertEqual(_run(strat2)[2]["buys"], [])
+
+    def test_picks_by_value_not_always_the_underdog_or_favourite(self):
+        # Same game, two prices: when the underdog is the cheaper side relative to its
+        # probability the pick is the underdog; otherwise it is the favourite.
+        dog = _strategy(_config(action_bets=True, action_min_win_prob=0.30),
+                        [_game(home_moneyline=-150.0, away_moneyline=130.0)],
+                        [_market("Baltimore", yes_ask=0.64, no_ask=0.35)])[0]
+        fav = _strategy(_config(action_bets=True, action_min_win_prob=0.30),
+                        [_game(home_moneyline=-150.0, away_moneyline=130.0)],
+                        [_market("Baltimore", yes_ask=0.58, no_ask=0.43)])[0]
+        side_dog = _run(dog)[0].positions
+        side_fav = _run(fav)[0].positions
+        self.assertEqual({p.meta["side"] for p in side_dog.values()}, {"no"})     # underdog (Buffalo) is the value
+        self.assertEqual({p.meta["side"] for p in side_fav.values()}, {"yes"})    # favourite (Baltimore) is the value
+
+    def test_underdog_picks_are_capped_when_favourites_are_available(self):
+        # Four games: the two best-value sides are underdogs (p<.5), two others are favourites.
+        games, markets = [], []
+        specs = [  # (home_ml, away_ml, yes_ask, no_ask): value of the underdog side is best in the first two
+            (-130.0, 110.0, 0.57, 0.44),   # NO (away underdog ~46%): best value, slightly
+            (-130.0, 110.0, 0.57, 0.44),
+            (-200.0, 170.0, 0.63, 0.39),   # YES (home favourite ~64%): a little worse value
+            (-200.0, 170.0, 0.63, 0.39),
+        ]
+        for i, (h, a, ya, na) in enumerate(specs):
+            games.append(_game(game_id=str(i), home=_team(str(i), f"City{i}", f"Team{i}", f"H{i}X"),
+                               away=_team(str(i + 100), f"Town{i}", f"Club{i}", f"A{i}X"),
+                               home_moneyline=h, away_moneyline=a))
+            markets.append(_market(f"City{i}", yes_ask=ya, no_ask=na, title=f"Town{i} at City{i} Winner?",
+                                   ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X-H{i}X",
+                                   event_ticker=f"KXNFLGAME-26OCT04A{i}XH{i}X"))
+        strat, _ = _strategy(_config(action_bets=True, action_bets_per_day=2, action_max_per_scan=2,
+                                     action_min_win_prob=0.30, capital_allocation_pct=1.0), games, markets)
+        state, _, result = _run(strat)
+        sides = [p.meta["side"] for p in state.positions.values()]
+        dogs = sum(1 for p in state.positions.values() if p.meta["model_prob"] < 0.5)
+        self.assertEqual(len(sides), 2)
+        self.assertEqual(dogs, 1)                          # cap = ceil(2/2) = 1 underdog; the rest are favourites
+        self.assertEqual(sorted(sides), ["no", "yes"])
+
+    def test_real_edge_beats_an_action_pick_in_the_same_game(self):
+        game = _game(home_moneyline=-190.0, away_moneyline=160.0, predictor_home_prob=0.66)
+        strat, _ = _strategy(_config(action_bets=True), [game], [_market("Baltimore", yes_ask=0.57, no_ask=0.45)])
+        state, _, result = _run(strat)
+        self.assertEqual(len(result["buys"]), 1)
+        self.assertFalse(state.positions[result["buys"][0]].meta.get("action_bet", False))
+
+    def test_action_picks_are_not_parlay_legs(self):
+        games, markets = _fav_and_dog_games(3)
+        strat, _ = _strategy(_config(action_bets=True), games, markets)
+        self.assertEqual(_run(strat)[2]["parlays"], [])
+
+    def test_action_count_survives_restart_and_resets_daily(self):
+        import tempfile, pathlib
+        from trading_bot.sports_model import DailySession
+        path = pathlib.Path(tempfile.mkdtemp()) / "s.json"
+        s = DailySession(path)
+        s.update("2026-10-04", 100.0)
+        s.record_action(); s.record_action()
+        self.assertEqual(DailySession(path).actions, 2)
+        again = DailySession(path)
+        again.update("2026-10-05", 100.0)
+        self.assertEqual(again.actions, 0)
 
 
 class FeeMultiplierTests(unittest.TestCase):

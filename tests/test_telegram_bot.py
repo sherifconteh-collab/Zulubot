@@ -382,6 +382,14 @@ class SportsPickFormatTests(unittest.TestCase):
         self.assertIn("YES ask 0.33", line)
         self.assertIn("net edge +5.0%", line)
 
+    def test_action_pick_is_labelled_honestly(self):
+        pick = {**self.NO_BET, "net_edge": -0.0029, "action": True, "side": "no", "pick": "A Team"}
+        line = _format_sports_pick(pick)
+        self.assertIn("PICK: A Team", line)
+        self.assertIn("small action bet", line)
+        self.assertIn("-0.3% after fees", line)
+        self.assertNotIn("BET:", line)
+
     def test_bets_sort_ahead_of_no_bet_games(self):
         lines = _format_sports_picks([self.NO_BET, self.BET])
         self.assertIn("BET:", lines[0])

@@ -324,27 +324,45 @@ class DailySession:
         self.date = ""
         self.start = 0.0
         self.peak = 0.0
+        self.actions = 0          # "action pick" bets placed today
+        self.dogs = 0             # ...of which backed an underdog (win prob < 50%)
         if path is not None and path.exists():
             try:
                 data = json.loads(path.read_text())
                 self.date = str(data.get("date", ""))
                 self.start = float(data.get("start", 0.0))
                 self.peak = float(data.get("peak", 0.0))
+                self.actions = int(data.get("actions", 0))
+                self.dogs = int(data.get("dogs", 0))
             except (OSError, ValueError) as exc:
                 self.logger.warning("Could not load sports session (%s); starting fresh.", exc)
+
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps({
+                "date": self.date, "start": self.start, "peak": self.peak,
+                "actions": self.actions, "dogs": self.dogs,
+            }))
+        except OSError as exc:
+            self.logger.warning("Could not save sports session: %s", exc)
+
+    def record_action(self, underdog: bool = False) -> None:
+        """Count one action pick (and whether it backed an underdog) against today's allowance."""
+        self.actions += 1
+        if underdog:
+            self.dogs += 1
+        self._save()
 
     def update(self, today: str, equity: float) -> dict[str, float]:
         """Record the current bankroll; returns day PnL and drawdown from the day's peak."""
         if self.date != today:
-            self.date, self.start, self.peak = today, equity, equity
+            self.date, self.start, self.peak, self.actions, self.dogs = today, equity, equity, 0, 0
         elif equity > self.peak:
             self.peak = equity
-        if self.path is not None:
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                self.path.write_text(json.dumps({"date": self.date, "start": self.start, "peak": self.peak}))
-            except OSError as exc:
-                self.logger.warning("Could not save sports session: %s", exc)
+        self._save()
         drawdown = (self.peak - equity) / self.peak if self.peak > 0 and equity < self.peak else 0.0
         return {"day_start": self.start, "day_peak": self.peak, "day_pnl": equity - self.start,
                 "drawdown": drawdown}

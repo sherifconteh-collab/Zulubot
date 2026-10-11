@@ -500,6 +500,14 @@ class KalshiSportsConfig:
     # legs from different games. 0 disables. Kalshi combos are quoted on request, not
     # via an order book, so they are placed manually in Kalshi's parlay builder.
     parlay_max_legs: int = 4
+    # Action picks: when no game has a mispricing, still bet the best-value side of the best games
+    # so the bot isn't idle. They have no edge after Kalshi's fee (the fee is a small, certain
+    # cost per bet), so they are kept small and capped per scan and per day.
+    action_bets: bool = True
+    action_bets_per_day: int = 5
+    action_max_per_scan: int = 2
+    action_stake_pct: float = 0.03           # per action pick, % of bankroll
+    action_min_win_prob: float = 0.35        # never back a long shot just to have a bet
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
     take_profit_pct: float = 0.0
@@ -913,6 +921,11 @@ class AppConfig:
                 ignore_global_halt=_env_bool("KALSHI_SPORTS_IGNORE_GLOBAL_HALT", True),
                 use_polymarket=_env_bool("KALSHI_SPORTS_USE_POLYMARKET", True),
                 parlay_max_legs=_env_int("KALSHI_SPORTS_PARLAY_MAX_LEGS", 4),
+                action_bets=_env_bool("KALSHI_SPORTS_ACTION_BETS", True),
+                action_bets_per_day=_env_int("KALSHI_SPORTS_ACTION_BETS_PER_DAY", 5),
+                action_max_per_scan=_env_int("KALSHI_SPORTS_ACTION_MAX_PER_SCAN", 2),
+                action_stake_pct=_env_float("KALSHI_SPORTS_ACTION_STAKE_PCT", 0.03),
+                action_min_win_prob=_env_float("KALSHI_SPORTS_ACTION_MIN_WIN_PROB", 0.35),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
