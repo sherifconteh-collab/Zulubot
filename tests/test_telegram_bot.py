@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 from trading_bot.telegram_bot import (
     TradingTelegramBot,
     _format_auto_parlays,
+    _build_line,
     _skip_examples,
     _skip_reason_summary,
     _sports_mode_line,
@@ -920,6 +921,15 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_skip_examples(decisions), [
             "order_failed: HTTP 404: &lt;not found&gt;", "parlay_not_filled: no quote at or under 50c"])
         self.assertEqual(_skip_examples(None), [])
+
+    def test_build_line_reports_the_deployed_commit(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"RAILWAY_GIT_COMMIT_SHA": "00be3ee2eb014a88e4c3234e35fd3368054a3a68",
+                                     "RAILWAY_GIT_COMMIT_MESSAGE": "Place live orders through V2 <fix>\n\nbody"}):
+            self.assertEqual(_build_line(), "Build: 00be3ee \u2014 Place live orders through V2 &lt;fix&gt;")
+        with patch.dict(os.environ, {"RAILWAY_GIT_COMMIT_SHA": ""}):
+            self.assertIn("unknown", _build_line())
 
     def test_preview_and_result_wording(self):
         text = _format_parlay_preview(self.PLAN)
