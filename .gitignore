@@ -1,7 +1,20 @@
 # Secrets - NEVER commit
 .env
+.env.*
+!.env.example
 *.pem
 *.key
+*.cert
+*.p12
+secrets/
+credentials/
+
+# Runtime data and logs (state, audit logs, caches can contain account details)
+data/
+logs/
+*.log
+*.dump
+*.backup
 
 # Python
 __pycache__/
@@ -35,3 +48,6 @@ Thumbs.db
 
 # Test artifacts
 test_telegram_setup.py
+
+# CLA signatures are recorded here by the CLA bot
+!signatures/version1/cla.json

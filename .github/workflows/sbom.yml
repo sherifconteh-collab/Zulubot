@@ -1,0 +1,37 @@
+name: SBOM
+
+# Software bill of materials (CycloneDX) for the runtime dependencies, on every push to main
+# and every published release.
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: Generate SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Resolve the real versions first so the SBOM lists exact installed packages, not ranges.
+      - name: Generate SBOM
+        run: |
+          python -m venv /tmp/sbom-env
+          /tmp/sbom-env/bin/pip install -r requirements.txt
+          pip install cyclonedx-bom
+          cyclonedx-py environment /tmp/sbom-env --of JSON -o sbom.cdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          retention-days: 90
