@@ -202,6 +202,32 @@ Send a screenshot (photo or image file) of a bet slip, such as a sportsbook same
 - **Caption `10`** (or `what would $10 pay`) shows the preview and waits for `/confirm`.
 - If some legs aren't on Kalshi the bot **never** auto-places the shorter parlay: it shows the preview and asks you to reply yes.
 
+### Paste a list of legs instead (no AI, no API cost)
+
+Type or paste the legs one per line (bullets and numbers are fine), with your stake and a bet word above them:
+
+```
+Make this bet at $10
+• Brian Thomas Jr. 2+ receptions
+• Lawrence 150+ passing yards
+• Rodriguez 10+ rushing yards
+• the Eagles +16.5 spread
+```
+
+This is read by a plain parser on the bot itself, so it works without `ANTHROPIC_API_KEY` and costs nothing. It is a fixed set of shapes, not free-form understanding:
+
+| Reads | Examples |
+|---|---|
+| Player stat, "N or more" | `Lawrence 150+ passing yards`, `Lawrence 150+ pass yds`, `Tuten - Alt Rushing Yds 30+`, `Brian Thomas Jr. to record 2+ receptions` |
+| Over a half-point line (same as N+) | `Lawrence over 149.5 passing yards` |
+| Anytime touchdown | `Josh Allen anytime TD` |
+| Spread and moneyline | `the Eagles +16.5 spread`, `Philadelphia Eagles (+16.5)`, `Ravens ML` |
+| Layout | one per line (bullets or numbers are fine), or on one line separated by commas, `+` or `and`; a stake clause such as `bet $10 on` in front |
+
+It does **not** guess. These are left alone or reported rather than interpreted: a whole-number line without a plus (`Lawrence 150 passing yards`: exactly 150 or 150 or more?), `30+ Yards` with no stat (which yards?), game totals, and unders (Kalshi's player markets are all "N or more"). At least two lines must look like legs, and ordinary chat is never mistaken for a slip. It then follows the same rules as a screenshot: exact matching, the same placing and preview behaviour, and nothing is placed unless every leg matched.
+
+A bare surname is fine when it is unambiguous. If the legs point at one game, that game settles a shared surname; otherwise the bot lists the players that match and asks for the full name rather than guessing. It cannot read screenshots (that needs the API).
+
 ### Limits that always apply
 
 Market open, game not started, price within 2¢ of the preview (single bets), one bet per game for game-winner legs, at least `KALSHI_SPORTS_MIN_TRADE_USD`, at most `KALSHI_SPORTS_USER_BET_MAX_PCT` of your bankroll for a single bet and `KALSHI_SPORTS_USER_PARLAY_MAX_PCT` for a parlay, and no more than the cash available. Sports is exempt from the global kill switch (`KALSHI_SPORTS_IGNORE_GLOBAL_HALT`). Hand-picked bets settle and are counted like any other sports bet.

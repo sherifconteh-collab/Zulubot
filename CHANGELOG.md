@@ -1,5 +1,9 @@
 # Release notes
 
+## 2026-10-11: Paste a list of legs, no AI needed
+- A typed or pasted list of legs (`Lawrence 150+ passing yards`, `Name anytime TD`, `the Eagles +16.5 spread`, ...) is read by a local parser and handled exactly like a screenshot: exact Kalshi matching, preview or one-shot placement with `bet $10`, and nothing placed unless every leg matched. Works with no Anthropic key or credit.
+- **Matching fixes** (also benefit screenshots): a surname shared by two players is reported instead of guessed (the game most legs point to settles it when the slip names none), and a spread for a team is only matched in that team's own game.
+
 ## 2026-10-11: Clearer Anthropic errors in Telegram
 - When the Anthropic key is out of credit, invalid, rate limited or the API is overloaded, picture and plain-text messages now say so (and what to do) instead of "I couldn't work out what you meant" or a raw API error dump. The `/` commands are unaffected.
 
