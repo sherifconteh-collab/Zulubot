@@ -51,6 +51,7 @@ Only the latest commit on `main` receives security fixes.
 | `security.yml` | `pip-audit`, Gitleaks over full history (config in `.gitleaks.toml`), `scripts/security_checks.py` (below), license check; also runs weekly |
 | `codeql.yml` | CodeQL `security-extended` for Python (runs once the repo is public) |
 | `sbom.yml` | CycloneDX software bill of materials |
+| `cla.yml` | CLA bot for pull requests. It runs on `pull_request_target` with write access, so it never checks out or runs PR code, and the action is pinned to a commit SHA. If branch protection stops it recording signatures on `main`, add a fine-grained token as the `PERSONAL_ACCESS_TOKEN` secret. |
 | Dependabot | Weekly updates for Python packages and GitHub Actions |
 
 `scripts/security_checks.py` fails the build on: `eval`/`exec`, `os.system`, `shell=True`, unpickling, unsafe `yaml.load`, MD5/SHA-1 without `usedforsecurity=False`, weak ciphers and ECB, disabled TLS verification, `random` used for secrets, Telegram handlers that skip the chat check, unpinned GitHub Actions, and committed tunnel URLs. It warns on dynamic imports, base64 decoding, non-HTTPS URLs and loosely pinned optional requirements. Run it locally with `python scripts/security_checks.py`.
@@ -71,7 +72,7 @@ By opening a pull request you confirm that your contribution:
 
 1. contains no malicious code, backdoors, telemetry or code that phones home without disclosure,
 2. contains no hardcoded credentials or personal endpoints,
-3. is your own work or properly attributed, and licensed under the project's Apache-2.0 license,
+3. is your own work or properly attributed, and is submitted under the project's dual license as set out in the [CLA](CLA.md),
 4. leaves `PAPER_MODE=true` as the default and does not weaken risk limits, access control or the confirm flow.
 
 Not accepted: cryptocurrency miners, obfuscated code, code that sends data to servers not documented in the README, anything that bypasses the safeguards above.

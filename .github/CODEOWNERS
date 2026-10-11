@@ -28,6 +28,9 @@
 /railway.toml @sherifconteh-collab
 /SECURITY.md @sherifconteh-collab
 /LICENSE @sherifconteh-collab
+/LICENSES/ @sherifconteh-collab
+/CLA.md @sherifconteh-collab
+/signatures/ @sherifconteh-collab
 
 # Environment files (should never be committed)
 /.env* @sherifconteh-collab

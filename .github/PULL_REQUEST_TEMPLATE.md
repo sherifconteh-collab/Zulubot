@@ -46,6 +46,10 @@ python scripts/security_checks.py
 - [ ] New dependencies are from trusted sources, version-bounded, and pass `pip-audit`
 - [ ] New GitHub Actions are pinned to a commit SHA
 
+## Licensing
+
+- [ ] I have signed the [CLA](https://github.com/sherifconteh-collab/Zulubot/blob/main/CLA.md) (the bot will prompt me on my first PR)
+
 ## Docs
 
 - [ ] README / `.env.example` / `CHANGELOG.md` updated if user-facing

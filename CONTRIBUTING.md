@@ -29,6 +29,10 @@ python scripts/security_checks.py
 - Update `README.md` and `CHANGELOG.md` for user-facing changes.
 - Keep pull requests focused: one change per PR.
 
+## Contributor License Agreement
+
+Before a pull request can be merged you must sign the [CLA](CLA.md). The CLA bot prompts you on your first PR: comment `I have read the CLA Document and I hereby sign the CLA`. You keep the copyright in your contribution; the CLA lets the maintainers license it under both the AGPL-3.0 and the commercial license (see [LICENSE](LICENSE)).
+
 ## Security requirements
 
 By submitting a pull request you certify that your contribution:
@@ -37,7 +41,7 @@ By submitting a pull request you certify that your contribution:
 2. does not contain hardcoded secrets, API keys or personal URLs (tunnels, IPs),
 3. is your own work or properly attributed,
 4. does not weaken access control, risk limits, the `PAPER_MODE` default or the confirm-before-buying flow,
-5. may be distributed under the project's Apache-2.0 license (see Section 5 of the [LICENSE](LICENSE)).
+5. is submitted under the project's dual license (AGPL-3.0 and the commercial license) as set out in the [CLA](CLA.md).
 
 Not accepted: miners, obfuscated code, code that phones home to undisclosed servers, `eval`/`exec`/`shell=True`/pickle on untrusted data, disabling TLS verification, and unpinned GitHub Actions. See [SECURITY.md](SECURITY.md) for the full policy and how to report a vulnerability privately.
 

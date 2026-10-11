@@ -48,3 +48,6 @@ Thumbs.db
 
 # Test artifacts
 test_telegram_setup.py
+
+# CLA signatures are recorded here by the CLA bot
+!signatures/version1/cla.json
