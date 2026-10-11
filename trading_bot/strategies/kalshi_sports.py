@@ -415,6 +415,7 @@ class KalshiSportsStrategy:
         self.board: dict[str, dict[str, Any]] = {}
         # ticker -> football player-stat markets from the last /props search.
         self.props: dict[str, dict[str, Any]] = {}
+        self._props_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
         self._combo_collections: tuple[float, list[tuple[str, frozenset[str]]]] | None = None
         self._sleep = time.sleep
 
@@ -1196,8 +1197,13 @@ class KalshiSportsStrategy:
         quote.pop("market", None)
         return quote
 
-    def refresh_props(self, now: datetime, query: str) -> list[dict[str, Any]]:
-        """Football player-stat markets (YES side) for upcoming board games matching ``query``."""
+    _PROPS_CACHE_SECONDS = 600.0
+
+    def _load_props(self, now: datetime) -> dict[str, dict[str, Any]]:
+        """Every football player-stat market (YES side) for upcoming board games; cached for a few minutes."""
+        cached = self._props_cache
+        if cached is not None and time.monotonic() - cached[0] < self._PROPS_CACHE_SECONDS:
+            return cached[1]
         if not self.board:
             self.refresh_board(now)
         games: dict[str, dict[str, Any]] = {}
@@ -1207,33 +1213,44 @@ class KalshiSportsStrategy:
                     minutes=self.config.min_minutes_to_start):
                 continue
             games[entry["event_ticker"].split("-", 1)[-1]] = entry
-        words = query.lower().split()
         found: dict[str, dict[str, Any]] = {}
+        failed = False
         for series in FOOTBALL_PROP_SERIES:
             try:
                 markets = self._fetch_markets(series, pages=10, pause=0.3)
             except Exception as exc:
+                failed = True
                 self.logger.warning("Prop fetch failed for %s: %s", series, exc)
                 continue
             for market in markets:
                 game = games.get(str(market.get("event_ticker", "")).split("-", 1)[-1])
-                if game is None:
-                    continue
-                title = str(market.get("title") or market.get("yes_sub_title") or "")
-                if not all(w in f"{title} {game['game']}".lower() for w in words):
-                    continue
                 ask = _kalshi_price(market, "yes_ask")
-                if not 0.0 < ask < 1.0:
+                if game is None or not 0.0 < ask < 1.0:
                     continue
+                bid = _kalshi_price(market, "yes_bid")
+                title = str(market.get("title") or market.get("yes_sub_title") or "")
                 player, _, stat = title.partition(":")
                 ticker = str(market.get("ticker", ""))
                 found[ticker] = {
                     "ticker": ticker, "event_ticker": str(market.get("event_ticker", "")),
                     "league": game["league"], "game": game["game"], "start": game["start"],
                     "player": player.strip(), "stat": stat.strip() or title, "title": title,
-                    "yes_ask": ask,
+                    "yes_ask": ask, "yes_bid": bid,
                 }
-        self.props = found
+        if not failed:  # a partial listing would hide players for the whole cache window
+            self._props_cache = (time.monotonic(), found)
+        return found
+
+    def refresh_props(self, now: datetime, query: str) -> list[dict[str, Any]]:
+        """Football player-stat markets matching ``query`` (words in the title or game; numbers match a threshold)."""
+        universe = self._load_props(now)
+        words = query.lower().split()
+        found: dict[str, dict[str, Any]] = {}
+        for ticker, prop in universe.items():
+            hay = f"{prop['title']} {prop['game']}".lower()
+            if all((f"{w}+" in hay) if w.isdigit() else (w in hay) for w in words):
+                found[ticker] = prop
+        self.props.update(found)
         return sorted(found.values(), key=lambda p: (p["start"], p["game"], p["player"], p["title"]))
 
     # ------------------------------------------------------------------
@@ -1307,6 +1324,9 @@ class KalshiSportsStrategy:
                 return {"ok": False, "reason": f"Kalshi has closed betting on {source['game']}."}
             if source["event_ticker"] in held:
                 return {"ok": False, "reason": f"You already have a bet on {source['game']}."}
+            bid = _kalshi_price(market, f"{side}_bid")
+            ask_now = _kalshi_price(market, f"{side}_ask")
+            mid = (bid + ask_now) / 2.0 if bid > 0 and ask_now > 0 else ask_now
             if prop is not None:
                 p, pick = None, f"{prop['player']} {prop['stat']}"
             else:
@@ -1317,7 +1337,9 @@ class KalshiSportsStrategy:
                 "market_ticker": ticker, "event_ticker": source["event_ticker"], "side": side,
                 "game": source["game"], "league": source["league"], "start": source["start"],
                 "sport": sport_of(source["league"]), "kind": "prop" if prop is not None else "game",
-                "pick": pick, "p": p, "ask": _kalshi_price(market, f"{side}_ask"),
+                "pick": pick, "p": p, "ask": ask_now,
+                # What the leg is worth: the model's probability, else Kalshi's own mid price.
+                "ref": p if p is not None else mid,
             })
         sports = sorted({r["sport"] for r in rows})
         if len(sports) > 1:
@@ -1332,14 +1354,17 @@ class KalshiSportsStrategy:
             fair = 1.0
             for r in rows:
                 fair *= r["p"]
-        ceiling = max_price if max_price is not None else fair
-        if ceiling is None:
-            implied = 1.0
+        # Reference price: the model's fair value when it has a view on every leg, otherwise the
+        # legs' own Kalshi mid prices multiplied (what the market says all of them hitting is worth).
+        reference = None
+        if all(r["ref"] > 0 for r in rows):
+            reference = 1.0
             for r in rows:
-                implied *= r["ask"] if r["ask"] > 0 else 1.0
+                reference *= r["ref"]
+        ceiling = max_price if max_price is not None else reference
+        if ceiling is None:
             return {"ok": False, "reason": (
-                "The model has no view on every leg (player stats, or a game without a sportsbook line), so there "
-                f"is no fair price. Kalshi's own asking prices multiply to about {implied * 100:.0f}¢ for all legs. "
+                "One of those markets has no price right now, so there's no reference value. "
                 "Set your own ceiling, e.g. /parlay a + b 5 max 30 (cents).")}
         if not 0.0 < ceiling < 1.0:
             return {"ok": False, "reason": "The maximum price has to be between 0 and 100 cents."}
@@ -1365,7 +1390,7 @@ class KalshiSportsStrategy:
         if contracts < 1:
             return {"ok": False, "reason": f"${stake:.2f} doesn't buy a contract at up to ${ceiling:.2f}."}
         return {
-            "ok": True, "kind": "parlay", "legs": rows, "collection": collection, "fair": fair,
+            "ok": True, "kind": "parlay", "legs": rows, "collection": collection, "fair": fair, "reference": reference,
             "max_price": ceiling, "contracts": contracts, "stake": stake,
             "max_cost": contracts * ceiling, "payout": float(contracts), "equity": equity, "live": True,
         }

@@ -1057,24 +1057,33 @@ class ParlayRfqTests(unittest.TestCase):
         both, _, _ = self._props(strat, kalshi, "passing yards")
         self.assertEqual(len(both), 2)  # the market for a game not on the board is dropped
 
-    def test_prop_parlay_needs_a_ceiling_then_places(self):
+    def test_prop_parlay_defaults_to_the_market_price_and_places(self):
         strat, kalshi = self._setup()
         props, prop, _ = self._props(strat, kalshi, "allen")
         legs = [{"ticker": prop["ticker"], "side": "yes"}, self._legs(strat)[1]]  # Allen 250+ and Kansas City
         broker = PaperBroker(True, logging.getLogger("t"))
         plan = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=None, now=_NOW)
-        self.assertFalse(plan["ok"])
-        self.assertIn("no fair price", plan["reason"])
-        self.assertIn("Kalshi's own asking prices", plan["reason"])
-        plan = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=0.25, now=_NOW)
         self.assertTrue(plan["ok"], plan)
         self.assertEqual([l["kind"] for l in plan["legs"]], ["prop", "game"])
-        self.assertIsNone(plan["fair"])
+        self.assertIsNone(plan["fair"])  # the model has no view on player stats
+        game_p = plan["legs"][1]["p"]
+        self.assertAlmostEqual(plan["reference"], 0.40 * game_p)  # prop at Kalshi's price, game at the model's
+        self.assertAlmostEqual(plan["max_price"], plan["reference"])
         self.assertEqual(plan["legs"][0]["pick"], "Josh Allen 250+ passing yards")
         state, out = self._place(strat, legs=legs, amount=10.0, max_price=0.25)
         self.assertTrue(out["ok"], out)
         sent = kalshi.create_combo_market.call_args.args[1]
         self.assertEqual(sent[0]["event_ticker"], "KXNFLPASSYDS-26OCT04BUFBAL")
+
+    def test_props_are_cached_and_searchable_by_threshold(self):
+        strat, kalshi = self._setup()
+        props, prop, other = self._props(strat, kalshi, "passing yards")
+        self.assertEqual(len(props), 2)
+        calls = kalshi.get_markets.call_count
+        self.assertEqual([p["ticker"] for p in strat.refresh_props(_NOW, "250 allen")], [prop["ticker"]])
+        self.assertEqual([p["ticker"] for p in strat.refresh_props(_NOW, "jackson 200")], [other["ticker"]])
+        self.assertEqual(strat.refresh_props(_NOW, "jackson 250"), [])  # threshold must match
+        self.assertEqual(kalshi.get_markets.call_count, calls, "searches reuse the cached listing")
 
     def test_same_player_twice_or_a_prop_with_baseball_is_refused(self):
         strat, kalshi = self._setup()
@@ -1102,15 +1111,18 @@ class ParlayRfqTests(unittest.TestCase):
         default = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=None, max_price=None, now=_NOW)
         self.assertAlmostEqual(default["stake"], 20.0)  # 2% of 1000
 
-    def test_no_model_view_requires_a_ceiling(self):
+    def test_without_a_model_view_the_reference_is_kalshis_own_price(self):
         strat, _ = self._setup()
         for entry in strat.board.values():
             entry["p_yes"] = None
         broker = PaperBroker(True, logging.getLogger("t"))
-        out = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=None, now=_NOW)
-        self.assertIn("max", out["reason"])
-        ok = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=0.2, now=_NOW)
-        self.assertTrue(ok["ok"])
+        plan = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=None, now=_NOW)
+        self.assertTrue(plan["ok"], plan)
+        self.assertIsNone(plan["fair"])
+        self.assertAlmostEqual(plan["reference"], 0.515 * 0.515, places=4)  # each leg's bid/ask midpoint
+        self.assertAlmostEqual(plan["max_price"], plan["reference"])
+        pricier = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=0.4, now=_NOW)
+        self.assertAlmostEqual(pricier["max_price"], 0.4)
 
     def test_accepts_a_quote_under_the_ceiling_and_books_it(self):
         strat, kalshi = self._setup()
