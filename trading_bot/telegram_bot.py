@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 if TYPE_CHECKING:
     from trading_bot.config import TelegramConfig
@@ -283,6 +283,44 @@ def _parse_stack_args(args: list[str]) -> dict[str, Any]:
         amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
         tokens = tokens[:-1]
     return {"query": " ".join(tokens), "legs": legs, "leg_prob": leg_prob, "amount": amount, "max_price": max_price}
+
+
+def _parse_slip_caption(caption: str) -> dict[str, Any]:
+    """Photo caption such as ``2`` or ``$5 max 30``: the stake and an optional price ceiling in cents."""
+    text = caption or ""
+    max_price: float | None = None
+    match = _MAX_RE.search(text)
+    if match:
+        max_price = float(match.group(1)) / 100.0
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    amount: float | None = None
+    for token in text.split():
+        found = _AMOUNT_RE.match(token)
+        if found:
+            amount = float(found.group(1))
+            break
+    return {"amount": amount, "max_price": max_price}
+
+
+def _format_slip_summary(result: dict[str, Any]) -> str:
+    slip = result.get("slip") or {}
+    matched, unmatched = result.get("matched") or [], result.get("unmatched") or []
+    total = len(matched) + len(unmatched)
+    head = f"<b>Read your slip</b>: {total} legs"
+    if slip.get("game"):
+        head += f" \u2014 {html.escape(str(slip['game']))}"
+    if slip.get("odds"):
+        head += f" ({html.escape(str(slip['odds']))} at the book)"
+    lines = [head]
+    if matched:
+        lines.append(f"\u2705 On Kalshi ({len(matched)}):")
+        for leg in matched:
+            lines.append(f"  \u2022 {html.escape(str(leg['pick']))} \u2014 {float(leg['ask']) * 100:.0f}\u00a2")
+    if unmatched:
+        lines.append(f"\u274c Not matched ({len(unmatched)}):")
+        for leg in unmatched:
+            lines.append(f"  \u2022 {html.escape(str(leg['text']))} \u2014 {html.escape(str(leg['reason']))}")
+    return "\n".join(lines)
 
 
 def _format_props_ladder(props: list[dict[str, Any]], start: int = 1) -> list[str]:
@@ -962,6 +1000,8 @@ class TradingTelegramBot:
         }
         for name, callback in commands.items():
             self._app.add_handler(CommandHandler(name, callback))
+        # A photo (or image file) of a bet slip: read its legs and propose the matching Kalshi parlay.
+        self._app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._on_photo))
 
     def _check_auth(self, update: Update) -> bool:
         if not update.effective_chat:
@@ -992,6 +1032,7 @@ class TradingTelegramBot:
             "/games [league or team] — games you can bet on\n"
             "/bet &lt;team&gt; [$amount] — preview a bet (e.g. /bet cleveland 5)\n"
             "/props &lt;player or team&gt; — football player-stat markets (NFL)\n"
+            "Send a screenshot of a bet slip (caption: stake, e.g. 2) — I match its legs to Kalshi and preview the parlay\n"
             "/stack &lt;game&gt; [legs N] [p %] [$stake] — auto-build a same-game player-stat parlay\n"
             "/parlay &lt;team or p#&gt; + &lt;team or p#&gt; [$amount] [max cents] — preview a same-sport parlay\n"
             "/confirm — place the previewed bet; /cancel — drop it\n"
@@ -1438,6 +1479,50 @@ class TradingTelegramBot:
             lines.append(f"\u2026 +{len(props) - _MAX_PROPS_SHOWN} more: narrow the search")
         lines.append("\nParlay: /parlay p1 + p9 3  \u2014 or by name: /parlay hurts 200 passing + barkley 80 rushing 3")
         await _send_html_chunks(update, "\n".join(lines))
+
+    async def _on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Read a bet-slip screenshot and preview the matching Kalshi parlay (caption: stake, max cents)."""
+        if not self._check_auth(update):
+            return
+        message = update.message
+        if self._service is None or message is None:
+            return
+        try:
+            if message.photo:
+                media_type, tg_file = "image/jpeg", await message.photo[-1].get_file()
+            else:
+                media_type = str(message.document.mime_type or "image/png")
+                tg_file = await message.document.get_file()
+            data = bytes(await tg_file.download_as_bytearray())
+            options = _parse_slip_caption(message.caption or "")
+            await message.reply_text("Reading your slip and checking Kalshi\u2026")
+            result = await asyncio.to_thread(self._service.read_sports_slip, data, media_type)
+            if not result.get("ok"):
+                await message.reply_text(f"Couldn't use that picture: {result.get('reason', 'unknown reason')}")
+                return
+            await _send_html_chunks(update, _format_slip_summary(result))
+            matched = result["matched"]
+            if len(matched) < 2:
+                await message.reply_text("Fewer than 2 legs matched, so there's no parlay to build.")
+                return
+            legs = [{"ticker": m["ticker"], "side": m["side"]} for m in matched]
+            plan = await asyncio.to_thread(
+                self._service.quote_sports_parlay, legs, options["amount"], options["max_price"],
+            )
+            if not plan.get("ok"):
+                await message.reply_text(f"Can't place that parlay: {plan.get('reason', 'unknown reason')}")
+                return
+            self._pending_bet = {
+                "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
+                "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            note = ""
+            if result["unmatched"]:
+                note = (f"Heads up: this previews only the {len(matched)} matched legs, a shorter (and likelier) "
+                        "parlay than your slip.\n")
+            await message.reply_text(note + _format_parlay_preview(plan), parse_mode="HTML")
+        except Exception as exc:
+            await message.reply_text(f"Error reading the picture: {exc}")
 
     async def _cmd_stack(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Build a same-game stack of high-probability player legs, e.g. /stack eagles jaguars legs 9 p 85 2."""

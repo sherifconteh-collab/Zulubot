@@ -94,6 +94,24 @@ class SportsBetServiceTests(unittest.TestCase):
         TradingBotService.place_sports_parlay.__wrapped__(fake, [], None, None)
         fake.state_store.save.assert_not_called()
 
+    def test_slip_reading_uses_the_key_and_model_and_matches_legs(self):
+        from unittest.mock import patch
+        fake, _ = self._fake()
+        fake.config.trading_agents = type("T", (), {"api_key": "sk-ant-x"})()
+        fake.config.kalshi_sports.slip_model = "m-1"
+        fake.logger = MagicMock()
+        fake._match_sports_slip = MagicMock(return_value={"matched": [1], "unmatched": [], "game": "g"})
+        slip = {"game": "g", "legs": []}
+        with patch("trading_bot.service.slip_reader.read_slip", return_value=slip) as read:
+            out = TradingBotService.read_sports_slip(fake, b"img", "image/png")
+        self.assertTrue(out["ok"])
+        self.assertEqual(read.call_args.kwargs["api_key"], "sk-ant-x")
+        self.assertEqual(read.call_args.kwargs["model"], "m-1")
+        fake._match_sports_slip.assert_called_once_with(slip)
+        with patch("trading_bot.service.slip_reader.read_slip", side_effect=RuntimeError("no key")):
+            out = TradingBotService.read_sports_slip(fake, b"img", "image/png")
+        self.assertEqual(out, {"ok": False, "reason": "no key"})
+
     def test_stack_builder_delegates_and_respects_disabled(self):
         fake, _ = self._fake()
         fake.kalshi_sports_strategy.build_stack.return_value = {"ok": True}
