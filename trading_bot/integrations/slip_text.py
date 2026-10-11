@@ -44,6 +44,9 @@ _STAT_FIRST = re.compile(
     rf"^(?P<name>{_NAME})\s+(?:alt(?:ernate)?\s+)?(?P<stat>{_ALIAS_ALT})\s*:?\s*(?P<thr>\d+(?:\.\d+)?)\s*\+$",
     re.IGNORECASE,
 )
+_OVER_UNDER = re.compile(
+    rf"^(?P<name>{_NAME})\s+(?P<dir>over|under|o|u)\s+(?P<line>\d+\.5)\s+(?P<stat>[A-Za-z ]+)$", re.IGNORECASE,
+)
 _ANYTIME_TD = re.compile(
     rf"^(?P<name>{_NAME})\s+(?:anytime\s+(?:td|touchdown)s?|to\s+score(?:\s+a)?\s+(?:td|touchdown))$", re.IGNORECASE,
 )
@@ -55,12 +58,23 @@ _SPREAD_LINE = re.compile(
 _MONEYLINE_LINE = re.compile(
     r"^(?:the\s+)?(?P<team>[A-Za-z][A-Za-z.'’ ]*?)\s+(?:ml|moneyline|to\s+win|win)$", re.IGNORECASE,
 )
+_SEPARATORS = re.compile(r"[\u2022\u25cf;]|,\s+|\s+\+\s+|\s+and\s+|\s+&\s+", re.IGNORECASE)
+# "bet $10 on Lawrence 150+ passing yards": the stake clause up front, then the first leg.
+_BET_PREFIX = re.compile(
+    r"^.*?\b(?:bet|place|put|wager|play|lock|take)\b[^\n]*?"
+    r"(?:\$\s?\d[\d,]*(?:\.\d+)?|\d+(?:\.\d+)?\s*(?:dollars?|bucks))\s*(?:on|with|for|:|-)?\s+",
+    re.IGNORECASE,
+)
 _LEADING_NUMBER = re.compile(r"^\d{1,2}[.)]\s+")
 _TRAILING_ODDS = re.compile(r"\s*[(\[]?\s*[+\-−]\d{3,4}\s*[)\]]?\s*$")
 
 
+_TRAILING_VERB = re.compile(r"\s+(?:to\s+)?(?:record|have|get|hit|make|catch|reach|score|go\s+for)\s*$", re.IGNORECASE)
+
+
 def _clean_name(raw: str) -> str:
-    name = re.sub(r"\s+", " ", raw).strip(" .")
+    name = re.sub(r"\s+", " ", raw).strip(" .-:\u2013\u2014")
+    name = _TRAILING_VERB.sub("", name).strip(" .-:\u2013\u2014")
     return re.sub(r"^(?:alt|alternate)\s+", "", name, flags=re.IGNORECASE)
 
 
@@ -85,6 +99,18 @@ def _parse_line(line: str) -> dict[str, Any] | None:
         return _leg(
             "player_stat", text, player=_clean_name(stat_line.group("name")), stat=family,
             threshold=float(stat_line.group("thr")), direction="over",
+        )
+    over_under = _OVER_UNDER.match(text)
+    if over_under:
+        family = _stat_family(over_under.group("stat"))
+        if family is None:
+            return None
+        line_value = float(over_under.group("line"))
+        under = over_under.group("dir").lower() in ("under", "u")
+        # Stats are whole numbers, so "over 149.5" is exactly "150+".
+        return _leg(
+            "player_stat", text, player=_clean_name(over_under.group("name")), stat=family,
+            threshold=line_value - 0.5 if under else line_value + 0.5, direction="under" if under else "over",
         )
     stat_first = _STAT_FIRST.match(text)
     if stat_first:
@@ -120,11 +146,16 @@ def parse_slip_text(text: str) -> dict[str, Any] | None:
     """
     pieces: list[str] = []
     for raw in (text or "").splitlines():
-        pieces.extend(part for part in re.split(r"[•●;]", raw) if part.strip())
+        pieces.extend(part for part in _SEPARATORS.split(raw) if part.strip())
     legs: list[dict[str, Any]] = []
     header: list[str] = []
     for piece in pieces:
         leg = _parse_line(piece)
+        if leg is None:
+            prefix = _BET_PREFIX.match(piece)
+            leg = _parse_line(piece[prefix.end():]) if prefix else None
+            if leg is not None:
+                header.append(piece[:prefix.end()].strip())
         if leg is not None and len(legs) < _MAX_LEGS:
             legs.append(leg)
         else:

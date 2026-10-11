@@ -214,7 +214,17 @@ Make this bet at $10
 • the Eagles +16.5 spread
 ```
 
-This is read by a plain parser on the bot itself, so it works without `ANTHROPIC_API_KEY` and costs nothing. It understands `Name N+ stat` (also `Name stat N+`), `Name anytime TD`, `Team +16.5 spread` and `Team ML`. At least two lines must look like legs; ordinary chat is never mistaken for a slip. It then follows the same rules as a screenshot: exact matching, the same placing and preview behaviour, and nothing is placed unless every leg matched.
+This is read by a plain parser on the bot itself, so it works without `ANTHROPIC_API_KEY` and costs nothing. It is a fixed set of shapes, not free-form understanding:
+
+| Reads | Examples |
+|---|---|
+| Player stat, "N or more" | `Lawrence 150+ passing yards`, `Lawrence 150+ pass yds`, `Tuten - Alt Rushing Yds 30+`, `Brian Thomas Jr. to record 2+ receptions` |
+| Over a half-point line (same as N+) | `Lawrence over 149.5 passing yards` |
+| Anytime touchdown | `Josh Allen anytime TD` |
+| Spread and moneyline | `the Eagles +16.5 spread`, `Philadelphia Eagles (+16.5)`, `Ravens ML` |
+| Layout | one per line (bullets or numbers are fine), or on one line separated by commas, `+` or `and`; a stake clause such as `bet $10 on` in front |
+
+It does **not** guess. These are left alone or reported rather than interpreted: a whole-number line without a plus (`Lawrence 150 passing yards`: exactly 150 or 150 or more?), `30+ Yards` with no stat (which yards?), game totals, and unders (Kalshi's player markets are all "N or more"). At least two lines must look like legs, and ordinary chat is never mistaken for a slip. It then follows the same rules as a screenshot: exact matching, the same placing and preview behaviour, and nothing is placed unless every leg matched.
 
 A bare surname is fine when it is unambiguous. If the legs point at one game, that game settles a shared surname; otherwise the bot lists the players that match and asks for the full name rather than guessing. It cannot read screenshots (that needs the API).
 
