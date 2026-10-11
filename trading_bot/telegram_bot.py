@@ -407,6 +407,45 @@ def _format_slip_summary(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _sports_mode_line(service: Any, module: dict[str, Any]) -> str:
+    """Say plainly whether orders go to Kalshi: PAPER_MODE=false is not enough without credentials."""
+    live = bool(module.get("can_trade_live"))
+    if live:
+        return "Mode: LIVE. Orders go to your Kalshi account."
+    paper_mode = bool(getattr(getattr(service, "config", None), "paper_mode", True))
+    if paper_mode:
+        return "Mode: PAPER (PAPER_MODE=true). Nothing is sent to Kalshi."
+    return (
+        "Mode: PAPER, even though PAPER_MODE=false: Kalshi credentials are missing or unusable "
+        "(KALSHI_KEY_ID / KALSHI_PRIVATE_KEY). Nothing is sent to Kalshi."
+    )
+
+
+def _format_auto_parlays(parlays: Any) -> list[str]:
+    """One readable line per automatic parlay bought this cycle."""
+    lines: list[str] = []
+    for item in parlays or []:
+        legs = " + ".join(html.escape(str(leg)) for leg in item.get("legs", []))
+        lines.append(
+            f"  AUTO PARLAY {html.escape(str(item.get('game', '')))}: {legs}\n"
+            f"  {int(item.get('contracts', 0))} x ${float(item.get('price', 0)):.2f}"
+            f" = ${float(item.get('spent', 0)):.2f} to win ${float(item.get('payout', 0)):.2f}"
+        )
+        if item.get("warning"):
+            lines.append(f"  WARNING: {html.escape(str(item['warning']))}")
+    return lines
+
+
+def _skip_reason_summary(decisions: Any, limit: int = 4) -> str:
+    """"no_edge_after_fees x9, no_sportsbook_line x3": why nothing was bought, most common first."""
+    counts: dict[str, int] = {}
+    for item in decisions or []:
+        if isinstance(item, dict) and item.get("action") in ("skip", "skip_buy") and item.get("reason"):
+            counts[str(item["reason"])] = counts.get(str(item["reason"]), 0) + 1
+    ranked = sorted(counts.items(), key=lambda row: -row[1])[:limit]
+    return ", ".join(f"{reason} x{n}" for reason, n in ranked)
+
+
 def _format_props_ladder(props: list[dict[str, Any]], start: int = 1) -> list[str]:
     """Group player markets by player and stat: ``passing yards: p1 125+ 85c | p2 150+ 73c ...``."""
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
@@ -773,6 +812,11 @@ class TradingTelegramBot:
                 lines.append(
                     f"   \U0001f3c1 Resolved: {', '.join(html.escape(str(sym)) for sym in resolved[:3])}"
                 )
+            for parlay in module_data.get("auto_parlays") or []:
+                lines.append(
+                    f"   \u2022 AUTO PARLAY {html.escape(str(parlay.get('game', '')))} "
+                    f"${float(parlay.get('spent', 0)):.2f} to win ${float(parlay.get('payout', 0)):.2f}"
+                )
             lines.append(
                 "   \U0001f4cc Execution: " + ("live Kalshi" if module_data.get("can_trade_live") else "paper")
             )
@@ -857,6 +901,7 @@ class TradingTelegramBot:
                     trade_lines.append(f"BUY  {html.escape(str(sym))}  [{safe_module}]")
                 for sym in sells:
                     trade_lines.append(f"SELL {html.escape(str(sym))}  [{safe_module}]")
+                trade_lines.extend(_format_auto_parlays(module_data.get("auto_parlays")))
                 self.record_trade({
                     "time": result.get("timestamp", ""),
                     "module": module_name,
@@ -1424,6 +1469,7 @@ class TradingTelegramBot:
                 f"{int(module.get('games_scanned', 0) or 0)} games, "
                 f"{int(module.get('markets_matched', 0) or 0)} Kalshi markets matched"
             ]
+            lines.append(_sports_mode_line(self._service, module))
             bank = module.get("bankroll") or {}
             if bank:
                 lines.append(
@@ -1453,6 +1499,10 @@ class TradingTelegramBot:
                 )
             for sym in module.get("buys") or []:
                 lines.append(f"BUY  {html.escape(str(sym))}")
+            lines.extend(_format_auto_parlays(module.get("auto_parlays")))
+            why = _skip_reason_summary(module.get("decisions"))
+            if why and not (module.get("buys") or []):
+                lines.append(f"Nothing bought. Skipped: {html.escape(why)}")
             if module.get("error"):
                 lines.append(f"Error: {html.escape(_clip_text(module['error'], 140))}")
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]

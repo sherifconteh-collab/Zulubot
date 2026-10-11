@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from trading_bot.telegram_bot import (
     TradingTelegramBot,
+    _format_auto_parlays,
+    _skip_reason_summary,
+    _sports_mode_line,
     _format_lead_line,
     _format_sports_pick,
     _find_bet_options,
@@ -887,6 +890,24 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.bot._cmd_parlay(update, SimpleNamespace(args="p4 + p5".split()))
         self.assertIn("No player market p4", update.message.reply_text.await_args.args[0])
         self.service.quote_sports_parlay.assert_not_called()
+
+    def test_auto_parlay_alert_skip_summary_and_mode_line(self):
+        lines = _format_auto_parlays([{"game": "BUF @ <BAL>", "legs": ["Allen 200+", "Cook 30+"], "contracts": 40,
+                                       "price": 0.5, "spent": 20.0, "payout": 40.0, "warning": "check it"}])
+        text = "\n".join(lines)
+        self.assertIn("AUTO PARLAY BUF @ &lt;BAL&gt;: Allen 200+ + Cook 30+", text)
+        self.assertIn("40 x $0.50 = $20.00 to win $40.00", text)
+        self.assertIn("WARNING: check it", text)
+        self.assertEqual(_format_auto_parlays(None), [])
+        decisions = [{"action": "skip_buy", "reason": "no_edge_after_fees"}] * 3 + [
+            {"action": "skip", "reason": "data_fetch_failed"}, {"action": "buy", "reason": "model_edge"}]
+        self.assertEqual(_skip_reason_summary(decisions), "no_edge_after_fees x3, data_fetch_failed x1")
+        live = SimpleNamespace(config=SimpleNamespace(paper_mode=False))
+        self.assertIn("LIVE", _sports_mode_line(live, {"can_trade_live": True}))
+        self.assertIn("PAPER_MODE=true", _sports_mode_line(SimpleNamespace(config=SimpleNamespace(paper_mode=True)), {}))
+        broken = _sports_mode_line(live, {"can_trade_live": False})
+        self.assertIn("even though PAPER_MODE=false", broken)
+        self.assertIn("KALSHI_KEY_ID", broken)
 
     def test_preview_and_result_wording(self):
         text = _format_parlay_preview(self.PLAN)

@@ -20,6 +20,7 @@ from trading_bot.clients_espn import (
 from trading_bot.clients_polymarket_sports import PolyQuote, parse_poly_events
 from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState
+from trading_bot.sports_model import DailySession
 from trading_bot.sports_model import (
     Signal,
     SourceCalibration,
@@ -527,6 +528,18 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(up["day_pnl"], 30.0)
         self.assertAlmostEqual(down["drawdown"], 0.2)
         self.assertEqual(DailySession(path).update("2026-10-05", 104.0)["day_pnl"], 0.0)
+
+    def test_daily_session_parlay_counters_persist_and_reset_each_day(self):
+        import tempfile, pathlib
+        path = pathlib.Path(tempfile.mkdtemp()) / "s.json"
+        s = DailySession(path)
+        s.update("2026-10-04", 100.0)
+        s.record_parlay_try("26OCT04BUFBAL")
+        s.record_parlay()
+        again = DailySession(path)                                   # survives a restart
+        self.assertEqual((again.parlays, again.parlay_tries), (1, {"26OCT04BUFBAL": 1}))
+        again.update("2026-10-05", 100.0)
+        self.assertEqual((again.parlays, again.parlay_tries), (0, {}))
 
     def test_result_reports_bankroll(self):
         strat, _ = _strategy(_config(), [_game()], [_market("Baltimore")])
@@ -1526,6 +1539,118 @@ class StackTests(unittest.TestCase):
                                       legs=built["legs"], amount=10.0, max_price=None, now=_NOW)
         self.assertFalse(out["ok"])
         self.assertIn("2 to 3 legs", out["reason"])
+
+
+class AutoParlayTests(unittest.TestCase):
+    """The bot buys same-game player-stat parlays on its own, within hard caps."""
+
+    _stack_setup = StackTests._stack_setup
+    _setup = ParlayRfqTests._setup
+    _state = ParlayRfqTests._state
+    COMBO = ParlayRfqTests.COMBO
+
+    def _ready(self, **cfg):
+        strat, kalshi = self._stack_setup()
+        strat.config = _config(parlay_quote_wait_seconds=0.0, **{"auto_parlays": True, **cfg})
+        strat.session = DailySession(None, logging.getLogger("t.session"))
+        return strat, kalshi
+
+    def _run(self, strat, state=None, now=_NOW):
+        state = state or self._state()
+        result = {"decisions": [], "buys": [], "auto_parlays": []}
+        broker = PaperBroker(True, logging.getLogger("t.auto"))
+        strat._auto_parlays(state, broker, now, result)
+        return state, result
+
+    def _quote_at(self, kalshi, strat, price_over_reference):
+        """Maker quotes every parlay at (reference * price_over_reference); the position then reads back."""
+        built = strat.build_stack(_NOW, "bills ravens", strat.config.auto_parlay_legs, strat.config.auto_parlay_leg_prob)
+        price = built["reference"] * price_over_reference
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "q-1", "status": "open", "no_bid_dollars": str(round(1 - price, 4)), "contracts_fp": "9999.00"}]
+        kalshi.get_rfq_quote.return_value = {"status": "executed"}
+        kalshi.get_positions.side_effect = lambda: [
+            {"ticker": self.COMBO, "position": kalshi.create_rfq.call_args.args[1]}]
+        return built
+
+    def test_buys_a_same_game_stack_within_the_caps(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.02)
+        state, result = self._run(strat)
+        self.assertEqual(len(result["auto_parlays"]), 1, result["decisions"])
+        parlay = result["auto_parlays"][0]
+        self.assertEqual(parlay["game"], "Buffalo Bills @ Baltimore Ravens")
+        self.assertGreaterEqual(len(parlay["legs"]), 2)
+        self.assertLessEqual(parlay["spent"], 1000.0 * 0.02 + 1e-6)  # 2% of the bankroll
+        self.assertLessEqual(parlay["price"], parlay["ceiling"])
+        self.assertEqual(strat.session.parlays, 1)
+        self.assertEqual(len(result["buys"]), 1)
+        position = next(iter(state.positions.values()))
+        self.assertTrue(position.meta["auto_parlay"])
+        self.assertNotIn("user_bet", position.meta)
+
+    def test_never_pays_above_the_ceiling_and_stops_trying_a_game(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.40)  # well over reference + 10%
+        for _ in range(5):
+            state, result = self._run(strat)
+            self.assertEqual(result["auto_parlays"], [])
+        self.assertEqual(strat.session.parlays, 0)
+        self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 3)  # tries per game cap
+        self.assertEqual(kalshi.accept_rfq_quote.call_count, 0)
+        self.assertEqual(kalshi.create_rfq.call_count, 3)
+
+    def test_daily_cap_exposure_cap_and_one_parlay_per_game(self):
+        strat, kalshi = self._ready(auto_parlays_per_day=1)
+        self._quote_at(kalshi, strat, 1.0)
+        state, result = self._run(strat)
+        self.assertEqual(len(result["auto_parlays"]), 1)
+        _, again = self._run(strat, state)  # same game is not bought twice; the daily cap is also hit
+        self.assertEqual(again["auto_parlays"], [])
+        self.assertIn("parlays_per_day_reached", [d["reason"] for d in again["decisions"]])
+        strat2, kalshi2 = self._ready(auto_parlay_exposure_pct=0.001)
+        self._quote_at(kalshi2, strat2, 1.0)
+        _, capped = self._run(strat2)
+        self.assertEqual(capped["auto_parlays"], [])
+        self.assertIn("parlay_exposure_budget", [d["reason"] for d in capped["decisions"]])
+
+    def test_off_in_paper_mode_when_disabled_and_outside_the_time_window(self):
+        for cfg, live in (({}, False), ({"auto_parlays": False}, True), ({"auto_parlay_min_minutes": 600.0}, True),
+                          ({"auto_parlay_hours_ahead": 1.0}, True)):
+            strat, kalshi = self._ready(**cfg)
+            strat.live_trading_enabled = live
+            self._quote_at(kalshi, strat, 1.0)
+            _, result = self._run(strat)
+            self.assertEqual(result["auto_parlays"], [], cfg)
+            kalshi.create_combo_market.assert_not_called()
+
+    def test_an_uncertain_outcome_counts_against_the_day_and_stops_the_cycle(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.0)
+        kalshi.get_rfq_quote.return_value = {"status": "unknown"}
+        _, result = self._run(strat)
+        self.assertEqual(result["auto_parlays"], [])
+        self.assertEqual(strat.session.parlays, 1)  # may have executed: counted, and no more this cycle
+        self.assertEqual(kalshi.create_rfq.call_count, 1)
+
+    def test_is_on_by_default_and_never_in_paper_mode(self):
+        from trading_bot.config import KalshiSportsConfig
+        self.assertTrue(KalshiSportsConfig().auto_parlays)
+        strat, kalshi = self._stack_setup()
+        strat.config = _config(parlay_quote_wait_seconds=0.0)
+        strat.live_trading_enabled = False  # PAPER_MODE=true (or no credentials): never spends real money
+        _, result = self._run(strat)
+        self.assertEqual(result["auto_parlays"], [])
+        kalshi.create_combo_market.assert_not_called()
+
+    def test_run_calls_the_auto_engine_after_the_normal_cycle(self):
+        strat, kalshi = self._ready()
+        called = []
+        strat._auto_parlays = lambda *a, **k: called.append(a)
+        broker = PaperBroker(True, logging.getLogger("t.run"))
+        out = strat.run(self._state(), broker=broker, risk_manager=MagicMock(), now=_NOW)
+        self.assertEqual(len(called), 1)
+        self.assertEqual(out["auto_parlays"], [])
 
 
 class SlipMatchTests(unittest.TestCase):
