@@ -326,6 +326,8 @@ class DailySession:
         self.peak = 0.0
         self.actions = 0          # "action pick" bets placed today
         self.dogs = 0             # ...of which backed an underdog (win prob < 50%)
+        self.parlays = 0          # automatic parlays bought today
+        self.parlay_tries: dict[str, int] = {}   # game code -> quote requests made today
         if path is not None and path.exists():
             try:
                 data = json.loads(path.read_text())
@@ -334,6 +336,8 @@ class DailySession:
                 self.peak = float(data.get("peak", 0.0))
                 self.actions = int(data.get("actions", 0))
                 self.dogs = int(data.get("dogs", 0))
+                self.parlays = int(data.get("parlays", 0))
+                self.parlay_tries = {str(k): int(v) for k, v in dict(data.get("parlay_tries", {})).items()}
             except (OSError, ValueError) as exc:
                 self.logger.warning("Could not load sports session (%s); starting fresh.", exc)
 
@@ -345,6 +349,7 @@ class DailySession:
             self.path.write_text(json.dumps({
                 "date": self.date, "start": self.start, "peak": self.peak,
                 "actions": self.actions, "dogs": self.dogs,
+                "parlays": self.parlays, "parlay_tries": self.parlay_tries,
             }))
         except OSError as exc:
             self.logger.warning("Could not save sports session: %s", exc)
@@ -356,10 +361,21 @@ class DailySession:
             self.dogs += 1
         self._save()
 
+    def record_parlay_try(self, game_code: str) -> None:
+        """Count one quote request for a game (before it is made, so a crash can't loop)."""
+        self.parlay_tries[game_code] = self.parlay_tries.get(game_code, 0) + 1
+        self._save()
+
+    def record_parlay(self) -> None:
+        """Count one automatic parlay against today's allowance."""
+        self.parlays += 1
+        self._save()
+
     def update(self, today: str, equity: float) -> dict[str, float]:
         """Record the current bankroll; returns day PnL and drawdown from the day's peak."""
         if self.date != today:
             self.date, self.start, self.peak, self.actions, self.dogs = today, equity, equity, 0, 0
+            self.parlays, self.parlay_tries = 0, {}
         elif equity > self.peak:
             self.peak = equity
         self._save()

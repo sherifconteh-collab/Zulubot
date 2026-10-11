@@ -463,6 +463,7 @@ class KalshiSportsStrategy:
             "markets_matched": 0,
             "predictions": [],
             "parlays": [],
+            "auto_parlays": [],
             "bankroll": {},
             "decisions": [],
             "can_trade_live": self.live_trading_enabled,
@@ -493,6 +494,7 @@ class KalshiSportsStrategy:
             if result["games_scanned"] == 0 and result["markets_scanned"] == 0:
                 result["status"] = "no_data"
             self._execute_candidates(state, broker, candidates, now, result)
+            self._auto_parlays(state, broker, now, result)
         except Exception as exc:
             self.logger.error("Kalshi sports cycle failed: %s", exc, exc_info=True)
             result["status"] = "error"
@@ -1434,6 +1436,9 @@ class KalshiSportsStrategy:
             names = ", ".join(sorted({g for g, _ in games})[:6])
             return {"ok": False, "reason": f"'{query}' matches several games ({names}). Name both teams."}
         (game, _), props = next(iter(games.items()))
+        return self._stack_from_props(game, props, legs, leg_prob)
+
+    def _stack_from_props(self, game: str, props: list[dict[str, Any]], legs: int, leg_prob: float) -> dict[str, Any]:
         best: dict[str, dict[str, Any]] = {}
         for prop in props:
             if prop["yes_bid"] <= 0 or prop["yes_ask"] - prop["yes_bid"] > 0.10 or not 0.03 < prop["mid"] < 0.97:
@@ -1760,6 +1765,7 @@ class KalshiSportsStrategy:
         max_price: float | None,
         now: datetime,
         anchor_price: float | None = None,
+        auto: bool = False,
     ) -> dict[str, Any]:
         """Ask Kalshi market makers for a price on the parlay and buy it if one is at or under the ceiling."""
         plan = self.quote_user_parlay(
@@ -1854,7 +1860,8 @@ class KalshiSportsStrategy:
             "strategy": "kalshi_sports", "league": "parlay",
             "game": " + ".join(r["game"] for r in rows), "pick": " + ".join(r["pick"] for r in rows),
             "game_start": min(r["start"] for r in rows), "model_prob": round(plan["fair"] or 0.0, 4),
-            "ask": round(price, 4), "fee": round(fee_each, 4), "parlay": True, "user_bet": True,
+            "ask": round(price, 4), "fee": round(fee_each, 4), "parlay": True,
+            **({"auto_parlay": True} if auto else {"user_bet": True}),
             "legs": [{"ticker": r["market_ticker"], "side": r["side"], "pick": r["pick"]} for r in rows],
             "kalshi_rfq_id": rfq_id, "kalshi_quote_id": str(quote["id"]),
         }
@@ -1911,6 +1918,108 @@ class KalshiSportsStrategy:
         except Exception as exc:
             self.logger.warning("Could not verify the parlay position: %s", exc)
         return "yes", expected, "Couldn't confirm the position with Kalshi yet; /status will show it once it syncs."
+
+    # ------------------------------------------------------------------
+    # Automatic parlays
+    # ------------------------------------------------------------------
+
+    def _auto_parlays(self, state: PortfolioState, broker: PaperBroker, now: datetime, result: dict[str, Any]) -> None:
+        """Buy same-game stacks of player-stat legs for upcoming football games, within hard caps.
+
+        Reuses the hand-built parlay path (combo + request for quote), so a parlay is only bought at or
+        under its price ceiling, the position is verified afterwards, and an uncertain outcome stops
+        everything for the cycle. Caps: parlays per day, stake per parlay, open parlay cost, quote tries
+        per game. Football only (that is where Kalshi lists player-stat markets).
+        """
+        cfg = self.config
+        if not cfg.auto_parlays or not self.live_trading_enabled:
+            return
+
+        def skip(reason: str, **signals: Any) -> None:
+            self._log_skip(result, "auto_parlay", reason, **signals)
+
+        if cfg.auto_parlays_per_day - self.session.parlays <= 0:
+            skip("parlays_per_day_reached", today=self.session.parlays)
+            return
+        open_positions = self._open_positions(state)
+        equity = broker.portfolio_equity_for_bucket(state, cash_bucket=_CASH_BUCKET)
+        open_cost = sum(p.quantity * p.entry_price for p in open_positions if p.meta.get("parlay"))
+        stake = equity * cfg.auto_parlay_stake_pct
+        if stake < cfg.min_trade_usd:
+            skip("parlay_stake_below_min", stake=round(stake, 2), equity=round(equity, 2))
+            return
+        budget = equity * cfg.auto_parlay_exposure_pct - open_cost
+        if budget < stake:
+            skip("parlay_exposure_budget", open_cost=round(open_cost, 2), budget=round(budget, 2))
+            return
+        try:
+            universe = self._load_props(now)
+        except Exception as exc:
+            self.logger.warning("Auto parlays: could not load player props: %s", exc)
+            skip("props_unavailable", error=str(exc)[:120])
+            return
+
+        def code_of(event_ticker: str) -> str:
+            return event_ticker.split("-", 1)[-1]
+
+        parlay_games = {code_of(str(e)) for p in open_positions if p.meta.get("parlay")
+                        for e in p.meta.get("event_tickers", [])}
+        games: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for prop in universe.values():
+            games.setdefault((prop["game"], prop["start"]), []).append(prop)
+        placed_any = False
+        for (game, start_raw), props in sorted(games.items(), key=lambda row: row[0][1]):
+            if cfg.auto_parlays_per_day - self.session.parlays <= 0 or budget < stake:
+                break
+            start = _parse_iso(start_raw)
+            if start is None:
+                continue
+            minutes = (start - now).total_seconds() / 60.0
+            if not cfg.auto_parlay_min_minutes <= minutes <= cfg.auto_parlay_hours_ahead * 60.0:
+                continue
+            code = code_of(props[0]["event_ticker"])
+            if code in parlay_games:
+                continue
+            if self.session.parlay_tries.get(code, 0) >= cfg.auto_parlay_tries_per_game:
+                skip("parlay_tries_used", game=game)
+                continue
+            built = self._stack_from_props(game, props, cfg.auto_parlay_legs, cfg.auto_parlay_leg_prob)
+            if not built.get("ok"):
+                skip("no_liquid_stack", game=game, why=str(built.get("reason", ""))[:100])
+                continue
+            reference = float(built["reference"])
+            ceiling = min(0.99, reference * (1.0 + cfg.auto_parlay_max_premium))
+            self.session.record_parlay_try(code)
+            outcome = self.place_user_parlay(
+                state, broker, legs=built["legs"], amount=stake, max_price=ceiling, now=now, auto=True,
+            )
+            if not outcome.get("ok"):
+                skip("parlay_not_filled", game=game, why=str(outcome.get("reason", ""))[:160])
+                if outcome.get("uncertain"):
+                    # It may have gone through: count it and stop, rather than stack more on unknown state.
+                    self.session.record_parlay()
+                    self.logger.error("Auto parlay for %s has an uncertain outcome; stopping for this cycle.", game)
+                    return
+                continue
+            self.session.record_parlay()
+            budget -= float(outcome["spent"])
+            parlay_games.add(code)
+            placed_any = True
+            symbol = str(outcome.get("symbol") or outcome["combo_ticker"])
+            summary = {
+                "game": game, "legs": [r["pick"] for r in outcome["legs"]], "contracts": outcome["filled"],
+                "price": round(float(outcome["price"]), 4), "spent": round(float(outcome["spent"]), 2),
+                "payout": round(float(outcome["payout"]), 2), "reference": round(reference, 4),
+                "ceiling": round(ceiling, 4), "warning": outcome.get("warning", ""),
+            }
+            result["auto_parlays"].append(summary)
+            result["buys"].append(symbol)
+            result["decisions"].append({
+                "strategy": "kalshi_sports", "symbol": symbol, "action": "buy", "reason": "auto_parlay",
+                "signals": summary,
+            })
+        if not placed_any and not result["auto_parlays"]:
+            skip("no_parlay_this_cycle", games_seen=len(games))
 
     # ------------------------------------------------------------------
     # Position management

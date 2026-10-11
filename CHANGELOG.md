@@ -1,5 +1,9 @@
 # Release notes
 
+## 2026-10-11: Automatic parlays, and `/sports` shows the mode
+- **Automatic parlays (live mode, on by default):** unless `KALSHI_SPORTS_AUTO_PARLAYS=false`, each cycle the bot builds same-game stacks of player-stat legs for upcoming football games and buys them through Kalshi's market makers at or under a price ceiling, then sends a Telegram alert. Defaults: 4 legs, 2% of bankroll per parlay, 3 a day, 10% of bankroll open at once, ceiling = Kalshi's own fair price + 10%. Never runs in paper mode. Reuses the verified hand-parlay path (ceiling enforced before accepting, position read-back, an uncertain outcome stops the cycle).
+- **`/sports` now says whether orders really go to Kalshi** (including `PAPER_MODE=false` with missing credentials, which runs on paper) and why nothing was bought (skip reasons).
+
 ## 2026-10-11: Paste a list of legs, no AI needed
 - A typed or pasted list of legs (`Lawrence 150+ passing yards`, `Name anytime TD`, `the Eagles +16.5 spread`, ...) is read by a local parser and handled exactly like a screenshot: exact Kalshi matching, preview or one-shot placement with `bet $10`, and nothing placed unless every leg matched. Works with no Anthropic key or credit.
 - **Matching fixes** (also benefit screenshots): a surname shared by two players is reported instead of guessed (the game most legs point to settles it when the slip names none), and a spread for a team is only matched in that team's own game.
