@@ -230,6 +230,76 @@ def _format_bet_preview(quote: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_MAX_RE = re.compile(r"\bmax\s+\$?(\d+(?:\.\d+)?)\s*(?:c|\u00a2|cents?)?\b", re.IGNORECASE)
+
+
+def _parse_parlay_args(args: list[str]) -> dict[str, Any]:
+    """``/parlay browns + guardians 5 max 30``: legs split on ``+``/``,``, optional stake, optional ceiling in cents."""
+    text = " ".join(args)
+    max_price: float | None = None
+    match = _MAX_RE.search(text)
+    if match:
+        max_price = float(match.group(1)) / 100.0
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    parts = [p.strip() for p in re.split(r"[+,]", text) if p.strip()]
+    amount: float | None = None
+    if parts:
+        tokens = parts[-1].split()
+        if len(tokens) > 1 and _AMOUNT_RE.match(tokens[-1]):
+            amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
+            parts[-1] = " ".join(tokens[:-1])
+    legs = []
+    for part in parts:
+        tokens = part.split()
+        game_no = int(tokens[0]) if len(tokens) > 1 and tokens[0].isdigit() else None
+        legs.append({"game_no": game_no, "query": " ".join(tokens[1:] if game_no else tokens)})
+    return {"legs": legs, "amount": amount, "max_price": max_price}
+
+
+def _format_parlay_preview(plan: dict[str, Any]) -> str:
+    legs = plan["legs"]
+    fair, ceiling = plan.get("fair"), float(plan["max_price"])
+    lines = [
+        f"<b>Parlay preview</b> \u2014 LIVE money, {len(legs)} legs, all must win",
+    ]
+    for leg in legs:
+        p = f" ({float(leg['p']):.0%})" if leg.get("p") is not None else ""
+        lines.append(f"\u2022 <b>{html.escape(str(leg['pick']))}</b>{p} \u2014 {html.escape(str(leg['game']))}")
+    if fair is None:
+        lines.append("No model view on at least one leg, so there's no fair price.")
+    else:
+        lines.append(f"Model chance all hit: {float(fair):.1%} (fair price {float(fair) * 100:.0f}\u00a2 per $1).")
+    lines.append(
+        f"I'll ask Kalshi's market makers for a price and buy only if it's {ceiling * 100:.0f}\u00a2 or less "
+        f"per $1 (fee included): up to {int(plan['contracts'])} contracts, at most ${float(plan['max_cost']):.2f}, "
+        f"paying ${float(plan['payout']):.2f} if every leg wins."
+    )
+    if fair is not None and ceiling > float(fair) + 1e-9:
+        lines.append(
+            f"Heads up: that ceiling is {(ceiling - float(fair)) * 100:.0f}\u00a2 above the model's fair price, "
+            "so it's an expected cost. Your call."
+        )
+    elif fair is not None:
+        lines.append("Market makers usually price parlays above fair value, so you may get no quote at this "
+                     "ceiling (then nothing is bought). Raise it with 'max <cents>' if you want more action.")
+    lines.append("Send /confirm within 10 minutes to request quotes, or /cancel.")
+    return "\n".join(lines)
+
+
+def _format_parlay_result(outcome: dict[str, Any]) -> str:
+    if not outcome.get("ok"):
+        return f"Parlay not placed: {html.escape(str(outcome.get('reason', 'unknown reason')))}"
+    legs = " + ".join(html.escape(str(l["pick"])) for l in outcome["legs"])
+    text = (
+        f"\u2705 Parlay placed: {int(outcome['filled'])} contracts on {legs} @ "
+        f"{float(outcome['price']) * 100:.1f}\u00a2 (+{float(outcome['fee_each']) * 100:.1f}\u00a2 fee), "
+        f"${float(outcome['spent']):.2f} in; pays ${float(outcome['payout']):.2f} if every leg wins."
+    )
+    if outcome.get("warning"):
+        text += f"\n\u26a0\ufe0f {html.escape(str(outcome['warning']))}"
+    return text
+
+
 def _format_lead_line(lead: dict[str, Any]) -> str:
     """One-line representation of a lead for the Telegram leads alert."""
     symbol = html.escape(str(lead.get("symbol", "?")))
@@ -816,6 +886,7 @@ class TradingTelegramBot:
             "sports": self._cmd_kalshi_sports,
             "games": self._cmd_games,
             "bet": self._cmd_bet,
+            "parlay": self._cmd_parlay,
             "confirm": self._cmd_confirm,
             "cancel": self._cmd_cancel,
             "backtest": self._cmd_backtest,
@@ -858,6 +929,7 @@ class TradingTelegramBot:
             "<b>Your own sports bets</b>\n"
             "/games [league or team] — games you can bet on\n"
             "/bet &lt;team&gt; [$amount] — preview a bet (e.g. /bet cleveland 5)\n"
+            "/parlay &lt;team&gt; + &lt;team&gt; [$amount] [max cents] — preview a parlay (live Kalshi quotes)\n"
             "/confirm — place the previewed bet; /cancel — drop it\n"
             "\n"
             "<b>Control</b>\n"
@@ -1271,6 +1343,54 @@ class TradingTelegramBot:
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
+    async def _cmd_parlay(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Preview a parlay of teams from /games, e.g. /parlay browns + guardians 5 max 30."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        parsed = _parse_parlay_args(list(context.args or []))
+        if len(parsed["legs"]) < 2 or not all(l["query"] for l in parsed["legs"]):
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Name 2 or more teams from different games, separated by +, e.g. "
+                "/parlay browns + guardians 5   (optional: max 30 for a 30\u00a2 price ceiling).",
+            )
+            return
+        try:
+            if not self._games:
+                self._games = await self._load_games(update)
+            legs = []
+            for spec in parsed["legs"]:
+                rows = _find_bet_options(self._games, spec["game_no"], spec["query"])
+                if not rows:
+                    await update.message.reply_text(  # type: ignore[union-attr]
+                        f"No team matching '{spec['query']}' on the board. Send /games to see what's available.",
+                    )
+                    return
+                if len(rows) > 1:
+                    lines = [f"{len(rows)} matches for '{html.escape(spec['query'])}'. Be specific, e.g. 3 {html.escape(spec['query'])}:"]
+                    for number, game, option in rows[:8]:
+                        lines.append(
+                            f"{number}. <b>{html.escape(str(option['label']))}</b> \u2014 {html.escape(str(game['game']))}"
+                        )
+                    await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
+                    return
+                legs.append({"ticker": rows[0][2]["ticker"], "side": rows[0][2]["side"]})
+            plan = await asyncio.to_thread(
+                self._service.quote_sports_parlay, legs, parsed["amount"], parsed["max_price"],
+            )
+            if not plan.get("ok"):
+                await update.message.reply_text(f"Can't build that parlay: {plan.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+                return
+            self._pending_bet = {
+                "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
+                "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            await update.message.reply_text(_format_parlay_preview(plan), parse_mode="HTML")  # type: ignore[union-attr]
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
     async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
             return
@@ -1282,6 +1402,17 @@ class TradingTelegramBot:
             await update.message.reply_text(  # type: ignore[union-attr]
                 "Nothing to confirm (previews expire after 10 minutes). Send /bet <team> again.",
             )
+            return
+        if pending.get("kind") == "parlay":
+            await update.message.reply_text("Asking Kalshi market makers for a price (up to ~30 seconds)\u2026")  # type: ignore[union-attr]
+            try:
+                outcome = await asyncio.to_thread(
+                    self._service.place_sports_parlay, pending["legs"], pending["stake"], pending["max_price"],
+                )
+            except Exception as exc:
+                await update.message.reply_text(f"Error placing the parlay: {exc}")  # type: ignore[union-attr]
+                return
+            await update.message.reply_text(_format_parlay_result(outcome), parse_mode="HTML")  # type: ignore[union-attr]
             return
         try:
             outcome = await asyncio.to_thread(

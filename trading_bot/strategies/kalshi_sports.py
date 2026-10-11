@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -397,6 +398,8 @@ class KalshiSportsStrategy:
         self.live_trading_enabled = live_trading_enabled
         # ticker -> every matched market from the last scan (for hand-picked bets).
         self.board: dict[str, dict[str, Any]] = {}
+        self._combo_collections: tuple[float, list[tuple[str, frozenset[str]]]] | None = None
+        self._sleep = time.sleep
 
     # ------------------------------------------------------------------
     # Entry point
@@ -784,6 +787,15 @@ class KalshiSportsStrategy:
     # Execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _held_events(positions: list[Any]) -> set[str]:
+        """Games already bet on, including every game inside a parlay."""
+        held: set[str] = set()
+        for p in positions:
+            held.add(str(p.meta.get("event_ticker", "")))
+            held.update(str(e) for e in p.meta.get("event_tickers", []))
+        return held
+
     def _open_positions(self, state: PortfolioState) -> list[Any]:
         return [
             p for p in state.positions.values()
@@ -808,7 +820,7 @@ class KalshiSportsStrategy:
         open_positions = self._open_positions(state)
         exposure = sum(p.quantity * p.entry_price for p in open_positions)
         exposure_cap = equity * cfg.capital_allocation_pct
-        held_events = {str(p.meta.get("event_ticker", "")) for p in open_positions}
+        held_events = self._held_events(open_positions)
         result["bankroll"] = {
             "equity": round(equity, 2),
             "day_start": round(day["day_start"], 2),
@@ -1075,7 +1087,7 @@ class KalshiSportsStrategy:
         mult = float(entry["fee_multiplier"])
 
         bucket = _CASH_BUCKET if self.live_trading_enabled else None
-        held = {str(p.meta.get("event_ticker", "")) for p in self._open_positions(state)}
+        held = self._held_events(self._open_positions(state))
         if entry["event_ticker"] and entry["event_ticker"] in held:
             return {"ok": False, "reason": "You already have a bet on this game."}
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
@@ -1164,6 +1176,284 @@ class KalshiSportsStrategy:
         quote["spent"] = position.quantity * position.entry_price
         quote.pop("market", None)
         return quote
+
+    # ------------------------------------------------------------------
+    # Hand-built parlays (Telegram /parlay): Kalshi combo + request for quote
+    # ------------------------------------------------------------------
+
+    _COMBO_CACHE_SECONDS = 1800.0
+    _QUOTE_POLL_SECONDS = 1.0
+    _EXECUTION_WAIT_SECONDS = 15.0
+
+    def _combo_collection_for(self, events: set[str]) -> str | None:
+        """First open Kalshi combo collection whose allowed events include every leg's game."""
+        cached = self._combo_collections
+        if cached is None or time.monotonic() - cached[0] > self._COMBO_CACHE_SECONDS:
+            collections = self.kalshi.get_multivariate_collections()
+            cached = (time.monotonic(), [
+                (str(c.get("collection_ticker", "")), frozenset(c.get("associated_event_tickers", [])))
+                for c in collections
+            ])
+            self._combo_collections = cached
+        for ticker, allowed in cached[1]:
+            if ticker and events <= allowed:
+                return ticker
+        return None
+
+    def _combo_fee_multiplier(self, collection_ticker: str) -> float:
+        series = collection_ticker.rsplit("-R", 1)[0] if collection_ticker.endswith("-R") else collection_ticker
+        return self._fee_multiplier(series)
+
+    def quote_user_parlay(
+        self,
+        state: PortfolioState,
+        broker: PaperBroker,
+        *,
+        legs: list[dict[str, str]],
+        amount: float | None,
+        max_price: float | None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Check a hand-built parlay and work out the most we'd pay; places nothing.
+
+        ``legs`` are ``{"ticker", "side"}`` rows taken from the board. The combo pays $1 only
+        if every leg wins. ``max_price`` is the all-in ceiling per contract (dollars); by
+        default the model's fair probability, so the bot never pays more than the parlay is worth.
+        """
+        cfg = self.config
+        if not self.live_trading_enabled:
+            return {"ok": False, "reason": "Parlays use live Kalshi quotes, so they need live trading (PAPER_MODE=false)."}
+        if cfg.parlay_max_legs < 2:
+            return {"ok": False, "reason": "Parlays are turned off (KALSHI_SPORTS_PARLAY_MAX_LEGS)."}
+        if not 2 <= len(legs) <= cfg.parlay_max_legs:
+            return {"ok": False, "reason": f"A parlay needs 2 to {cfg.parlay_max_legs} legs from different games."}
+
+        held = self._held_events(self._open_positions(state))
+        rows: list[dict[str, Any]] = []
+        for leg in legs:
+            ticker, side = leg["ticker"], str(leg["side"]).lower()
+            entry = self.board.get(ticker)
+            if entry is None or side not in ("yes", "no"):
+                return {"ok": False, "reason": "A leg isn't on the board any more. Send /games to refresh."}
+            start = _parse_iso(entry["start"])
+            if start is None or start <= now:
+                return {"ok": False, "reason": f"{entry['game']} has already started."}
+            try:
+                market = self.kalshi.get_market(ticker)
+            except Exception as exc:
+                return {"ok": False, "reason": f"Couldn't read the Kalshi market for {entry['game']}: {exc}"}
+            if str(market.get("status", "")).lower() not in ("open", "active"):
+                return {"ok": False, "reason": f"Kalshi has closed betting on {entry['game']}."}
+            if entry["event_ticker"] in held:
+                return {"ok": False, "reason": f"You already have a bet on {entry['game']}."}
+            p_yes = entry["p_yes"]
+            rows.append({
+                "market_ticker": ticker, "event_ticker": entry["event_ticker"], "side": side,
+                "game": entry["game"], "league": entry["league"], "start": entry["start"],
+                "pick": entry["yes_team"] if side == "yes" else entry["no_team"],
+                "p": None if p_yes is None else (p_yes if side == "yes" else 1.0 - p_yes),
+                "ask": _kalshi_price(market, f"{side}_ask"),
+            })
+        if len({r["event_ticker"] for r in rows}) != len(rows):
+            return {"ok": False, "reason": "Use one leg per game (two legs on the same game aren't independent)."}
+
+        fair = None
+        if all(r["p"] is not None for r in rows):
+            fair = 1.0
+            for r in rows:
+                fair *= r["p"]
+        ceiling = max_price if max_price is not None else fair
+        if ceiling is None:
+            return {"ok": False, "reason": (
+                "The model has no view on one of those games, so there's no fair price. "
+                "Set your own ceiling, e.g. /parlay a + b 5 max 30 (cents).")}
+        if not 0.0 < ceiling < 1.0:
+            return {"ok": False, "reason": "The maximum price has to be between 0 and 100 cents."}
+
+        collection = self._combo_collection_for({r["event_ticker"] for r in rows})
+        if collection is None:
+            return {"ok": False, "reason": "Kalshi doesn't offer a combo for those games together."}
+
+        bucket = _CASH_BUCKET
+        equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
+        cash = broker.get_cash_balance(state, cash_bucket=bucket)
+        stake = equity * cfg.user_parlay_default_pct if amount is None else float(amount)
+        limit = equity * cfg.user_parlay_max_pct
+        if stake < cfg.min_trade_usd:
+            return {"ok": False, "reason": f"Minimum bet is ${cfg.min_trade_usd:.2f}."}
+        if stake > limit + 1e-9:
+            return {"ok": False, "reason": (
+                f"${stake:.2f} is over the parlay limit of ${limit:.2f} "
+                f"({cfg.user_parlay_max_pct:.0%} of your ${equity:.2f} bankroll). Parlays rarely hit.")}
+        if stake > cash * 0.95 + 1e-9:
+            return {"ok": False, "reason": f"Only ${cash:.2f} is available to bet."}
+        contracts = math.floor(stake / ceiling)
+        if contracts < 1:
+            return {"ok": False, "reason": f"${stake:.2f} doesn't buy a contract at up to ${ceiling:.2f}."}
+        return {
+            "ok": True, "kind": "parlay", "legs": rows, "collection": collection, "fair": fair,
+            "max_price": ceiling, "contracts": contracts, "stake": stake,
+            "max_cost": contracts * ceiling, "payout": float(contracts), "equity": equity, "live": True,
+        }
+
+    def place_user_parlay(
+        self,
+        state: PortfolioState,
+        broker: PaperBroker,
+        *,
+        legs: list[dict[str, str]],
+        amount: float | None,
+        max_price: float | None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Ask Kalshi market makers for a price on the parlay and buy it if one is at or under the ceiling."""
+        plan = self.quote_user_parlay(state, broker, legs=legs, amount=amount, max_price=max_price, now=now)
+        if not plan["ok"]:
+            return plan
+        cfg = self.config
+        rows, contracts, ceiling = plan["legs"], plan["contracts"], plan["max_price"]
+        multiplier = self._combo_fee_multiplier(plan["collection"])
+        try:
+            combo = self.kalshi.create_combo_market(plan["collection"], [
+                {"market_ticker": r["market_ticker"], "event_ticker": r["event_ticker"], "side": r["side"]}
+                for r in rows
+            ])
+            combo_ticker = str(combo["market_ticker"])
+            rfq_id = self.kalshi.create_rfq(combo_ticker, contracts)
+        except Exception as exc:
+            self.logger.error("Parlay setup failed: %s", exc)
+            return {"ok": False, "reason": f"Kalshi wouldn't set up that combo: {exc}"}
+        if not rfq_id:
+            return {"ok": False, "reason": "Kalshi didn't return a quote request id."}
+
+        def all_in(quote: dict[str, Any]) -> float | None:
+            """What a YES contract costs us from this quote (maker bids NO at no_bid), fee included."""
+            try:
+                no_bid = float(quote.get("no_bid_dollars") or 0.0)
+                size = float(quote.get("contracts_fp") or contracts)
+            except (TypeError, ValueError):
+                return None
+            if not 0.0 < no_bid < 1.0 or size + 1e-9 < contracts or str(quote.get("status", "open")) != "open":
+                return None
+            price = 1.0 - no_bid
+            return price + kalshi_fee(price, cfg.fee_rate, multiplier, contracts)
+
+        deadline = time.monotonic() + cfg.parlay_quote_wait_seconds
+        best_seen: float | None = None
+        accepted: dict[str, Any] | None = None
+        tried: set[str] = set()
+        while accepted is None:
+            try:
+                quotes = self.kalshi.get_rfq_quotes(rfq_id)
+            except Exception as exc:
+                self.logger.warning("Reading parlay quotes failed: %s", exc)
+                quotes = []
+            priced = sorted(
+                ((all_in(q), q) for q in quotes if str(q.get("id", "")) not in tried),
+                key=lambda row: (row[0] is None, row[0] or 0.0),
+            )
+            priced = [(c, q) for c, q in priced if c is not None]
+            if priced:
+                best_seen = priced[0][0] if best_seen is None else min(best_seen, priced[0][0])
+            for cost, quote in priced:
+                if cost > ceiling + 1e-9:
+                    break
+                tried.add(str(quote["id"]))
+                try:
+                    self.kalshi.accept_rfq_quote(rfq_id, str(quote["id"]), "no")
+                except Exception as exc:
+                    self.logger.warning("Accepting parlay quote failed: %s", exc)
+                    continue
+                accepted = {"quote": quote, "cost": cost}
+                break
+            if accepted is not None or time.monotonic() >= deadline:
+                break
+            self._sleep(self._QUOTE_POLL_SECONDS)
+
+        if accepted is None:
+            try:
+                self.kalshi.delete_rfq(rfq_id)
+            except Exception as exc:
+                self.logger.debug("Could not delete RFQ %s: %s", rfq_id, exc)
+            seen = (f" The best price offered was {best_seen * 100:.0f}¢ all-in." if best_seen is not None
+                    else " No market maker quoted it.")
+            return {"ok": False, "reason": (
+                f"Nothing bought: no quote at or under {ceiling * 100:.0f}¢.{seen}"), "best_seen": best_seen}
+
+        quote = accepted["quote"]
+        status = self._await_execution(rfq_id, str(quote["id"]))
+        if status != "executed":
+            reason = ("The market maker didn't confirm in time, so nothing was bought."
+                      if status in ("cancelled", "open", "accepted") else
+                      "I couldn't confirm whether the parlay went through. Check /positions and your Kalshi app.")
+            return {"ok": False, "reason": reason, "uncertain": status not in ("cancelled",), "status": status}
+
+        price = 1.0 - float(quote["no_bid_dollars"])
+        fee_each = kalshi_fee(price, cfg.fee_rate, multiplier, contracts)
+        held_side, held_count, warning = self._verify_combo_position(combo_ticker, contracts)
+        meta = {
+            "ticker": combo_ticker, "event_ticker": str(combo.get("event_ticker", "")),
+            "event_tickers": [r["event_ticker"] for r in rows], "side": held_side, "venue": "kalshi",
+            "strategy": "kalshi_sports", "league": "parlay",
+            "game": " + ".join(r["game"] for r in rows), "pick": " + ".join(r["pick"] for r in rows),
+            "game_start": min(r["start"] for r in rows), "model_prob": round(plan["fair"] or 0.0, 4),
+            "ask": round(price, 4), "fee": round(fee_each, 4), "parlay": True, "user_bet": True,
+            "legs": [{"ticker": r["market_ticker"], "side": r["side"], "pick": r["pick"]} for r in rows],
+            "kalshi_rfq_id": rfq_id, "kalshi_quote_id": str(quote["id"]),
+        }
+        entry_price = price if held_side == "yes" else 1.0 - price
+        position = broker.open_position(
+            state, symbol=f"{_SYMBOL_PREFIX}:{combo_ticker}:{held_side.upper()}", asset_type="prediction",
+            strategy="kalshi_sports", price=entry_price, notional=held_count * entry_price,
+            opened_at=now, meta=meta, cash_bucket=_CASH_BUCKET,
+        )
+        self.logger.info(
+            "KALSHI SPORTS LIVE PARLAY %s x%d @ $%.3f (+$%.3f fee) fair=%s ceiling=%.3f",
+            combo_ticker, held_count, price, fee_each,
+            "n/a" if plan["fair"] is None else f"{plan['fair']:.3f}", ceiling,
+        )
+        return {
+            "ok": True, "kind": "parlay", "combo_ticker": combo_ticker, "legs": rows,
+            "filled": held_count, "price": price, "fee_each": fee_each, "fair": plan["fair"],
+            "spent": held_count * (price + fee_each), "payout": float(held_count),
+            "symbol": position.symbol if position is not None else "", "warning": warning,
+        }
+
+    def _await_execution(self, rfq_id: str, quote_id: str) -> str:
+        """Poll an accepted quote until the maker confirms and it executes (or it is cancelled)."""
+        deadline = time.monotonic() + self._EXECUTION_WAIT_SECONDS
+        status = "accepted"
+        while True:
+            try:
+                status = str(self.kalshi.get_rfq_quote(rfq_id, quote_id).get("status", status)).lower()
+            except Exception as exc:
+                self.logger.debug("Quote status check failed: %s", exc)
+                status = "unknown"
+            if status in ("executed", "cancelled") or time.monotonic() >= deadline:
+                return status
+            self._sleep(self._QUOTE_POLL_SECONDS)
+
+    def _verify_combo_position(self, ticker: str, expected: int) -> tuple[str, int, str]:
+        """What the account holds in the combo after execution: (side, contracts, warning).
+
+        Accepting the wrong side of a quote would leave a NO position, so check it. If the
+        positions can't be read the expected YES holding is assumed.
+        """
+        try:
+            for pos in self.kalshi.get_positions():
+                if pos.get("ticker") != ticker:
+                    continue
+                raw = pos.get("position_fp", pos.get("position"))
+                signed = int(round(float(raw))) if raw not in (None, "") else 0
+                if signed > 0:
+                    return "yes", signed, ""
+                if signed < 0:
+                    return "no", -signed, (
+                        "Kalshi shows you holding NO on this parlay, the opposite of what was intended. "
+                        "Check it in the Kalshi app.")
+        except Exception as exc:
+            self.logger.warning("Could not verify the parlay position: %s", exc)
+        return "yes", expected, "Couldn't confirm the position with Kalshi yet; /status will show it once it syncs."
 
     # ------------------------------------------------------------------
     # Position management

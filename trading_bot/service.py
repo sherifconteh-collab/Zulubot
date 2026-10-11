@@ -625,6 +625,38 @@ class TradingBotService:
             self.state_store.save(state)
         return outcome
 
+    @_locked
+    def quote_sports_parlay(
+        self, legs: list[dict[str, str]], amount: float | None, max_price: float | None,
+    ) -> dict[str, Any]:
+        """Check a hand-built parlay and its price ceiling; places nothing."""
+        now = datetime.now(self.config.timezone)
+        state = self._sports_bet_state(now)
+        blocker = self._sports_bet_blocker(state)
+        if blocker:
+            return {"ok": False, "reason": blocker}
+        return self.kalshi_sports_strategy.quote_user_parlay(
+            state, self.broker, legs=legs, amount=amount, max_price=max_price, now=now,
+        )
+
+    @_locked
+    def place_sports_parlay(
+        self, legs: list[dict[str, str]], amount: float | None, max_price: float | None,
+    ) -> dict[str, Any]:
+        """Request quotes from Kalshi market makers and buy the parlay if one is at or under the ceiling."""
+        now = datetime.now(self.config.timezone)
+        state = self._sports_bet_state(now)
+        blocker = self._sports_bet_blocker(state)
+        if blocker:
+            return {"ok": False, "reason": blocker}
+        outcome = self.kalshi_sports_strategy.place_user_parlay(
+            state, self.broker, legs=legs, amount=amount, max_price=max_price, now=now,
+        )
+        if outcome.get("ok"):
+            self._persist_ai_budget(state)
+            self.state_store.save(state)
+        return outcome
+
     def update_last_leads(self, strategy: str, leads: list[dict[str, Any]]) -> None:
         """Replace the cached leads for *strategy* (called after each scheduler run)."""
         self._last_leads[strategy] = list(leads)

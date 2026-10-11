@@ -34,7 +34,8 @@ class ServiceLockTests(unittest.TestCase):
 
     def test_public_state_methods_are_locked(self):
         for name in ("run", "status", "engage_kill_switch", "clear_kill_switch",
-                     "list_sports_games", "quote_sports_bet", "place_sports_bet"):
+                     "list_sports_games", "quote_sports_bet", "place_sports_bet",
+                     "quote_sports_parlay", "place_sports_parlay"):
             self.assertTrue(hasattr(getattr(TradingBotService, name), "__wrapped__"), name)
 
     def test_reentrant_calls_do_not_deadlock(self):
@@ -80,6 +81,24 @@ class SportsBetServiceTests(unittest.TestCase):
         out = TradingBotService.place_sports_bet.__wrapped__(fake, "X", "yes", 5.0)
         self.assertFalse(out["ok"])
         fake.kalshi_sports_strategy.place_user_bet.assert_not_called()
+
+    def test_successful_parlay_is_saved_and_refused_one_is_not(self):
+        fake, state = self._fake()
+        fake.kalshi_sports_strategy.place_user_parlay.return_value = {"ok": True}
+        self.assertTrue(TradingBotService.place_sports_parlay.__wrapped__(fake, [{"ticker": "A", "side": "yes"}], 5.0, 0.3)["ok"])
+        fake.state_store.save.assert_called_once_with(state)
+        kwargs = fake.kalshi_sports_strategy.place_user_parlay.call_args.kwargs
+        self.assertEqual((kwargs["amount"], kwargs["max_price"]), (5.0, 0.3))
+        fake, _ = self._fake()
+        fake.kalshi_sports_strategy.place_user_parlay.return_value = {"ok": False, "reason": "no quote"}
+        TradingBotService.place_sports_parlay.__wrapped__(fake, [], None, None)
+        fake.state_store.save.assert_not_called()
+
+    def test_parlay_quote_respects_disabled_strategy(self):
+        fake, _ = self._fake(enabled=False)
+        out = TradingBotService.quote_sports_parlay.__wrapped__(fake, [], None, None)
+        self.assertFalse(out["ok"])
+        fake.kalshi_sports_strategy.quote_user_parlay.assert_not_called()
 
     def test_kill_switch_blocks_only_when_sports_honours_it(self):
         fake, state = self._fake(ignore_global_halt=False)

@@ -923,3 +923,231 @@ class UserBetTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         _, _, result = _run(strat, state=state)
         self.assertEqual(result["buys"], [])
+
+
+class ParlayRfqTests(unittest.TestCase):
+    """Hand-built parlays: Kalshi combo market + request for quote (all calls mocked)."""
+
+    COMBO = "KXMVE-COMBO-1"
+
+    def _setup(self, **cfg):
+        g1 = _game(home_moneyline=-110.0, away_moneyline=-110.0)
+        g2 = _game(
+            game_id="402", home=_team("3", "Kansas City", "Chiefs", "KC"), away=_team("4", "Denver", "Broncos", "DEN"),
+            home_moneyline=-110.0, away_moneyline=-110.0,
+        )
+        m1 = [_market("Baltimore", yes_ask=0.52, no_ask=0.50), _market("Buffalo", yes_ask=0.50, no_ask=0.52)]
+        m2 = [
+            _market("Kansas City", yes_ask=0.52, no_ask=0.50, ticker="KXNFLGAME-26OCT04DENKC-KAN",
+                    event_ticker="KXNFLGAME-26OCT04DENKC", title="Denver at Kansas City Winner?"),
+            _market("Denver", yes_ask=0.50, no_ask=0.52, ticker="KXNFLGAME-26OCT04DENKC-DEN",
+                    event_ticker="KXNFLGAME-26OCT04DENKC", title="Denver at Kansas City Winner?"),
+        ]
+        markets = m1 + m2
+        config = _config(parlay_quote_wait_seconds=0.0, **cfg)
+        strat, kalshi = _strategy(config, [g1, g2], markets)
+        kalshi.get_market.side_effect = lambda t: next(
+            (m for m in markets if m["ticker"] == t), {"ticker": t, "status": "active"})
+        kalshi.get_multivariate_collections.return_value = [
+            {"collection_ticker": "KXMVEOTHER-R", "associated_event_tickers": ["KXNBAGAME-X"]},
+            {"collection_ticker": "KXMVESPORTS-R",
+             "associated_event_tickers": ["KXNFLGAME-26OCT04BUFBAL", "KXNFLGAME-26OCT04DENKC"]},
+        ]
+        kalshi.create_combo_market.return_value = {"market_ticker": self.COMBO, "event_ticker": "KXMVE-EV"}
+        kalshi.create_rfq.return_value = "rfq-1"
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "q-1", "status": "open", "yes_bid_dollars": "0.1000", "no_bid_dollars": "0.8000", "contracts_fp": "80.00"},
+        ]
+        kalshi.get_rfq_quote.return_value = {"status": "executed"}
+        kalshi.get_positions.return_value = [{"ticker": self.COMBO, "position": 80}]
+        strat.live_trading_enabled = True
+        strat._sleep = lambda s: None
+        strat._EXECUTION_WAIT_SECONDS = 0.0
+        strat.refresh_board(_NOW)
+        return strat, kalshi
+
+    def _legs(self, strat):
+        pick = {}
+        for game in strat.board_games(_NOW):
+            for o in game["options"]:
+                pick[o["label"]] = {"ticker": o["ticker"], "side": o["side"]}
+        return [pick["Baltimore Ravens"], pick["Kansas City Chiefs"]]
+
+    def _state(self):
+        return PortfolioState(cash=0.0, cash_reserves={"kalshi": 1000.0})
+
+    def _place(self, strat, legs=None, amount=20.0, max_price=None, state=None):
+        state = state or self._state()
+        broker = PaperBroker(True, logging.getLogger("t.parlay"))
+        return state, strat.place_user_parlay(
+            state, broker, legs=legs or self._legs(strat), amount=amount, max_price=max_price, now=_NOW)
+
+    def test_quote_uses_fair_probability_as_the_ceiling(self):
+        strat, _ = self._setup()
+        state = self._state()
+        plan = strat.quote_user_parlay(state, PaperBroker(True, logging.getLogger("t")), legs=self._legs(strat),
+                                       amount=20.0, max_price=None, now=_NOW)
+        self.assertTrue(plan["ok"], plan)
+        self.assertAlmostEqual(plan["fair"], 0.25, delta=0.03)
+        self.assertAlmostEqual(plan["max_price"], plan["fair"])
+        self.assertLessEqual(plan["max_cost"], 20.0 + 1e-9)
+        self.assertEqual(plan["collection"], "KXMVESPORTS-R")
+        self.assertEqual(plan["contracts"], int(20.0 // plan["max_price"]))
+
+    def test_paper_mode_and_bad_leg_counts_are_refused(self):
+        strat, _ = self._setup()
+        legs = self._legs(strat)
+        broker = PaperBroker(True, logging.getLogger("t"))
+        self.assertFalse(strat.quote_user_parlay(self._state(), broker, legs=legs[:1], amount=5, max_price=None, now=_NOW)["ok"])
+        strat.live_trading_enabled = False
+        out = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=5, max_price=None, now=_NOW)
+        self.assertIn("live trading", out["reason"])
+
+    def test_same_game_legs_and_missing_collection_are_refused(self):
+        strat, kalshi = self._setup()
+        broker = PaperBroker(True, logging.getLogger("t"))
+        by_label = {o["label"]: o for g in strat.board_games(_NOW) for o in g["options"]}
+        same_game = [{"ticker": by_label["Baltimore Ravens"]["ticker"], "side": by_label["Baltimore Ravens"]["side"]},
+                     {"ticker": by_label["Buffalo Bills"]["ticker"], "side": by_label["Buffalo Bills"]["side"]}]
+        out = strat.quote_user_parlay(self._state(), broker, legs=same_game, amount=5, max_price=None, now=_NOW)
+        self.assertIn("one leg per game", out["reason"])
+        kalshi.get_multivariate_collections.return_value = [{"collection_ticker": "X-R", "associated_event_tickers": []}]
+        strat._combo_collections = None
+        out = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=None, now=_NOW)
+        self.assertIn("doesn't offer a combo", out["reason"])
+
+    def test_stake_limits(self):
+        strat, _ = self._setup()
+        broker = PaperBroker(True, logging.getLogger("t"))
+        legs = self._legs(strat)
+        over = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=200.0, max_price=None, now=_NOW)
+        self.assertIn("parlay limit", over["reason"])
+        under = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=0.5, max_price=None, now=_NOW)
+        self.assertIn("Minimum", under["reason"])
+        default = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=None, max_price=None, now=_NOW)
+        self.assertAlmostEqual(default["stake"], 20.0)  # 2% of 1000
+
+    def test_no_model_view_requires_a_ceiling(self):
+        strat, _ = self._setup()
+        for entry in strat.board.values():
+            entry["p_yes"] = None
+        broker = PaperBroker(True, logging.getLogger("t"))
+        out = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=None, now=_NOW)
+        self.assertIn("max", out["reason"])
+        ok = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=0.2, now=_NOW)
+        self.assertTrue(ok["ok"])
+
+    def test_accepts_a_quote_under_the_ceiling_and_books_it(self):
+        strat, kalshi = self._setup()
+        expected_contracts = int(20.0 // out_fair(strat, self._state()))
+        state, out = self._place(strat)
+        self.assertTrue(out["ok"], out)
+        kalshi.create_combo_market.assert_called_once()
+        legs = kalshi.create_combo_market.call_args.args[1]
+        self.assertEqual([l["side"] for l in legs], ["yes", "yes"])
+        kalshi.create_rfq.assert_called_once_with(self.COMBO, expected_contracts)
+        # maker bid NO at 0.80, so we hold YES at 0.20: we accept the maker's NO side
+        kalshi.accept_rfq_quote.assert_called_once_with("rfq-1", "q-1", "no")
+        self.assertAlmostEqual(out["price"], 0.20)
+        position = state.positions[out["symbol"]]
+        self.assertEqual(position.meta["side"], "yes")
+        self.assertTrue(position.meta["parlay"])
+        self.assertEqual(len(position.meta["event_tickers"]), 2)
+        self.assertIsNone(out["warning"] or None)
+
+    def test_both_games_are_then_off_limits(self):
+        strat, _ = self._setup()
+        state, out = self._place(strat)
+        self.assertTrue(out["ok"])
+        _, _, result = _run(strat, state=state)
+        self.assertEqual(result["buys"], [])
+        again = strat.quote_user_parlay(state, PaperBroker(True, logging.getLogger("t")), legs=self._legs(strat),
+                                        amount=5, max_price=None, now=_NOW)
+        self.assertIn("already have a bet", again["reason"])
+
+    def test_quote_above_the_ceiling_buys_nothing_and_cleans_up(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "q-1", "status": "open", "yes_bid_dollars": "0.1", "no_bid_dollars": "0.7000", "contracts_fp": "80.00"}]
+        state, out = self._place(strat)
+        self.assertFalse(out["ok"])
+        self.assertIn("no quote at or under", out["reason"])
+        kalshi.accept_rfq_quote.assert_not_called()
+        kalshi.delete_rfq.assert_called_once_with("rfq-1")
+        self.assertEqual(state.positions, {})
+
+    def test_user_ceiling_allows_a_pricier_quote(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "q-1", "status": "open", "yes_bid_dollars": "0.1", "no_bid_dollars": "0.7000", "contracts_fp": "70.00"}]
+        kalshi.get_positions.return_value = [{"ticker": self.COMBO, "position": 70}]
+        state, out = self._place(strat, max_price=0.32, amount=20.0)
+        self.assertTrue(out["ok"], out)
+
+    def test_no_quotes_means_no_bet(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quotes.return_value = []
+        _, out = self._place(strat)
+        self.assertFalse(out["ok"])
+        self.assertIn("No market maker quoted", out["reason"])
+        kalshi.delete_rfq.assert_called_once()
+
+    def test_undersized_or_non_open_quotes_are_ignored(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "a", "status": "open", "no_bid_dollars": "0.9", "contracts_fp": "5.00"},
+            {"id": "b", "status": "cancelled", "no_bid_dollars": "0.9", "contracts_fp": "80.00"},
+        ]
+        _, out = self._place(strat)
+        self.assertFalse(out["ok"])
+        kalshi.accept_rfq_quote.assert_not_called()
+
+    def test_best_quote_wins(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "worse", "status": "open", "no_bid_dollars": "0.78", "contracts_fp": "80.00"},
+            {"id": "better", "status": "open", "no_bid_dollars": "0.82", "contracts_fp": "80.00"},
+        ]
+        _, out = self._place(strat)
+        self.assertTrue(out["ok"])
+        self.assertEqual(kalshi.accept_rfq_quote.call_args.args[1], "better")
+
+    def test_maker_not_confirming_books_nothing(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quote.return_value = {"status": "cancelled"}
+        state, out = self._place(strat)
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["uncertain"])
+        self.assertEqual(state.positions, {})
+
+    def test_unknown_outcome_is_flagged_uncertain(self):
+        strat, kalshi = self._setup()
+        kalshi.get_rfq_quote.side_effect = RuntimeError("boom")
+        state, out = self._place(strat)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["uncertain"])
+        self.assertEqual(state.positions, {})
+
+    def test_holding_the_wrong_side_is_reported_and_tracked_truthfully(self):
+        strat, kalshi = self._setup()
+        kalshi.get_positions.return_value = [{"ticker": self.COMBO, "position": -80}]
+        state, out = self._place(strat)
+        self.assertTrue(out["ok"])
+        self.assertIn("opposite", out["warning"])
+        self.assertEqual(state.positions[out["symbol"]].meta["side"], "no")
+
+    def test_failed_combo_setup_is_reported(self):
+        strat, kalshi = self._setup()
+        kalshi.create_combo_market.side_effect = RuntimeError("400 bad legs")
+        state, out = self._place(strat)
+        self.assertFalse(out["ok"])
+        kalshi.create_rfq.assert_not_called()
+
+
+def out_fair(strat, state):
+    plan = strat.quote_user_parlay(
+        state, PaperBroker(True, logging.getLogger("t")), legs=[
+            {"ticker": o["ticker"], "side": o["side"]}
+            for g in strat.board_games(_NOW) for o in g["options"] if o["label"] in ("Baltimore Ravens", "Kansas City Chiefs")],
+        amount=20.0, max_price=None, now=_NOW)
+    return plan["max_price"]
