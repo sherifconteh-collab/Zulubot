@@ -446,6 +446,28 @@ def _skip_reason_summary(decisions: Any, limit: int = 4) -> str:
     return ", ".join(f"{reason} x{n}" for reason, n in ranked)
 
 
+_WHY_REASONS = ("order_failed", "order_not_filled", "parlay_not_filled", "props_unavailable", "no_liquid_stack")
+
+
+def _skip_examples(decisions: Any, limit: int = 3) -> list[str]:
+    """Kalshi's or the engine's own words for the failures that matter (rejected orders, unfilled parlays)."""
+    seen: set[str] = set()
+    lines: list[str] = []
+    for item in decisions or []:
+        if not isinstance(item, dict) or item.get("reason") not in _WHY_REASONS:
+            continue
+        signals = item.get("signals") or {}
+        text = str(signals.get("error") or signals.get("why") or "").strip()
+        label = f"{item['reason']}: {text}" if text else str(item["reason"])
+        if label in seen:
+            continue
+        seen.add(label)
+        lines.append(html.escape(_clip_text(label, 200)))
+        if len(lines) >= limit:
+            break
+    return lines
+
+
 def _format_props_ladder(props: list[dict[str, Any]], start: int = 1) -> list[str]:
     """Group player markets by player and stat: ``passing yards: p1 125+ 85c | p2 150+ 73c ...``."""
     groups: dict[tuple[str, str], dict[str, list[str]]] = {}
@@ -1503,6 +1525,8 @@ class TradingTelegramBot:
             why = _skip_reason_summary(module.get("decisions"))
             if why and not (module.get("buys") or []):
                 lines.append(f"Nothing bought. Skipped: {html.escape(why)}")
+            for example in _skip_examples(module.get("decisions")):
+                lines.append(f"  \u2022 {example}")
             if module.get("error"):
                 lines.append(f"Error: {html.escape(_clip_text(module['error'], 140))}")
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
