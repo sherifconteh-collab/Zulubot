@@ -563,6 +563,68 @@ class TradingBotService:
         self.logger.warning("Kill switch engaged manually. closed=%s failed=%s", liquidation["closed"], liquidation["failed"])
         return summary
 
+    # ── Hand-picked sports bets (Telegram /games, /bet, /confirm) ──────
+
+    @_locked
+    def list_sports_games(self) -> list[dict[str, Any]]:
+        """Fresh scan of bettable games; places nothing."""
+        if not self.config.kalshi_sports.enabled:
+            return []
+        games = self.kalshi_sports_strategy.refresh_board(datetime.now(self.config.timezone))
+        for game in games:
+            local = datetime.fromisoformat(game["start"]).astimezone(self.config.timezone)
+            game["start_label"] = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M %p}"
+        return games
+
+    def _sports_bet_blocker(self, state: PortfolioState) -> str | None:
+        cfg = self.config.kalshi_sports
+        if not cfg.enabled:
+            return "The sports strategy is disabled (KALSHI_SPORTS_ENABLED)."
+        if not cfg.ignore_global_halt and (state.kill_switch_engaged or state.halt_new_trades_for_day):
+            return "Trading is halted by the kill switch / daily limit."
+        return None
+
+    def _sports_bet_state(self, now: datetime) -> PortfolioState:
+        state = self.state_store.load()
+        self._hydrate_ai_budget(state)
+        if not self.config.paper_mode:
+            self._sync_live_accounts(state)
+        self.refresh_open_positions(state, now=now)
+        return state
+
+    @_locked
+    def quote_sports_bet(self, ticker: str, side: str, amount: float | None) -> dict[str, Any]:
+        """Price a hand-picked bet against the live book and the limits; places nothing."""
+        now = datetime.now(self.config.timezone)
+        state = self._sports_bet_state(now)
+        blocker = self._sports_bet_blocker(state)
+        if blocker:
+            return {"ok": False, "reason": blocker}
+        quote = self.kalshi_sports_strategy.quote_user_bet(
+            state, self.broker, ticker=ticker, side=side, amount=amount, now=now,
+        )
+        quote.pop("market", None)
+        return quote
+
+    @_locked
+    def place_sports_bet(
+        self, ticker: str, side: str, amount: float | None, max_ask: float | None = None,
+    ) -> dict[str, Any]:
+        """Re-price and place a hand-picked bet: a live Kalshi order, or a paper booking."""
+        now = datetime.now(self.config.timezone)
+        state = self._sports_bet_state(now)
+        blocker = self._sports_bet_blocker(state)
+        if blocker:
+            return {"ok": False, "reason": blocker}
+        outcome = self.kalshi_sports_strategy.place_user_bet(
+            state, self.broker, ticker=ticker, side=side, amount=amount, now=now, max_ask=max_ask,
+        )
+        if outcome.get("ok"):
+            self.refresh_open_positions(state, now=now)
+            self._persist_ai_budget(state)
+            self.state_store.save(state)
+        return outcome
+
     def update_last_leads(self, strategy: str, leads: list[dict[str, Any]]) -> None:
         """Replace the cached leads for *strategy* (called after each scheduler run)."""
         self._last_leads[strategy] = list(leads)

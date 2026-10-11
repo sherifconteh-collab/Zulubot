@@ -11,6 +11,8 @@ import asyncio
 import html
 import json
 import logging
+import re
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -143,6 +145,91 @@ def _format_sports_picks(predictions: list[dict[str, Any]], limit: int = 10) -> 
     return [_format_sports_pick(p) for p in ordered[:limit]]
 
 
+_BET_TTL_SECONDS = 600
+_PRICE_SLIP = 0.02  # /confirm refuses if the ask has risen more than this since the preview
+_MAX_GAMES_SHOWN = 40
+_AMOUNT_RE = re.compile(r"^\$?(\d+(?:\.\d+)?)$")
+
+
+def _parse_bet_args(args: list[str]) -> dict[str, Any]:
+    """Split ``/bet`` arguments into game number, team query, dollar amount and ``now`` flag.
+
+    ``/bet cleveland 5``, ``/bet 3 browns``, ``/bet 3 browns $5 now``.
+    """
+    tokens = [a for a in args if a]
+    now_flag = bool(tokens) and tokens[-1].lower() == "now"
+    if now_flag:
+        tokens = tokens[:-1]
+    game_no: int | None = None
+    if len(tokens) > 1 and tokens[0].isdigit():
+        game_no = int(tokens[0])
+        tokens = tokens[1:]
+    amount: float | None = None
+    if len(tokens) > 1 and _AMOUNT_RE.match(tokens[-1]):
+        amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
+        tokens = tokens[:-1]
+    return {"game_no": game_no, "query": " ".join(tokens).strip(), "amount": amount, "now": now_flag}
+
+
+def _find_bet_options(
+    games: list[dict[str, Any]], game_no: int | None, query: str,
+) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """(game number, game, option) rows whose team name contains every word of ``query``."""
+    words = query.lower().split()
+    rows = []
+    for number, game in enumerate(games, start=1):
+        if game_no is not None and number != game_no:
+            continue
+        for option in game["options"]:
+            label = str(option["label"]).lower()
+            if all(w in label for w in words):
+                rows.append((number, game, option))
+    return rows
+
+
+def _format_games_board(games: list[dict[str, Any]], title: str) -> list[str]:
+    lines = [title]
+    for number, game in enumerate(games[:_MAX_GAMES_SHOWN], start=1):
+        parts = []
+        for option in game["options"]:
+            text = f"{html.escape(str(option['label']))} {float(option['ask']) * 100:.0f}\u00a2"
+            if option.get("p") is not None:
+                text += f" (model {float(option['p']):.0%})"
+            parts.append(text)
+        lines.append(
+            f"{number}. <b>{html.escape(str(game['league']).upper())}</b> {html.escape(str(game['game']))}"
+            f" \u00b7 {html.escape(str(game.get('start_label', game['start'])))}\n   " + "  |  ".join(parts)
+        )
+    if len(games) > _MAX_GAMES_SHOWN:
+        lines.append(f"\u2026 +{len(games) - _MAX_GAMES_SHOWN} more: filter with /games &lt;league or team&gt;")
+    return lines
+
+
+def _format_bet_preview(quote: dict[str, Any]) -> str:
+    ask, fee, qty = float(quote["ask"]), float(quote["fee_each"]), int(quote["quantity"])
+    cost = float(quote["cost"])
+    all_in = ask + fee
+    pick = html.escape(str(quote["pick"]))
+    lines = [
+        f"<b>Bet preview</b> \u2014 {'LIVE money' if quote.get('live') else 'paper'}",
+        f"<b>{pick}</b> in {html.escape(str(quote['game']))} ({html.escape(str(quote['league']).upper())})",
+        f"Buy {qty} contracts @ {ask * 100:.0f}\u00a2 + {fee * 100:.1f}\u00a2 fee = <b>${cost:.2f}</b>",
+        f"Win: ${qty:.2f} back (profit ${qty - cost:.2f}). Lose: ${cost:.2f}.",
+    ]
+    p = quote.get("model_prob")
+    if p is None:
+        lines.append("No model view on this game (no sportsbook line), so this is purely your call.")
+    elif float(p) >= all_in:
+        lines.append(f"Model agrees: {float(p):.0%} to win vs {all_in * 100:.0f}\u00a2 all-in.")
+    else:
+        lines.append(
+            f"Heads up: the model gives {pick} {float(p):.0%} vs {all_in * 100:.0f}\u00a2 all-in "
+            f"(about {(all_in - float(p)) * 100:.0f}\u00a2 of expected cost per $1). Your call."
+        )
+    lines.append("Send /confirm within 10 minutes to place it, or /cancel.")
+    return "\n".join(lines)
+
+
 def _format_lead_line(lead: dict[str, Any]) -> str:
     """One-line representation of a lead for the Telegram leads alert."""
     symbol = html.escape(str(lead.get("symbol", "?")))
@@ -194,6 +281,9 @@ class TradingTelegramBot:
         self._service: Any = None
         self._paused = False
         self._trade_history: list[dict[str, Any]] = []
+        # Numbered list from the last /games, and the one bet awaiting /confirm.
+        self._games: list[dict[str, Any]] = []
+        self._pending_bet: dict[str, Any] | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -724,6 +814,10 @@ class TradingTelegramBot:
             "predict": self._cmd_predictions,
             "perps": self._cmd_kalshi_perps,
             "sports": self._cmd_kalshi_sports,
+            "games": self._cmd_games,
+            "bet": self._cmd_bet,
+            "confirm": self._cmd_confirm,
+            "cancel": self._cmd_cancel,
             "backtest": self._cmd_backtest,
             "ai": self._cmd_ai,
             "history": self._cmd_history,
@@ -760,6 +854,11 @@ class TradingTelegramBot:
             "<b>Run</b>\n"
             "/crypto /stocks /rotation /predict /perps /sports /polymarket /btc5min /markov /options\n"
             "/backtest [range]\n"
+            "\n"
+            "<b>Your own sports bets</b>\n"
+            "/games [league or team] — games you can bet on\n"
+            "/bet &lt;team&gt; [$amount] — preview a bet (e.g. /bet cleveland 5)\n"
+            "/confirm — place the previewed bet; /cancel — drop it\n"
             "\n"
             "<b>Control</b>\n"
             "/pause /resume /kill\n"
@@ -1091,6 +1190,127 @@ class TradingTelegramBot:
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_games(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List upcoming games you can bet on, with Kalshi prices and the model's view."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            games = await self._load_games(update)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+            return
+        query = " ".join(context.args or []).strip().lower()
+        if query:
+            games = [g for g in games if query == str(g["league"]).lower() or query in str(g["game"]).lower()
+                     or any(query in str(o["label"]).lower() for o in g["options"])]
+        self._games = games
+        if not games:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "No bettable games found" + (f" for '{html.escape(query)}'." if query else " right now."),
+            )
+            return
+        title = f"<b>Games to bet on</b> ({len(games)}) \u2014 soonest first"
+        lines = _format_games_board(games, title)
+        lines.append("\nBet: /bet &lt;team&gt; [$amount], e.g. /bet browns 5 (or /bet 3 browns 5)")
+        await _send_html_chunks(update, "\n".join(lines))
+
+    async def _load_games(self, update: Update) -> list[dict[str, Any]]:
+        await update.message.reply_text("Checking games and prices\u2026")  # type: ignore[union-attr]
+        return await asyncio.to_thread(self._service.list_sports_games)
+
+    async def _cmd_bet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Preview a bet on the team you name; /confirm places it."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        parsed = _parse_bet_args(list(context.args or []))
+        if not parsed["query"]:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Which team? e.g. /bet cleveland 5 \u2014 or send /games first and use /bet 3 browns.",
+            )
+            return
+        try:
+            if not self._games:
+                self._games = await self._load_games(update)
+            rows = _find_bet_options(self._games, parsed["game_no"], parsed["query"])
+            if not rows:
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"No team matching '{parsed['query']}' on the board. Send /games to see what's available.",
+                )
+                return
+            if len(rows) > 1:
+                lines = [f"{len(rows)} matches for '{html.escape(parsed['query'])}'. Be specific, e.g. /bet {rows[0][0]} {html.escape(parsed['query'])}:"]
+                for number, game, option in rows[:8]:
+                    lines.append(
+                        f"{number}. <b>{html.escape(str(option['label']))}</b> \u2014 {html.escape(str(game['game']))}"
+                        f" ({html.escape(str(game['league']).upper())}, {html.escape(str(game.get('start_label', '')))})"
+                    )
+                await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
+                return
+            _, game, option = rows[0]
+            quote = await asyncio.to_thread(
+                self._service.quote_sports_bet, option["ticker"], option["side"], parsed["amount"],
+            )
+            if not quote.get("ok"):
+                await update.message.reply_text(f"Can't place that bet: {quote.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+                return
+            self._pending_bet = {
+                "ticker": option["ticker"], "side": option["side"], "stake": float(quote["stake"]),
+                "ask": float(quote["ask"]), "pick": quote["pick"], "game": quote["game"],
+                "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            await update.message.reply_text(_format_bet_preview(quote), parse_mode="HTML")  # type: ignore[union-attr]
+            if parsed["now"]:
+                await self._cmd_confirm(update, context)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        pending, self._pending_bet = self._pending_bet, None
+        if pending is None or time.monotonic() > pending["expires"]:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Nothing to confirm (previews expire after 10 minutes). Send /bet <team> again.",
+            )
+            return
+        try:
+            outcome = await asyncio.to_thread(
+                self._service.place_sports_bet, pending["ticker"], pending["side"],
+                pending["stake"], pending["ask"] + _PRICE_SLIP,
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"Error placing the bet: {exc}")  # type: ignore[union-attr]
+            return
+        if not outcome.get("ok"):
+            await update.message.reply_text(f"Not placed: {outcome.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+            return
+        filled = int(outcome.get("filled", outcome["quantity"]))
+        await update.message.reply_text(  # type: ignore[union-attr]
+            f"\u2705 {'Bet placed' if outcome.get('live') else 'Paper bet placed'}: {filled} contracts on "
+            f"<b>{html.escape(str(outcome['pick']))}</b> ({html.escape(str(outcome['game']))}) "
+            f"@ {float(outcome['ask']) * 100:.0f}\u00a2, ${float(outcome['spent']):.2f} in. "
+            "It settles automatically after the game.",
+            parse_mode="HTML",
+        )
+
+    async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        had = self._pending_bet is not None
+        self._pending_bet = None
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "Cancelled. Nothing was bought." if had else "Nothing pending.",
+        )
 
     async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):

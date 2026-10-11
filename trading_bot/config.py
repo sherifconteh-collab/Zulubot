@@ -500,6 +500,10 @@ class KalshiSportsConfig:
     # legs from different games. 0 disables. Kalshi combos are quoted on request, not
     # via an order book, so they are placed manually in Kalshi's parlay builder.
     parlay_max_legs: int = 4
+    # Bets you pick yourself in Telegram (/games, /bet): default stake and per-bet cap, as a
+    # share of the wallet. Your call overrides the model's, so the cap is the only guard.
+    user_bet_default_pct: float = 0.05
+    user_bet_max_pct: float = 0.25
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
     take_profit_pct: float = 0.0
@@ -913,6 +917,8 @@ class AppConfig:
                 ignore_global_halt=_env_bool("KALSHI_SPORTS_IGNORE_GLOBAL_HALT", True),
                 use_polymarket=_env_bool("KALSHI_SPORTS_USE_POLYMARKET", True),
                 parlay_max_legs=_env_int("KALSHI_SPORTS_PARLAY_MAX_LEGS", 4),
+                user_bet_default_pct=_env_float("KALSHI_SPORTS_USER_BET_DEFAULT_PCT", 0.05),
+                user_bet_max_pct=_env_float("KALSHI_SPORTS_USER_BET_MAX_PCT", 0.25),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
