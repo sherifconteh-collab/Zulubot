@@ -1,5 +1,9 @@
 # Release notes
 
+## 2026-10-11: Parlay stake floor and order-failure details
+- **Automatic parlays never stake under $5** (default; `KALSHI_SPORTS_AUTO_PARLAY_MIN_STAKE_USD`): the first live attempt at about $1.50 got no market-maker quote. Open-parlay cap raised to 25% of bankroll so three $5 parlays fit, kickoff window 12 hours, and quote requests for a game are spaced 45 minutes apart (`KALSHI_SPORTS_AUTO_PARLAY_RETRY_MINUTES`) instead of burning all three tries in 90 minutes. A parlay the account can't afford is skipped with a clear reason.
+- **Order failures show the order itself** in `/sports` (side, contracts, price, then Kalshi's message), and the bot stops trying more orders in a cycle after three rejections.
+
 ## 2026-10-11: Show Kalshi's real order errors; show cash in `/sports`
 - Removed the fallback to Kalshi's old order endpoint. It answers `410 deprecated_v1_order_endpoint`, which hid the real V2 error behind a misleading one. V2 errors now surface as they are. `cancel_order` uses the V2 path too.
 - `/sports` shows `cash $X`, what the bot believes Kalshi has available, so it can be compared with the Kalshi app when orders fail with `insufficient_balance`.

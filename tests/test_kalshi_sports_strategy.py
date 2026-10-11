@@ -1593,13 +1593,38 @@ class AutoParlayTests(unittest.TestCase):
     def test_never_pays_above_the_ceiling_and_stops_trying_a_game(self):
         strat, kalshi = self._ready()
         self._quote_at(kalshi, strat, 1.40)  # well over reference + 10%
-        for _ in range(5):
-            state, result = self._run(strat)
+        for k in range(5):
+            state, result = self._run(strat, now=_NOW + timedelta(minutes=50 * k))
             self.assertEqual(result["auto_parlays"], [])
         self.assertEqual(strat.session.parlays, 0)
         self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 3)  # tries per game cap
         self.assertEqual(kalshi.accept_rfq_quote.call_count, 0)
         self.assertEqual(kalshi.create_rfq.call_count, 3)
+
+    def test_tries_for_a_game_are_spaced_out(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.40)
+        for k in range(4):  # a cycle every 10 minutes: only the first and the one after 45 minutes try
+            self._run(strat, now=_NOW + timedelta(minutes=10 * k))
+        self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 1)
+        self._run(strat, now=_NOW + timedelta(minutes=50))
+        self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 2)
+
+    def test_stake_has_a_five_dollar_floor_and_must_be_affordable(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.02)
+        small = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})     # 2% would be $2
+        _, result = self._run(strat, state=small)
+        self.assertEqual(len(result["auto_parlays"]), 1, result["decisions"])
+        self.assertGreater(result["auto_parlays"][0]["spent"], 3.0)
+        self.assertLessEqual(result["auto_parlays"][0]["spent"], 5.0 + 1e-6)
+        strat2, kalshi2 = self._ready()
+        self._quote_at(kalshi2, strat2, 1.02)
+        broke = PortfolioState(cash=0.0, cash_reserves={"kalshi": 4.0})       # can't afford $5
+        _, none = self._run(strat2, state=broke)
+        self.assertEqual(none["auto_parlays"], [])
+        self.assertIn("parlay_stake_unaffordable", [d["reason"] for d in none["decisions"]])
+        kalshi2.create_rfq.assert_not_called()
 
     def test_daily_cap_exposure_cap_and_one_parlay_per_game(self):
         strat, kalshi = self._ready(auto_parlays_per_day=1)

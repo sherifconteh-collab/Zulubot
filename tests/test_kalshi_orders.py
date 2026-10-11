@@ -221,6 +221,21 @@ class SportsLiveBookingTests(unittest.TestCase):
         strat._place_bet(state, broker, _cand(), 20.0, _NOW, "kalshi")
         self.assertEqual(strat._order_issues[1]["reason"], "order_not_filled")
 
+    def test_failures_carry_the_order_s_own_numbers_and_stop_after_three(self):
+        err = requests.HTTPError("400", response=SimpleNamespace(status_code=400, text="insufficient_balance"))
+        kalshi = MagicMock()
+        kalshi.place_order.side_effect = err
+        strat = _sports(kalshi)
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        for n in range(5):
+            cand = _cand()
+            cand["market"] = {"ticker": f"KXNFLGAME-26OCT04ABAB-{n}", "event_ticker": "KXNFLGAME-26OCT04ABAB"}
+            strat._place_bet(state, broker, cand, 20.0, _NOW, "kalshi")
+        self.assertEqual(kalshi.place_order.call_count, 3)          # no more attempts once Kalshi keeps refusing
+        first = strat._order_issues[0]["error"]
+        self.assertTrue(first.startswith("yes x40 @ 0.50: HTTP 400"), first)
+
     def test_unknown_response_shape_trusts_the_request_for_the_sync_backstop(self):
         _, _, pos = self._run({"order": {"order_id": "o", "status": "executed"}})
         self.assertEqual(pos.quantity, 40)        # 20 / 0.50: live entry is the ask, Kalshi bills the fee
