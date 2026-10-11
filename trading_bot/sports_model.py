@@ -328,6 +328,7 @@ class DailySession:
         self.dogs = 0             # ...of which backed an underdog (win prob < 50%)
         self.parlays = 0          # automatic parlays bought today
         self.parlay_tries: dict[str, int] = {}   # game code -> quote requests made today
+        self.parlay_last_try: dict[str, float] = {}   # game code -> epoch seconds of the last request
         if path is not None and path.exists():
             try:
                 data = json.loads(path.read_text())
@@ -338,6 +339,7 @@ class DailySession:
                 self.dogs = int(data.get("dogs", 0))
                 self.parlays = int(data.get("parlays", 0))
                 self.parlay_tries = {str(k): int(v) for k, v in dict(data.get("parlay_tries", {})).items()}
+                self.parlay_last_try = {str(k): float(v) for k, v in dict(data.get("parlay_last_try", {})).items()}
             except (OSError, ValueError) as exc:
                 self.logger.warning("Could not load sports session (%s); starting fresh.", exc)
 
@@ -349,7 +351,7 @@ class DailySession:
             self.path.write_text(json.dumps({
                 "date": self.date, "start": self.start, "peak": self.peak,
                 "actions": self.actions, "dogs": self.dogs,
-                "parlays": self.parlays, "parlay_tries": self.parlay_tries,
+                "parlays": self.parlays, "parlay_tries": self.parlay_tries, "parlay_last_try": self.parlay_last_try,
             }))
         except OSError as exc:
             self.logger.warning("Could not save sports session: %s", exc)
@@ -361,9 +363,10 @@ class DailySession:
             self.dogs += 1
         self._save()
 
-    def record_parlay_try(self, game_code: str) -> None:
+    def record_parlay_try(self, game_code: str, when: float = 0.0) -> None:
         """Count one quote request for a game (before it is made, so a crash can't loop)."""
         self.parlay_tries[game_code] = self.parlay_tries.get(game_code, 0) + 1
+        self.parlay_last_try[game_code] = when
         self._save()
 
     def record_parlay(self) -> None:
@@ -375,7 +378,7 @@ class DailySession:
         """Record the current bankroll; returns day PnL and drawdown from the day's peak."""
         if self.date != today:
             self.date, self.start, self.peak, self.actions, self.dogs = today, equity, equity, 0, 0
-            self.parlays, self.parlay_tries = 0, {}
+            self.parlays, self.parlay_tries, self.parlay_last_try = 0, {}, {}
         elif equity > self.peak:
             self.peak = equity
         self._save()

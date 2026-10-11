@@ -906,6 +906,8 @@ class KalshiSportsStrategy:
             "stake_scale": round(scale, 3),
             "open_exposure": round(exposure, 2),
             "exposure_budget": round(exposure_cap, 2),
+            # What the bot believes Kalshi has available to bet right now (live only), to compare with the app.
+            "cash": round(broker.get_cash_balance(state, cash_bucket=bucket), 2) if bucket else None,
         }
 
         # Size every candidate first, then fit them into the exposure budget together
@@ -1092,6 +1094,8 @@ class KalshiSportsStrategy:
         symbol = f"{_SYMBOL_PREFIX}:{ticker}:{side.upper()}"
         if symbol in state.positions:
             return None
+        if self.live_trading_enabled and sum(i["reason"] == "order_failed" for i in self._order_issues) >= 3:
+            return None  # Kalshi keeps rejecting orders this cycle: stop instead of trying every game
 
         # Paper accounting books the fee into the entry price so simulated PnL is
         # net of costs; live, Kalshi debits the fee from the balance itself.
@@ -1123,8 +1127,9 @@ class KalshiSportsStrategy:
                 )
             except Exception as exc:
                 self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
-                self._order_issues.append({"ticker": ticker, "reason": "order_failed",
-                                           "error": self._describe_order_error(exc)})
+                self._order_issues.append({
+                    "ticker": ticker, "reason": "order_failed",
+                    "error": f"{side} x{quantity} @ {ask:.2f}: {self._describe_order_error(exc)}"})
                 return None
             order_id = str(order.get("order", {}).get("order_id", ""))
             filled = order_fill_count(order)
@@ -1962,9 +1967,10 @@ class KalshiSportsStrategy:
         open_positions = self._open_positions(state)
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=_CASH_BUCKET)
         open_cost = sum(p.quantity * p.entry_price for p in open_positions if p.meta.get("parlay"))
-        stake = equity * cfg.auto_parlay_stake_pct
-        if stake < cfg.min_trade_usd:
-            skip("parlay_stake_below_min", stake=round(stake, 2), equity=round(equity, 2))
+        stake = max(equity * cfg.auto_parlay_stake_pct, cfg.auto_parlay_min_stake_usd)
+        cash = broker.get_cash_balance(state, cash_bucket=_CASH_BUCKET)
+        if stake < cfg.min_trade_usd or stake > cash * 0.95:
+            skip("parlay_stake_unaffordable", stake=round(stake, 2), cash=round(cash, 2))
             return
         budget = equity * cfg.auto_parlay_exposure_pct - open_cost
         if budget < stake:
@@ -2001,13 +2007,16 @@ class KalshiSportsStrategy:
             if self.session.parlay_tries.get(code, 0) >= cfg.auto_parlay_tries_per_game:
                 skip("parlay_tries_used", game=game)
                 continue
+            waited = (now.timestamp() - self.session.parlay_last_try.get(code, 0.0)) / 60.0
+            if waited < cfg.auto_parlay_retry_minutes:
+                continue  # space the tries out: quotes are likelier closer to kickoff
             built = self._stack_from_props(game, props, cfg.auto_parlay_legs, cfg.auto_parlay_leg_prob)
             if not built.get("ok"):
                 skip("no_liquid_stack", game=game, why=str(built.get("reason", ""))[:100])
                 continue
             reference = float(built["reference"])
             ceiling = min(0.99, reference * (1.0 + cfg.auto_parlay_max_premium))
-            self.session.record_parlay_try(code)
+            self.session.record_parlay_try(code, now.timestamp())
             outcome = self.place_user_parlay(
                 state, broker, legs=built["legs"], amount=stake, max_price=ceiling, now=now, auto=True,
             )

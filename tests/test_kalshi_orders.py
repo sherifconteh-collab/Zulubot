@@ -90,22 +90,17 @@ class PlaceOrderTests(unittest.TestCase):
         self.assertEqual(order_fill_count(out), 3)
         self.assertEqual(order_fill_count({"order_id": "x", "fill_count": "0.00"}), 0)
 
-    def test_legacy_endpoint_is_only_tried_when_v2_does_not_exist(self):
-        c = _client()
-        c._post.side_effect = [_http_error(404), {"order": {"order_id": "old", "fill_count": 2}}]
-        out = c.place_order(ticker="T", side="no", count=2, price_cents=45, client_order_id="same-id")
-        (v2_path, v2), (old_path, old) = c._post.call_args_list[0].args, c._post.call_args_list[1].args
-        self.assertEqual((v2_path, old_path), ("/portfolio/events/orders", "/portfolio/orders"))
-        self.assertEqual((old["side"], old["action"], old["count"], old["no_price"]), ("no", "buy", 2, 45))
-        self.assertEqual(old["client_order_id"], v2["client_order_id"])
-        self.assertEqual(out["order"]["order_id"], "old")
-
-    def test_a_rejected_order_is_never_retried_elsewhere(self):
-        c = _client()
-        c._post.side_effect = _http_error(400)
-        with self.assertRaises(requests.HTTPError):
-            c.place_order(ticker="T", side="yes", count=1, price_cents=50)
-        self.assertEqual(c._post.call_count, 1)
+    def test_a_rejected_order_raises_kalshi_s_own_error_and_is_never_retried_elsewhere(self):
+        # The legacy endpoint answers 410 "Please switch to the V2 endpoints", so falling back to it
+        # would only replace the real V2 error with a misleading one.
+        for status in (400, 404, 410):
+            c = _client()
+            c._post.side_effect = _http_error(status)
+            with self.assertRaises(requests.HTTPError) as ctx:
+                c.place_order(ticker="T", side="yes", count=1, price_cents=50)
+            self.assertEqual(ctx.exception.response.status_code, status)
+            self.assertEqual(c._post.call_count, 1)
+            self.assertEqual(c._post.call_args.args[0], "/portfolio/events/orders")
 
     def test_sell_to_close_prices_just_below_the_bid(self):
         c = _client()
@@ -225,6 +220,21 @@ class SportsLiveBookingTests(unittest.TestCase):
         kalshi.place_order.return_value = {"order": {"fill_count": 0}}
         strat._place_bet(state, broker, _cand(), 20.0, _NOW, "kalshi")
         self.assertEqual(strat._order_issues[1]["reason"], "order_not_filled")
+
+    def test_failures_carry_the_order_s_own_numbers_and_stop_after_three(self):
+        err = requests.HTTPError("400", response=SimpleNamespace(status_code=400, text="insufficient_balance"))
+        kalshi = MagicMock()
+        kalshi.place_order.side_effect = err
+        strat = _sports(kalshi)
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        for n in range(5):
+            cand = _cand()
+            cand["market"] = {"ticker": f"KXNFLGAME-26OCT04ABAB-{n}", "event_ticker": "KXNFLGAME-26OCT04ABAB"}
+            strat._place_bet(state, broker, cand, 20.0, _NOW, "kalshi")
+        self.assertEqual(kalshi.place_order.call_count, 3)          # no more attempts once Kalshi keeps refusing
+        first = strat._order_issues[0]["error"]
+        self.assertTrue(first.startswith("yes x40 @ 0.50: HTTP 400"), first)
 
     def test_unknown_response_shape_trusts_the_request_for_the_sync_backstop(self):
         _, _, pos = self._run({"order": {"order_id": "o", "status": "executed"}})

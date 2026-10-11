@@ -204,18 +204,18 @@ Send a screenshot (photo or image file) of a bet slip, such as a sportsbook same
 
 ### Automatic parlays
 
-In live mode (`PAPER_MODE=false` with Kalshi credentials) the bot also buys parlays on its own, with no message from you. It **spends real money without asking**; turn it off with `KALSHI_SPORTS_AUTO_PARLAYS=false`. Every cycle (30 minutes) it looks at upcoming football games (kickoff 15 minutes to 24 hours away), builds a same-game stack of high-probability player-stat legs like `/stack` does, asks Kalshi's market makers for a price and buys it only at or under a ceiling. You get a Telegram alert for each one.
+In live mode (`PAPER_MODE=false` with Kalshi credentials) the bot also buys parlays on its own, with no message from you. It **spends real money without asking**; turn it off with `KALSHI_SPORTS_AUTO_PARLAYS=false`. Every cycle (30 minutes) it looks at upcoming football games (kickoff 15 minutes to 12 hours away), builds a same-game stack of high-probability player-stat legs like `/stack` does, asks Kalshi's market makers for a price and buys it only at or under a ceiling. You get a Telegram alert for each one.
 
 The limits (`KALSHI_SPORTS_AUTO_PARLAY*` in `.env.example`):
 
 | Limit | Default |
 |---|---|
 | Legs per parlay / target chance per leg | 4 / 85% |
-| Stake per parlay | 2% of bankroll |
+| Stake per parlay | 2% of bankroll, never under $5 (market makers don't quote tiny requests) |
 | Parlays per day | 3 |
-| Open parlay cost at once | 10% of bankroll |
+| Open parlay cost at once | 25% of bankroll |
 | Price ceiling | Kalshi's own fair price for the legs plus 10% |
-| Quote requests per game per day | 3 |
+| Quote requests per game per day | 3, at least 45 minutes apart |
 
 It never buys the same game twice, never pays above the ceiling, and an outcome it can't confirm stops it for the cycle. **Expect it to lose a little on average:** the model has no view on player props, so these are priced at Kalshi's own odds, and you pay the fee and up to the 10% premium. The point is consistent action within a small, fixed budget, not an edge. Singles on game winners (when the model finds an edge or picks the best value) are separate and unchanged.
 
