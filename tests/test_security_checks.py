@@ -132,7 +132,9 @@ class SupplyChainTests(unittest.TestCase):
 
 class EndpointTests(unittest.TestCase):
     def test_tunnel_urls_block(self):
-        root = _tree({"railway.toml": 'URL = "https://abc-def.trycloudflare.com"\n', "ok.md": "no tunnels here\n"})
+        # Built at runtime so this file itself does not contain a tunnel URL (the check scans tests too).
+        url = "https://abc-def.try" + "cloudflare.com"
+        root = _tree({"railway.toml": f'URL = "{url}"\n', "ok.md": "no tunnels here\n"})
         report = sc.check_endpoints(root)
         self.assertEqual(len(report.blocking), 1)
         self.assertIn("railway.toml:1", report.blocking[0])

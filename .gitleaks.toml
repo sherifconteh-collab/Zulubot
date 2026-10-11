@@ -7,8 +7,7 @@ useDefault = true
 # Empty template assignments such as "ROBINHOOD_PASSWORD=" in .env.example make the generic
 # rule treat the NEXT line as the secret value. Allow only that shape: a variable name, "=",
 # and nothing after it. Real values (anything after the "=") are still detected.
-[[allowlists]]
+[allowlist]
 description = "Empty KEY= placeholders in env templates"
-targetRules = ["generic-api-key"]
 regexTarget = "match"
 regexes = ['''(?i)[a-z_]*(password|secret|key|token|passphrase)=\s*\n''']
