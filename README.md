@@ -291,6 +291,11 @@ KALSHI_SPORTS_PARLAY_MAX_LEGS=4
 # largest single bet, as a share of the wallet.
 KALSHI_SPORTS_USER_BET_DEFAULT_PCT=0.05
 KALSHI_SPORTS_USER_BET_MAX_PCT=0.25
+# Parlays you build with /parlay: default stake and largest stake (share of the wallet), and
+# how many seconds to wait for market makers to quote before giving up.
+KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT=0.02
+KALSHI_SPORTS_USER_PARLAY_MAX_PCT=0.05
+KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS=20
 KALSHI_SPORTS_HOLD_TO_SETTLEMENT=true
 KALSHI_SPORTS_STOP_LOSS=0
 KALSHI_SPORTS_TAKE_PROFIT=0
@@ -366,6 +371,10 @@ You can choose the games and let the bot place the orders:
 | `/cancel` | Drops the preview. |
 
 Nothing is bought until `/confirm` (or a trailing `now`, as in `/bet browns 5 now`). The preview shows contracts, price, Kalshi's fee, what you win or lose, and the model's honest view: if it thinks the price is too high it says so, and the bet is still yours to make. Your picks are checked again at order time: the market must be open, the game not started, the price no more than 2 cents above the preview, one bet per game, at least `KALSHI_SPORTS_MIN_TRADE_USD`, at most `KALSHI_SPORTS_USER_BET_MAX_PCT` of the wallet (default 25%) and no more than the cash available. With no amount the stake is `KALSHI_SPORTS_USER_BET_DEFAULT_PCT` (default 5%). Orders are immediate-or-cancel, and only contracts that actually fill are booked. Hand-picked bets settle and count like any other sports bet, and are not blocked by the kill switch.
+
+### Parlays (Kalshi combos)
+
+`/parlay <team> + <team> [+ ...] [$amount] [max <cents>]` builds a combo from teams on the `/games` board, e.g. `/parlay browns + guardians 5` (different games only, up to `KALSHI_SPORTS_PARLAY_MAX_LEGS`). Combos have no order book: Kalshi makers quote them on request. After `/confirm` the bot creates the combo market, sends a request for quote, waits up to `KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS` for quotes and accepts the best one **only if its all-in price (fee included) is at or under the ceiling**. The ceiling is the model's fair probability for all legs hitting, or your `max <cents>`. Contracts are sized so the worst-case cost stays within your stake, which defaults to `KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT` (2%) and is capped at `KALSHI_SPORTS_USER_PARLAY_MAX_PCT` (5%) of the wallet. If no maker quotes at or under the ceiling, nothing is bought. Makers price combos above fair value, so at the default ceiling expect many "no quote" replies; raise `max` only if you accept paying that margin. Live trading only (`PAPER_MODE=false`). After execution the bot reads the position back from Kalshi and warns if it holds the opposite side. The bot never builds parlays on its own.
 
 ## Telegram digest
 

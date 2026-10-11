@@ -236,6 +236,22 @@ class KalshiClient:
         resp.raise_for_status()
         return resp.json()
 
+    def _put(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.can_trade:
+            raise RuntimeError("Kalshi trading requires API credentials (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY)")
+        resp = request_with_retry(
+            self.session,
+            "PUT",
+            f"{self.BASE_URL}{path}",
+            headers=self._auth_headers("PUT", f"/trade-api/v2{path}"),
+            json=payload,
+            timeout_seconds=self.timeout,
+            logger=self.logger,
+            retry_config=self.retry_config,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
     def _delete(self, path: str) -> dict[str, Any]:
         if not self.can_trade:
             raise RuntimeError("Kalshi trading requires API credentials (KALSHI_KEY_ID + KALSHI_PRIVATE_KEY)")
@@ -473,6 +489,58 @@ class KalshiClient:
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         """Cancel a resting order."""
         return self._delete(f"/portfolio/orders/{order_id}")
+
+    # ------------------------------------------------------------------
+    # Combos (multivariate events) and requests for quotes
+    # ------------------------------------------------------------------
+
+    def get_multivariate_collections(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Open combo collections, each with the events its legs may come from (public)."""
+        collections: list[dict[str, Any]] = []
+        cursor = None
+        for _ in range(5):
+            params: dict[str, Any] = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            page = self._get("/multivariate_event_collections", params)
+            collections.extend(page.get("multivariate_contracts", []))
+            cursor = page.get("cursor")
+            if not cursor:
+                break
+        return collections
+
+    def create_combo_market(self, collection_ticker: str, legs: list[dict[str, str]]) -> dict[str, Any]:
+        """Create (or look up) the combo market for these legs.
+
+        ``legs`` are ``{"market_ticker", "event_ticker", "side"}``; the combo pays $1 only if
+        every leg resolves the way its side says.
+        """
+        return self._post(f"/multivariate_event_collections/{collection_ticker}", {"selected_markets": legs})
+
+    def create_rfq(self, market_ticker: str, contracts: int, *, rest_remainder: bool = False) -> str:
+        """Ask market makers to quote ``contracts`` of a market; returns the RFQ id."""
+        result = self._post("/communications/rfqs", {
+            "market_ticker": market_ticker,
+            "contracts_fp": f"{int(contracts)}.00",
+            "rest_remainder": rest_remainder,
+        })
+        return str(result.get("id", ""))
+
+    def get_rfq_quotes(self, rfq_id: str) -> list[dict[str, Any]]:
+        result = self._get("/communications/quotes", {"rfq_id": rfq_id}, auth=True)
+        return result.get("quotes", [])
+
+    def get_rfq_quote(self, rfq_id: str, quote_id: str) -> dict[str, Any]:
+        result = self._get(f"/communications/rfqs/{rfq_id}/quotes/{quote_id}", auth=True)
+        return result.get("quote", result)
+
+    def accept_rfq_quote(self, rfq_id: str, quote_id: str, accepted_side: str) -> None:
+        """Accept a maker's quote. ``accepted_side`` is the maker's bid being hit: accepting
+        the maker's NO bid leaves the requester long YES at ``1 - no_bid``."""
+        self._put(f"/communications/rfqs/{rfq_id}/quotes/{quote_id}/accept", {"accepted_side": accepted_side})
+
+    def delete_rfq(self, rfq_id: str) -> None:
+        self._delete(f"/communications/rfqs/{rfq_id}")
 
     def get_positions(self) -> list[dict[str, Any]]:
         """Get current portfolio positions."""

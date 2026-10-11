@@ -11,7 +11,10 @@ from trading_bot.telegram_bot import (
     _format_sports_pick,
     _find_bet_options,
     _format_bet_preview,
+    _format_parlay_preview,
+    _format_parlay_result,
     _parse_bet_args,
+    _parse_parlay_args,
     _format_sports_picks,
 )
 
@@ -534,6 +537,85 @@ class ManualBetFlowTests(unittest.IsolatedAsyncioTestCase):
         self.service.list_sports_games.assert_not_called()
         self.service.quote_sports_bet.assert_not_called()
         self.service.place_sports_bet.assert_not_called()
+
+
+class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
+    PLAN = {"ok": True, "kind": "parlay", "stake": 5.0, "max_price": 0.25, "fair": 0.25, "contracts": 20,
+            "max_cost": 5.0, "payout": 20.0,
+            "legs": [{"pick": "Cleveland Browns", "game": "Browns at Steelers", "p": 0.5},
+                     {"pick": "Cleveland Guardians", "game": "Guardians at Tigers", "p": 0.5}]}
+
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_parlay"))
+        self.service = SimpleNamespace(
+            list_sports_games=MagicMock(return_value=_GAMES),
+            quote_sports_parlay=MagicMock(return_value=dict(self.PLAN)),
+            place_sports_parlay=MagicMock(return_value={
+                "ok": True, "filled": 20, "price": 0.2, "fee_each": 0.01, "spent": 4.2, "payout": 20.0,
+                "legs": self.PLAN["legs"], "warning": ""}),
+            place_sports_bet=MagicMock(), quote_sports_bet=MagicMock(),
+        )
+        self.bot.set_service(self.service)
+        self.bot._games = _GAMES
+
+    def _update(self):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=123),
+                               message=SimpleNamespace(reply_text=AsyncMock()))
+
+    def test_parse_parlay_args(self):
+        parsed = _parse_parlay_args("browns + guardians 5 max 30".split())
+        self.assertEqual([l["query"] for l in parsed["legs"]], ["browns", "guardians"])
+        self.assertEqual(parsed["amount"], 5.0)
+        self.assertAlmostEqual(parsed["max_price"], 0.30)
+        parsed = _parse_parlay_args("2 browns, 1 guardians $2.50".split())
+        self.assertEqual([(l["game_no"], l["query"]) for l in parsed["legs"]], [(2, "browns"), (1, "guardians")])
+        self.assertEqual((parsed["amount"], parsed["max_price"]), (2.5, None))
+        self.assertEqual(_parse_parlay_args(["browns"])["legs"][0]["query"], "browns")
+
+    async def test_preview_then_confirm_requests_quotes(self):
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="2 browns + 1 guardians 5".split()))
+        legs, amount, max_price = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual([l["ticker"] for l in legs], ["KXNFL-CLE", "KXMLB-CLE"])
+        self.assertEqual((amount, max_price), (5.0, None))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIn("Parlay preview", update.message.reply_text.await_args.args[0])
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.assertEqual(self.service.place_sports_parlay.call_args.args, (legs, 5.0, 0.25))
+        self.assertIn("Parlay placed", update.message.reply_text.await_args.args[0])
+        self.service.place_sports_bet.assert_not_called()
+
+    async def test_needs_two_legs(self):
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args=["browns", "5"]))
+        self.service.quote_sports_parlay.assert_not_called()
+        self.assertIn("2 or more", update.message.reply_text.await_args.args[0])
+
+    async def test_ambiguous_leg_asks_which(self):
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="cleveland + steelers 5".split()))
+        self.service.quote_sports_parlay.assert_not_called()
+        self.assertIn("2 matches", update.message.reply_text.await_args.args[0])
+
+    async def test_refused_plan_leaves_nothing_pending(self):
+        self.service.quote_sports_parlay.return_value = {"ok": False, "reason": "no combo"}
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="browns + guardians".split()))
+        self.assertIsNone(self.bot._pending_bet)
+        self.assertIn("no combo", update.message.reply_text.await_args.args[0])
+
+    def test_preview_and_result_wording(self):
+        text = _format_parlay_preview(self.PLAN)
+        self.assertIn("all must win", text)
+        self.assertIn("25\u00a2", text)
+        self.assertIn("no quote", text)  # fair-price ceiling warns about little action
+        higher = _format_parlay_preview({**self.PLAN, "max_price": 0.32})
+        self.assertIn("expected cost", higher)
+        self.assertIn("not placed", _format_parlay_result({"ok": False, "reason": "x"}).lower())
+        warned = _format_parlay_result({**self.service.place_sports_parlay.return_value, "warning": "wrong side"})
+        self.assertIn("wrong side", warned)
 
 
 if __name__ == "__main__":
