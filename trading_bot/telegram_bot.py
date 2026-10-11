@@ -148,8 +148,9 @@ def _format_sports_picks(predictions: list[dict[str, Any]], limit: int = 10) -> 
 _BET_TTL_SECONDS = 600
 _PRICE_SLIP = 0.02  # /confirm refuses if the ask has risen more than this since the preview
 _MAX_GAMES_SHOWN = 40
-_MAX_PROPS_SHOWN = 25
+_MAX_PROPS_SHOWN = 60
 _PROP_REF_RE = re.compile(r"^p(\d+)$", re.IGNORECASE)
+_THRESHOLD_RE = re.compile(r"^(\d+(?:\.\d+)?)\+\s*(.*)$")
 _AMOUNT_RE = re.compile(r"^\$?(\d+(?:\.\d+)?)$")
 
 
@@ -258,6 +259,26 @@ def _parse_parlay_args(args: list[str]) -> dict[str, Any]:
     return {"legs": legs, "amount": amount, "max_price": max_price}
 
 
+def _format_props_ladder(props: list[dict[str, Any]], start: int = 1) -> list[str]:
+    """Group player markets by player and stat: ``passing yards: p1 125+ 85c | p2 150+ 73c ...``."""
+    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for number, prop in enumerate(props, start=start):
+        match = _THRESHOLD_RE.match(str(prop["stat"]))
+        threshold, family = (f"{match.group(1)}+", match.group(2)) if match else ("", str(prop["stat"]))
+        header = (
+            f"\n<b>{html.escape(str(prop['player']))}</b> \u00b7 {html.escape(str(prop['game']))}"
+            f" \u00b7 {html.escape(str(prop.get('start_label', '')))}"
+        )
+        item = f"p{number} {html.escape(threshold or family)} {float(prop['yes_ask']) * 100:.0f}\u00a2"
+        groups.setdefault((header, str(prop["player"])), {}).setdefault(family, []).append(item)
+    lines: list[str] = []
+    for (header, _), families in groups.items():
+        lines.append(header)
+        for family, items in families.items():
+            lines.append(f"  {html.escape(family)}: " + " \u00b7 ".join(items))
+    return lines
+
+
 def _format_parlay_preview(plan: dict[str, Any]) -> str:
     legs = plan["legs"]
     fair, ceiling = plan.get("fair"), float(plan["max_price"])
@@ -270,22 +291,26 @@ def _format_parlay_preview(plan: dict[str, Any]) -> str:
         else:
             p = f" (Kalshi {float(leg['ask']) * 100:.0f}\u00a2)" if leg.get("ask") else ""
         lines.append(f"\u2022 <b>{html.escape(str(leg['pick']))}</b>{p} \u2014 {html.escape(str(leg['game']))}")
-    if fair is None:
-        lines.append("No model view on at least one leg, so there's no fair price.")
-    else:
+    reference = plan.get("reference") if plan.get("reference") is not None else fair
+    if fair is not None:
         lines.append(f"Model chance all hit: {float(fair):.1%} (fair price {float(fair) * 100:.0f}\u00a2 per $1).")
+    elif reference is not None:
+        lines.append(
+            f"Kalshi's own prices put all legs hitting at about {float(reference) * 100:.0f}\u00a2 per $1 "
+            "(the model has no view on player stats)."
+        )
     lines.append(
         f"I'll ask Kalshi's market makers for a price and buy only if it's {ceiling * 100:.0f}\u00a2 or less "
         f"per $1 (fee included): up to {int(plan['contracts'])} contracts, at most ${float(plan['max_cost']):.2f}, "
         f"paying ${float(plan['payout']):.2f} if every leg wins."
     )
-    if fair is not None and ceiling > float(fair) + 1e-9:
+    if reference is not None and ceiling > float(reference) + 1e-9:
         lines.append(
-            f"Heads up: that ceiling is {(ceiling - float(fair)) * 100:.0f}\u00a2 above the model's fair price, "
+            f"Heads up: that ceiling is {(ceiling - float(reference)) * 100:.0f}\u00a2 above the reference price, "
             "so it's an expected cost. Your call."
         )
-    elif fair is not None:
-        lines.append("Market makers usually price parlays above fair value, so you may get no quote at this "
+    elif reference is not None:
+        lines.append("Market makers usually price parlays above that, so you may get no quote at this "
                      "ceiling (then nothing is bought). Raise it with 'max <cents>' if you want more action.")
     lines.append("Send /confirm within 10 minutes to request quotes, or /cancel.")
     return "\n".join(lines)
@@ -1377,15 +1402,10 @@ class TradingTelegramBot:
             )
             return
         lines = [f"<b>Player stats</b> ({len(props)}) \u2014 YES = the player hits it"]
-        for number, prop in enumerate(props[:_MAX_PROPS_SHOWN], start=1):
-            lines.append(
-                f"p{number}. <b>{html.escape(str(prop['player']))}</b> {html.escape(str(prop['stat']))}"
-                f" \u2014 {float(prop['yes_ask']) * 100:.0f}\u00a2 \u00b7 {html.escape(str(prop['game']))},"
-                f" {html.escape(str(prop.get('start_label', '')))}"
-            )
+        lines.extend(_format_props_ladder(props[:_MAX_PROPS_SHOWN], start=1))
         if len(props) > _MAX_PROPS_SHOWN:
             lines.append(f"\u2026 +{len(props) - _MAX_PROPS_SHOWN} more: narrow the search")
-        lines.append("\nParlay them with other football legs: /parlay p1 + p3 + eagles 3 max 8")
+        lines.append("\nParlay: /parlay p1 + p9 3  \u2014 or by name: /parlay hurts 200 passing + barkley 80 rushing 3")
         await _send_html_chunks(update, "\n".join(lines))
 
     async def _cmd_parlay(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1419,9 +1439,22 @@ class TradingTelegramBot:
                     legs.append({"ticker": self._props[number - 1]["ticker"], "side": "yes"})
                     continue
                 rows = _find_bet_options(self._games, spec["game_no"], spec["query"])
+                if not rows and spec["game_no"] is None:
+                    # Not a team on the board: try it as a football player stat ("hurts 200 passing").
+                    props = await asyncio.to_thread(self._service.list_sports_props, spec["query"])
+                    if len(props) == 1:
+                        legs.append({"ticker": props[0]["ticker"], "side": "yes"})
+                        continue
+                    if props:
+                        self._props = props
+                        lines = [f"{len(props)} player markets match '{html.escape(spec['query'])}'. "
+                                 "Pick one by number (p#) or add the stat and number:"]
+                        lines.extend(_format_props_ladder(props[:12], start=1))
+                        await _send_html_chunks(update, "\n".join(lines))
+                        return
                 if not rows:
                     await update.message.reply_text(  # type: ignore[union-attr]
-                        f"No team matching '{spec['query']}' on the board. Send /games to see what's available.",
+                        f"No team or player market matching '{spec['query']}'. Send /games or /props to see what's available.",
                     )
                     return
                 if len(rows) > 1:

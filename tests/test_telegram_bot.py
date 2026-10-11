@@ -614,7 +614,8 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.bot._cmd_props(update, SimpleNamespace(args=["allen"]))
         self.service.list_sports_props.assert_called_once_with("allen")
         text = "\n".join(c.args[0] for c in update.message.reply_text.await_args_list)
-        self.assertIn("p1. <b>Josh Allen</b> 250+ passing yards", text)
+        self.assertIn("<b>Josh Allen</b>", text)
+        self.assertIn("passing yards: p1 250+ 40\u00a2", text)
         self.bot._games = []  # prop-only legs don't need the games board
         update = self._update()
         await self.bot._cmd_parlay(update, SimpleNamespace(args="p1 + p1 3 max 20".split()))
@@ -622,6 +623,41 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(legs, [{"ticker": "KXNFLPASSYDS-X-A-250", "side": "yes"}] * 2)
         self.assertEqual((amount, max_price), (3.0, 0.2))
         self.service.list_sports_games.assert_not_called()
+
+    def test_props_ladder_groups_thresholds_by_player_and_stat(self):
+        from trading_bot.telegram_bot import _format_props_ladder
+        props = [
+            {"player": "Jalen Hurts", "stat": "175+ passing yards", "yes_ask": 0.58, "game": "PHI @ JAC", "start_label": "Sun 1:00 PM"},
+            {"player": "Jalen Hurts", "stat": "200+ passing yards", "yes_ask": 0.43, "game": "PHI @ JAC", "start_label": "Sun 1:00 PM"},
+            {"player": "Jalen Hurts", "stat": "1+ touchdowns", "yes_ask": 0.40, "game": "PHI @ JAC", "start_label": "Sun 1:00 PM"},
+        ]
+        text = "\n".join(_format_props_ladder(props))
+        self.assertEqual(text.count("Jalen Hurts"), 1)
+        self.assertIn("passing yards: p1 175+ 58\u00a2 \u00b7 p2 200+ 43\u00a2", text)
+        self.assertIn("touchdowns: p3 1+ 40\u00a2", text)
+
+    async def test_parlay_leg_can_be_a_player_named_in_plain_words(self):
+        prop = {"ticker": "KXNFLPASSYDS-X-HURTS-200", "player": "Jalen Hurts", "stat": "200+ passing yards",
+                "yes_ask": 0.43, "game": "PHI @ JAC", "start_label": "x"}
+        rush = {"ticker": "KXNFLRSHYDS-X-BARK-80", "player": "Saquon Barkley", "stat": "80+ rushing yards",
+                "yes_ask": 0.30, "game": "PHI @ JAC", "start_label": "x"}
+        self.service.list_sports_props = MagicMock(side_effect=lambda q: [prop] if "hurts" in q else [rush])
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="hurts 200 passing + barkley 80 rushing 3".split()))
+        legs = self.service.quote_sports_parlay.call_args.args[0]
+        self.assertEqual([l["ticker"] for l in legs], [prop["ticker"], rush["ticker"]])
+        self.assertEqual(self.service.quote_sports_parlay.call_args.args[1], 3.0)
+
+    async def test_ambiguous_player_leg_lists_choices(self):
+        many = [{"ticker": f"T{i}", "player": "Jalen Hurts", "stat": f"{100 + 25 * i}+ passing yards",
+                 "yes_ask": 0.5, "game": "PHI @ JAC", "start_label": "x"} for i in range(3)]
+        self.service.list_sports_props = MagicMock(return_value=many)
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="hurts + browns 3".split()))
+        self.service.quote_sports_parlay.assert_not_called()
+        text = "\n".join(c.args[0] for c in update.message.reply_text.await_args_list)
+        self.assertIn("3 player markets match 'hurts'", text)
+        self.assertEqual([p["ticker"] for p in self.bot._props], ["T0", "T1", "T2"])
 
     async def test_unknown_prop_number_and_empty_search(self):
         self.service.list_sports_props = MagicMock(return_value=[])
@@ -640,6 +676,9 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no quote", text)  # fair-price ceiling warns about little action
         higher = _format_parlay_preview({**self.PLAN, "max_price": 0.32})
         self.assertIn("expected cost", higher)
+        props = _format_parlay_preview({**self.PLAN, "fair": None, "reference": 0.18, "max_price": 0.18})
+        self.assertIn("Kalshi's own prices put all legs hitting at about 18", props)
+        self.assertIn("no view on player stats", props)
         self.assertIn("not placed", _format_parlay_result({"ok": False, "reason": "x"}).lower())
         warned = _format_parlay_result({**self.service.place_sports_parlay.return_value, "warning": "wrong side"})
         self.assertIn("wrong side", warned)
