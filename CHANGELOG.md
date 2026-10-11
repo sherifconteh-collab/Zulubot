@@ -1,5 +1,10 @@
 # Release notes
 
+## 2026-10-11: Open-source readiness
+- **License:** Apache-2.0 (`LICENSE`, `NOTICE`).
+- **README rewritten** for people: what it does, quick start, Railway deploy, Telegram commands, safety controls, how the sports model works. The full variable list lives in `.env.example`. Added a risk disclaimer.
+- **Security:** `cryptography` raised to `>=50.0.2` (fixes the known advisories on 46.x/47.x; the Kalshi RSA signing path was re-tested). Removed a personal Cloudflare tunnel URL from `railway.toml` (`OLLAMA_BASE_URL` is now blank; set your own in the Railway Variables panel).
+
 ## 2026-10-11: Telegram betting, parlays and screenshots
 
 ### New: place your own bets from Telegram (#33)
