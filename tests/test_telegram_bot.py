@@ -831,6 +831,53 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.bot._on_photo(self._photo_update(chat_id=999), SimpleNamespace(args=[]))
         self.service.read_sports_slip.assert_not_called()
 
+    SLIP_TEXT = (
+        "Make this bet at $10\n\n\u2022 Brian Thomas Jr. 2+ receptions\n\u2022 Lawrence 150+ passing yards\n"
+        "\u2022 the Eagles +16.5 spread"
+    )
+
+    def _text_update(self, text, chat_id=123):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+                               message=SimpleNamespace(text=text, reply_text=AsyncMock()))
+
+    def _typed_match(self, unmatched=()):
+        result = self._full_match(unmatched)
+        result["slip"] = {"game": None, "odds": None}  # typed lists have no book price
+        return result
+
+    async def test_typed_leg_list_is_matched_without_ai_and_placed_like_a_bet_caption(self):
+        self.service.match_typed_slip = MagicMock(return_value=self._typed_match())
+        self.bot._route_text = MagicMock(side_effect=AssertionError("typed slips must not call the AI router"))
+        update = self._text_update(self.SLIP_TEXT)
+        await self.bot._on_text(update, SimpleNamespace(args=[]))
+        slip = self.service.match_typed_slip.call_args.args[0]
+        self.assertEqual([l["type"] for l in slip["legs"]], ["player_stat", "player_stat", "spread"])
+        legs, amount, max_price, anchor = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual((amount, max_price, anchor), (10.0, None, None))  # a typed list carries no book price
+        texts = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any(t.startswith("Placing $5.00") for t in texts))
+        self.assertIn("Parlay placed", texts[-1])
+
+    async def test_typed_leg_list_without_a_bet_word_only_previews(self):
+        self.service.match_typed_slip = MagicMock(return_value=self._typed_match())
+        update = self._text_update(self.SLIP_TEXT.replace("Make this bet at $10", "$10"))
+        await self.bot._on_text(update, SimpleNamespace(args=[]))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIn("Parlay preview", update.message.reply_text.await_args.args[0])
+
+    async def test_typed_leg_list_with_unmatched_legs_is_not_placed(self):
+        self.service.match_typed_slip = MagicMock(return_value=self._typed_match(
+            unmatched=[{"text": "Lawrence 150+", "reason": "more than one player matches"}]))
+        update = self._text_update(self.SLIP_TEXT)
+        await self.bot._on_text(update, SimpleNamespace(args=[]))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIn("didn't place it", update.message.reply_text.await_args.args[0])
+
+    async def test_typed_leg_list_from_another_chat_is_ignored(self):
+        self.service.match_typed_slip = MagicMock()
+        await self.bot._on_text(self._text_update(self.SLIP_TEXT, chat_id=999), SimpleNamespace(args=[]))
+        self.service.match_typed_slip.assert_not_called()
+
     async def test_unknown_prop_number_and_empty_search(self):
         self.service.list_sports_props = MagicMock(return_value=[])
         update = self._update()

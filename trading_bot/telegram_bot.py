@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from trading_bot.integrations import nl_router
+from trading_bot.integrations import nl_router, slip_text
 
 if TYPE_CHECKING:
     from trading_bot.config import TelegramConfig
@@ -1580,6 +1580,11 @@ class TradingTelegramBot:
         text = (message.text or "").strip() if message is not None else ""
         if not text or self._service is None:
             return
+        typed_slip = slip_text.parse_slip_text(text)
+        if typed_slip is not None:
+            # A pasted list of legs is parsed locally (no AI, no API cost) and handled like a screenshot.
+            await self._on_typed_slip(update, typed_slip)
+            return
         if not getattr(self.config, "natural_language", True):
             await message.reply_text("Plain-text chat is off (TELEGRAM_NATURAL_LANGUAGE). Try /help.")
             return
@@ -1662,43 +1667,64 @@ class TradingTelegramBot:
             if not result.get("ok"):
                 await message.reply_text(f"Couldn't use that picture: {result.get('reason', 'unknown reason')}")
                 return
-            await _send_html_chunks(update, _format_slip_summary(result))
-            matched = result["matched"]
-            if len(matched) < 2:
-                await message.reply_text("Fewer than 2 legs matched, so there's no parlay to build.")
-                return
-            legs = [{"ticker": m["ticker"], "side": m["side"]} for m in matched]
-            complete = not result["unmatched"]
-            # With every leg matched, the slip's own price is one the user already accepted.
-            anchor = _slip_price((result.get("slip") or {}).get("odds")) if complete else None
-            plan = await asyncio.to_thread(
-                self._service.quote_sports_parlay, legs, options["amount"], options["max_price"], anchor,
-            )
-            if not plan.get("ok"):
-                await message.reply_text(f"Can't place that parlay: {plan.get('reason', 'unknown reason')}")
-                return
-            self._pending_bet = {
-                "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
-                "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
-            }
-            wants_bet = _caption_wants_bet(message.caption or "")
-            if wants_bet and complete:
-                # "bet $10 on this": the caption is the instruction, so no separate /confirm.
-                await message.reply_text(
-                    f"Placing ${float(plan['stake']):.2f} on this {len(legs)}-leg parlay "
-                    f"(paying up to {float(plan['max_price']) * 100:.0f}\u00a2 per $1).",
-                )
-                await self._confirm_pending(update)
-                return
-            note = ""
-            if result["unmatched"]:
-                note = (f"Heads up: this previews only the {len(matched)} matched legs, a shorter (and likelier) "
-                        "parlay than your slip.\n")
-                if wants_bet:
-                    note += "I didn't place it because not every leg is on Kalshi. Reply yes to bet this shorter one.\n"
-            await message.reply_text(note + _format_parlay_preview(plan), parse_mode="HTML")
+            await self._preview_slip(update, result, message.caption or "")
         except Exception as exc:
             await message.reply_text(f"Error reading the picture: {exc}")
+
+    async def _on_typed_slip(self, update: Update, slip: dict[str, Any]) -> None:
+        """A typed list of legs ("Lawrence 150+ passing yards", "the Eagles +16.5 spread"): match and preview."""
+        if not self._check_auth(update):
+            return
+        message = update.message
+        try:
+            await message.reply_text("Checking those legs on Kalshi\u2026")
+            result = await asyncio.to_thread(self._service.match_typed_slip, slip)
+            if not result.get("ok"):
+                await message.reply_text(f"Couldn't use that list: {result.get('reason', 'unknown reason')}")
+                return
+            await self._preview_slip(update, result, str(slip.get("header") or ""))
+        except Exception as exc:
+            await message.reply_text(f"Error reading the legs: {exc}")
+
+    async def _preview_slip(self, update: Update, result: dict[str, Any], caption: str) -> None:
+        """Preview (or, for "bet $10 ...", place) the parlay for matched slip legs. Shared by pictures and typed lists."""
+        message = update.message
+        options = _parse_slip_caption(caption)
+        await _send_html_chunks(update, _format_slip_summary(result))
+        matched = result["matched"]
+        if len(matched) < 2:
+            await message.reply_text("Fewer than 2 legs matched, so there's no parlay to build.")
+            return
+        legs = [{"ticker": m["ticker"], "side": m["side"]} for m in matched]
+        complete = not result["unmatched"]
+        # With every leg matched, the slip's own price is one the user already accepted.
+        anchor = _slip_price((result.get("slip") or {}).get("odds")) if complete else None
+        plan = await asyncio.to_thread(
+            self._service.quote_sports_parlay, legs, options["amount"], options["max_price"], anchor,
+        )
+        if not plan.get("ok"):
+            await message.reply_text(f"Can't place that parlay: {plan.get('reason', 'unknown reason')}")
+            return
+        self._pending_bet = {
+            "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
+            "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
+        }
+        wants_bet = _caption_wants_bet(caption)
+        if wants_bet and complete:
+            # "bet $10 on this": the caption is the instruction, so no separate /confirm.
+            await message.reply_text(
+                f"Placing ${float(plan['stake']):.2f} on this {len(legs)}-leg parlay "
+                f"(paying up to {float(plan['max_price']) * 100:.0f}\u00a2 per $1).",
+            )
+            await self._confirm_pending(update)
+            return
+        note = ""
+        if result["unmatched"]:
+            note = (f"Heads up: this previews only the {len(matched)} matched legs, a shorter (and likelier) "
+                    "parlay than your slip.\n")
+            if wants_bet:
+                note += "I didn't place it because not every leg is on Kalshi. Reply yes to bet this shorter one.\n"
+        await message.reply_text(note + _format_parlay_preview(plan), parse_mode="HTML")
 
     async def _cmd_stack(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Build a same-game stack of high-probability player legs, e.g. /stack eagles jaguars legs 9 p 85 2."""

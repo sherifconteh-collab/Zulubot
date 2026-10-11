@@ -609,6 +609,12 @@ class TradingBotService:
             return {"ok": False, "reason": str(exc)}
         return {"ok": True, "slip": slip, **self._match_sports_slip(slip)}
 
+    def match_typed_slip(self, slip: dict[str, Any]) -> dict[str, Any]:
+        """Map a typed leg list (see ``slip_text``) onto Kalshi markets; no AI involved, places nothing."""
+        if not self.config.kalshi_sports.enabled:
+            return {"ok": False, "reason": "The sports strategy is disabled (KALSHI_SPORTS_ENABLED)."}
+        return {"ok": True, "slip": slip, **self._match_sports_slip(slip)}
+
     @_locked
     def _match_sports_slip(self, slip: dict[str, Any]) -> dict[str, Any]:
         return self.kalshi_sports_strategy.match_slip_legs(datetime.now(self.config.timezone), slip)

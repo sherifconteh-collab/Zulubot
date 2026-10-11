@@ -1599,6 +1599,58 @@ class SlipMatchTests(unittest.TestCase):
         self.assertEqual(len(out["matched"]), 1)
         self.assertEqual(out["matched"][0]["pick"], "Baltimore Ravens to win")
 
+    def _with_second_jackson(self):
+        """Adds a Jackson with a passing-yards market in the other game (Denver @ Kansas City)."""
+        strat, kalshi = self._stack_setup()
+        base = kalshi.get_markets.side_effect
+
+        def get_markets(**kw):
+            rows, cursor = base(**kw)
+            if kw["series_ticker"] == "KXNFLPASSYDS":
+                rows = rows + [_prop_market("KXNFLPASSYDS", "DENCJACKSON9-150", "Courtland Jackson: 150+ passing yards",
+                                            0.55, 0.53, event_suffix="26OCT04DENKC")]
+            return rows, cursor
+        kalshi.get_markets.side_effect = get_markets
+        return strat
+
+    def test_a_bare_surname_shared_by_two_players_is_not_guessed(self):
+        strat = self._with_second_jackson()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"player": "Jackson", "stat": "passing yards", "threshold": 150, "text": "Jackson 150+"}, game=None))
+        self.assertEqual(out["matched"], [])
+        self.assertIn("more than one player matches", out["unmatched"][0]["reason"])
+        self.assertIn("Courtland Jackson", out["unmatched"][0]["reason"])
+        self.assertIn("Lamar Jackson", out["unmatched"][0]["reason"])
+
+    def test_typed_slip_without_a_game_uses_the_game_most_legs_point_to(self):
+        strat = self._with_second_jackson()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"player": "Josh Allen", "stat": "passing yards", "threshold": 200, "text": "Allen 200+"},
+            {"type": "spread", "team": "Baltimore Ravens", "line": 9.5, "text": "Ravens +9.5"},
+            {"player": "Jackson", "stat": "passing yards", "threshold": 150, "text": "Jackson 150+"},
+            game=None,
+        ))
+        self.assertEqual(out["unmatched"], [])
+        self.assertIn("Lamar Jackson 150+ passing yards", [m["pick"] for m in out["matched"]])
+
+    def test_the_inferred_game_never_drops_legs_from_other_games(self):
+        strat = self._with_second_jackson()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"player": "Josh Allen", "stat": "passing yards", "threshold": 200, "text": "Allen 200+"},
+            {"player": "Keon Coleman", "stat": "receptions", "threshold": 2, "text": "Coleman 2+"},
+            {"player": "Patrick Mahomes", "stat": "passing yards", "threshold": 250, "text": "Mahomes 250+"},
+            game=None,
+        ))
+        self.assertEqual(out["unmatched"], [])
+        self.assertEqual(len(out["matched"]), 3)
+
+    def test_a_spread_for_a_team_not_in_the_listed_game_is_not_matched_elsewhere(self):
+        strat, _ = self._stack_setup()
+        out = strat.match_slip_legs(_NOW, self._slip(
+            {"type": "spread", "team": "Kansas City Chiefs", "line": 9.5, "text": "Chiefs +9.5"}, game=None))
+        self.assertEqual(out["matched"], [])
+        self.assertIn("doesn't list a 9.5-point spread for Kansas City Chiefs", out["unmatched"][0]["reason"])
+
     def test_duplicates_collapse_and_matches_feed_the_parlay_quote(self):
         strat, _ = self._stack_setup()
         leg = {"player": "Josh Allen", "stat": "passing yards", "threshold": 200, "text": "Allen 200+"}
