@@ -1,2 +1,2 @@
 -r requirements.txt
-py-clob-client>=0.17.0
+py-clob-client>=0.17.0,<1.0.0

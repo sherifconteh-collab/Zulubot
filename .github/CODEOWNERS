@@ -1,0 +1,33 @@
+# CODEOWNERS: who must review changes
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Global owner: every change needs review
+* @sherifconteh-collab
+
+# Money and risk: anything that places orders or limits losses
+/trading_bot/risk.py @sherifconteh-collab
+/trading_bot/broker.py @sherifconteh-collab
+/trading_bot/coinbase_broker.py @sherifconteh-collab
+/trading_bot/polymarket_broker.py @sherifconteh-collab
+/trading_bot/clients_kalshi.py @sherifconteh-collab
+/trading_bot/service.py @sherifconteh-collab
+/trading_bot/strategies/kalshi_sports.py @sherifconteh-collab
+/trading_bot/sports_model.py @sherifconteh-collab
+/trading_bot/config.py @sherifconteh-collab
+
+# Access control and untrusted input (Telegram, screenshots, plain text)
+/trading_bot/telegram_bot.py @sherifconteh-collab
+/trading_bot/integrations/slip_reader.py @sherifconteh-collab
+/trading_bot/integrations/nl_router.py @sherifconteh-collab
+
+# Supply chain, CI and security policy
+/.github/ @sherifconteh-collab
+/scripts/ @sherifconteh-collab
+/requirements*.txt @sherifconteh-collab
+/Procfile @sherifconteh-collab
+/railway.toml @sherifconteh-collab
+/SECURITY.md @sherifconteh-collab
+/LICENSE @sherifconteh-collab
+
+# Environment files (should never be committed)
+/.env* @sherifconteh-collab

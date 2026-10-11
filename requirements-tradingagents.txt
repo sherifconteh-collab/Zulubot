@@ -1,5 +1,5 @@
 -r requirements.txt
-tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git
-anthropic>=0.39.0
-ollama>=0.4.0
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@1394a3f72aa4393e1a98f51b382434c4b4c2d972
+anthropic>=0.39.0,<1.0.0
+ollama>=0.4.0,<1.0.0
 matplotlib>=3.8.0,<4.0.0
