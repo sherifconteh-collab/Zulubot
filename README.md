@@ -202,9 +202,9 @@ Send a screenshot (photo or image file) of a bet slip, such as a sportsbook same
 - **Caption `10`** (or `what would $10 pay`) shows the preview and waits for `/confirm`.
 - If some legs aren't on Kalshi the bot **never** auto-places the shorter parlay: it shows the preview and asks you to reply yes.
 
-### Automatic parlays (opt in)
+### Automatic parlays
 
-Set `KALSHI_SPORTS_AUTO_PARLAYS=true` (live mode only) and the bot also buys parlays on its own, with no message from you. It is **off by default** because it spends real money without asking. Every cycle (30 minutes) it looks at upcoming football games (kickoff 15 minutes to 24 hours away), builds a same-game stack of high-probability player-stat legs like `/stack` does, asks Kalshi's market makers for a price and buys it only at or under a ceiling. You get a Telegram alert for each one.
+In live mode (`PAPER_MODE=false` with Kalshi credentials) the bot also buys parlays on its own, with no message from you. It **spends real money without asking**; turn it off with `KALSHI_SPORTS_AUTO_PARLAYS=false`. Every cycle (30 minutes) it looks at upcoming football games (kickoff 15 minutes to 24 hours away), builds a same-game stack of high-probability player-stat legs like `/stack` does, asks Kalshi's market makers for a price and buys it only at or under a ceiling. You get a Telegram alert for each one.
 
 The limits (`KALSHI_SPORTS_AUTO_PARLAY*` in `.env.example`):
 

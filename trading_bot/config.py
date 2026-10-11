@@ -528,7 +528,7 @@ class KalshiSportsConfig:
     # player-stat legs for upcoming football games and buys it through Kalshi's market makers. There is no
     # model view on player props, so the reference price is Kalshi's own (the legs' mid prices multiplied);
     # the bot pays at most that plus ``auto_parlay_max_premium``. Hard caps below bound the damage.
-    auto_parlays: bool = False               # opt in: KALSHI_SPORTS_AUTO_PARLAYS=true
+    auto_parlays: bool = True                # off: KALSHI_SPORTS_AUTO_PARLAYS=false
     auto_parlay_legs: int = 4
     auto_parlay_leg_prob: float = 0.85       # target Kalshi probability of each leg
     auto_parlay_stake_pct: float = 0.02      # per parlay, % of bankroll
@@ -965,7 +965,7 @@ class AppConfig:
                 user_parlay_max_legs=_env_int("KALSHI_SPORTS_USER_PARLAY_MAX_LEGS", 10),
                 slip_model=os.getenv("KALSHI_SPORTS_SLIP_MODEL", "claude-sonnet-4-6").strip(),
                 parlay_quote_wait_seconds=_env_float("KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS", 20.0),
-                auto_parlays=_env_bool("KALSHI_SPORTS_AUTO_PARLAYS", False),
+                auto_parlays=_env_bool("KALSHI_SPORTS_AUTO_PARLAYS", True),
                 auto_parlay_legs=_env_int("KALSHI_SPORTS_AUTO_PARLAY_LEGS", 4),
                 auto_parlay_leg_prob=_env_float("KALSHI_SPORTS_AUTO_PARLAY_LEG_PROB", 0.85),
                 auto_parlay_stake_pct=_env_float("KALSHI_SPORTS_AUTO_PARLAY_STAKE_PCT", 0.02),

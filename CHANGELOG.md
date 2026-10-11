@@ -1,7 +1,7 @@
 # Release notes
 
-## 2026-10-11: Opt-in automatic parlays, and `/sports` shows the mode
-- **Automatic parlays (opt in, live mode):** with `KALSHI_SPORTS_AUTO_PARLAYS=true`, each cycle the bot builds same-game stacks of player-stat legs for upcoming football games and buys them through Kalshi's market makers at or under a price ceiling, then sends a Telegram alert. Defaults: 4 legs, 2% of bankroll per parlay, 3 a day, 10% of bankroll open at once, ceiling = Kalshi's own fair price + 10%. Off unless enabled. Reuses the verified hand-parlay path (ceiling enforced before accepting, position read-back, an uncertain outcome stops the cycle).
+## 2026-10-11: Automatic parlays, and `/sports` shows the mode
+- **Automatic parlays (live mode, on by default):** unless `KALSHI_SPORTS_AUTO_PARLAYS=false`, each cycle the bot builds same-game stacks of player-stat legs for upcoming football games and buys them through Kalshi's market makers at or under a price ceiling, then sends a Telegram alert. Defaults: 4 legs, 2% of bankroll per parlay, 3 a day, 10% of bankroll open at once, ceiling = Kalshi's own fair price + 10%. Never runs in paper mode. Reuses the verified hand-parlay path (ceiling enforced before accepting, position read-back, an uncertain outcome stops the cycle).
 - **`/sports` now says whether orders really go to Kalshi** (including `PAPER_MODE=false` with missing credentials, which runs on paper) and why nothing was bought (skip reasons).
 
 ## 2026-10-11: Paste a list of legs, no AI needed

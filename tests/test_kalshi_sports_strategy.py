@@ -1633,11 +1633,12 @@ class AutoParlayTests(unittest.TestCase):
         self.assertEqual(strat.session.parlays, 1)  # may have executed: counted, and no more this cycle
         self.assertEqual(kalshi.create_rfq.call_count, 1)
 
-    def test_is_off_unless_switched_on(self):
+    def test_is_on_by_default_and_never_in_paper_mode(self):
         from trading_bot.config import KalshiSportsConfig
-        self.assertFalse(KalshiSportsConfig().auto_parlays)
+        self.assertTrue(KalshiSportsConfig().auto_parlays)
         strat, kalshi = self._stack_setup()
-        strat.config = _config(parlay_quote_wait_seconds=0.0)  # defaults: no automatic real-money parlays
+        strat.config = _config(parlay_quote_wait_seconds=0.0)
+        strat.live_trading_enabled = False  # PAPER_MODE=true (or no credentials): never spends real money
         _, result = self._run(strat)
         self.assertEqual(result["auto_parlays"], [])
         kalshi.create_combo_market.assert_not_called()
