@@ -3,12 +3,24 @@ from __future__ import annotations
 import logging
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from trading_bot.telegram_bot import (
     TradingTelegramBot,
     _format_lead_line,
     _format_sports_pick,
+    _find_bet_options,
+    _format_bet_preview,
+    _format_parlay_preview,
+    _format_parlay_result,
+    _parse_bet_args,
+    _parse_parlay_args,
+    _parse_slip_caption,
+    _caption_wants_bet,
+    _route_to_command,
+    _slip_price,
+    _parse_stack_args,
+    _format_slip_summary,
     _format_sports_picks,
 )
 
@@ -392,5 +404,582 @@ class SportsPickFormatTests(unittest.TestCase):
         self.assertIn("A &amp; B &lt;x&gt;", line)
 
 
+_GAMES = [
+    {"league": "mlb", "game": "Guardians at Tigers", "start": "2026-10-12T18:00:00+00:00", "start_label": "Sun Oct 12 1:00 PM",
+     "options": [
+         {"label": "Cleveland Guardians", "side": "yes", "ticker": "KXMLB-CLE", "ask": 0.45, "fee": 0.02, "p": 0.47},
+         {"label": "Detroit Tigers", "side": "no", "ticker": "KXMLB-CLE", "ask": 0.57, "fee": 0.02, "p": 0.53}]},
+    {"league": "nfl", "game": "Browns at Steelers", "start": "2026-10-12T20:00:00+00:00", "start_label": "Sun Oct 12 3:00 PM",
+     "options": [
+         {"label": "Cleveland Browns", "side": "yes", "ticker": "KXNFL-CLE", "ask": 0.38, "fee": 0.02, "p": 0.41},
+         {"label": "Pittsburgh Steelers", "side": "yes", "ticker": "KXNFL-PIT", "ask": 0.64, "fee": 0.02, "p": 0.59}]},
+]
+
+
+class BetParsingTests(unittest.TestCase):
+    def test_parse_variants(self):
+        self.assertEqual(_parse_bet_args(["cleveland", "5"]),
+                         {"game_no": None, "query": "cleveland", "amount": 5.0, "now": False})
+        self.assertEqual(_parse_bet_args(["2", "browns", "$7.50", "now"]),
+                         {"game_no": 2, "query": "browns", "amount": 7.5, "now": True})
+        self.assertEqual(_parse_bet_args(["cleveland", "browns"])["amount"], None)
+        self.assertEqual(_parse_bet_args(["3"])["query"], "3")
+
+    def test_find_matches_team_names_across_games(self):
+        rows = _find_bet_options(_GAMES, None, "cleveland")
+        self.assertEqual([r[2]["label"] for r in rows], ["Cleveland Guardians", "Cleveland Browns"])
+        self.assertEqual(len(_find_bet_options(_GAMES, None, "cleveland browns")), 1)
+        self.assertEqual(len(_find_bet_options(_GAMES, 2, "cleveland")), 1)
+        self.assertEqual(_find_bet_options(_GAMES, None, "lakers"), [])
+
+    def test_preview_is_honest_when_model_disagrees(self):
+        quote = {"ask": 0.38, "fee_each": 0.02, "quantity": 10, "cost": 4.0, "model_prob": 0.30,
+                 "pick": "Cleveland Browns", "game": "Browns at Steelers", "league": "nfl", "live": True}
+        text = _format_bet_preview(quote)
+        self.assertIn("LIVE money", text)
+        self.assertIn("Heads up", text)
+        self.assertIn("/confirm", text)
+        quote["model_prob"] = 0.50
+        self.assertIn("Model agrees", _format_bet_preview(quote))
+        quote["model_prob"] = None
+        self.assertIn("purely your call", _format_bet_preview(quote))
+
+
+class ManualBetFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_manual_bets"))
+        self.service = SimpleNamespace(
+            list_sports_games=MagicMock(return_value=_GAMES),
+            quote_sports_bet=MagicMock(return_value={
+                "ok": True, "ask": 0.38, "fee_each": 0.02, "quantity": 12, "cost": 4.8, "stake": 5.0,
+                "model_prob": 0.41, "pick": "Cleveland Browns", "game": "Browns at Steelers",
+                "league": "nfl", "live": True}),
+            place_sports_bet=MagicMock(return_value={
+                "ok": True, "live": True, "filled": 12, "quantity": 12, "ask": 0.38, "spent": 4.8,
+                "pick": "Cleveland Browns", "game": "Browns at Steelers"}),
+        )
+        self.bot.set_service(self.service)
+
+    def _update(self, chat_id="123"):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=int(chat_id)),
+                               message=SimpleNamespace(reply_text=AsyncMock()))
+
+    def _texts(self, update):
+        return [c.args[0] for c in update.message.reply_text.await_args_list]
+
+    async def test_games_lists_numbered_games_and_filters(self):
+        update = self._update()
+        await self.bot._cmd_games(update, SimpleNamespace(args=[]))
+        text = "\n".join(self._texts(update))
+        self.assertIn("1. <b>MLB</b>", text)
+        self.assertIn("Cleveland Browns 38\u00a2 (model 41%)", text)
+        update = self._update()
+        await self.bot._cmd_games(update, SimpleNamespace(args=["nfl"]))
+        self.assertEqual(len(self.bot._games), 1)
+
+    async def test_ambiguous_team_asks_which_one(self):
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["cleveland", "5"]))
+        self.assertIn("2 matches", self._texts(update)[-1])
+        self.service.quote_sports_bet.assert_not_called()
+        self.assertIsNone(self.bot._pending_bet)
+
+    async def test_preview_then_confirm_places_the_bet(self):
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["browns", "5"]))
+        self.service.quote_sports_bet.assert_called_once_with("KXNFL-CLE", "yes", 5.0)
+        self.service.place_sports_bet.assert_not_called()  # preview alone never trades
+        self.assertIn("Bet preview", self._texts(update)[-1])
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        args = self.service.place_sports_bet.call_args.args
+        self.assertEqual(args[:3], ("KXNFL-CLE", "yes", 5.0))
+        self.assertAlmostEqual(args[3], 0.40)  # agreed ask + slip tolerance
+        self.assertIn("Bet placed", self._texts(update)[-1])
+        self.assertIsNone(self.bot._pending_bet)
+        # a second /confirm has nothing to place
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.assertEqual(self.service.place_sports_bet.call_count, 1)
+
+    async def test_cancel_drops_the_pending_bet(self):
+        await self.bot._cmd_bet(self._update(), SimpleNamespace(args=["browns"]))
+        update = self._update()
+        await self.bot._cmd_cancel(update, SimpleNamespace(args=[]))
+        await self.bot._cmd_confirm(self._update(), SimpleNamespace(args=[]))
+        self.service.place_sports_bet.assert_not_called()
+
+    async def test_expired_preview_is_not_placed(self):
+        await self.bot._cmd_bet(self._update(), SimpleNamespace(args=["browns"]))
+        self.bot._pending_bet["expires"] -= 1000
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.service.place_sports_bet.assert_not_called()
+        self.assertIn("Nothing to confirm", self._texts(update)[-1])
+
+    async def test_now_flag_places_immediately(self):
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["browns", "5", "now"]))
+        self.service.place_sports_bet.assert_called_once()
+
+    async def test_refused_quote_creates_no_pending_bet(self):
+        self.service.quote_sports_bet.return_value = {"ok": False, "reason": "You already have a bet on this game."}
+        update = self._update()
+        await self.bot._cmd_bet(update, SimpleNamespace(args=["browns"]))
+        self.assertIsNone(self.bot._pending_bet)
+        self.assertIn("already have a bet", self._texts(update)[-1])
+
+    async def test_failed_placement_is_reported(self):
+        self.service.place_sports_bet.return_value = {"ok": False, "reason": "price moved"}
+        await self.bot._cmd_bet(self._update(), SimpleNamespace(args=["browns"]))
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.assertIn("Not placed: price moved", self._texts(update)[-1])
+
+    async def test_other_chats_cannot_bet(self):
+        for handler in (self.bot._cmd_games, self.bot._cmd_bet, self.bot._cmd_confirm, self.bot._cmd_cancel):
+            await handler(self._update(chat_id="999"), SimpleNamespace(args=["browns"]))
+        self.service.list_sports_games.assert_not_called()
+        self.service.quote_sports_bet.assert_not_called()
+        self.service.place_sports_bet.assert_not_called()
+
+
+class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
+    PLAN = {"ok": True, "kind": "parlay", "stake": 5.0, "max_price": 0.25, "fair": 0.25, "contracts": 20,
+            "max_cost": 5.0, "payout": 20.0,
+            "legs": [{"pick": "Cleveland Browns", "game": "Browns at Steelers", "p": 0.5},
+                     {"pick": "Cleveland Guardians", "game": "Guardians at Tigers", "p": 0.5}]}
+
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_parlay"))
+        self.service = SimpleNamespace(
+            list_sports_games=MagicMock(return_value=_GAMES),
+            quote_sports_parlay=MagicMock(return_value=dict(self.PLAN)),
+            place_sports_parlay=MagicMock(return_value={
+                "ok": True, "filled": 20, "price": 0.2, "fee_each": 0.01, "spent": 4.2, "payout": 20.0,
+                "legs": self.PLAN["legs"], "warning": ""}),
+            place_sports_bet=MagicMock(), quote_sports_bet=MagicMock(),
+        )
+        self.bot.set_service(self.service)
+        self.bot._games = _GAMES
+
+    def _update(self):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=123),
+                               message=SimpleNamespace(reply_text=AsyncMock()))
+
+    def test_parse_parlay_args(self):
+        parsed = _parse_parlay_args("browns + guardians 5 max 30".split())
+        self.assertEqual([l["query"] for l in parsed["legs"]], ["browns", "guardians"])
+        self.assertEqual(parsed["amount"], 5.0)
+        self.assertAlmostEqual(parsed["max_price"], 0.30)
+        parsed = _parse_parlay_args("2 browns, 1 guardians $2.50".split())
+        self.assertEqual([(l["game_no"], l["query"]) for l in parsed["legs"]], [(2, "browns"), (1, "guardians")])
+        self.assertEqual((parsed["amount"], parsed["max_price"]), (2.5, None))
+        self.assertEqual(_parse_parlay_args(["browns"])["legs"][0]["query"], "browns")
+
+    async def test_preview_then_confirm_requests_quotes(self):
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="2 browns + 1 guardians 5".split()))
+        legs, amount, max_price = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual([l["ticker"] for l in legs], ["KXNFL-CLE", "KXMLB-CLE"])
+        self.assertEqual((amount, max_price), (5.0, None))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIn("Parlay preview", update.message.reply_text.await_args.args[0])
+        update = self._update()
+        await self.bot._cmd_confirm(update, SimpleNamespace(args=[]))
+        self.assertEqual(self.service.place_sports_parlay.call_args.args, (legs, 5.0, 0.25))
+        self.assertIn("Parlay placed", update.message.reply_text.await_args.args[0])
+        self.service.place_sports_bet.assert_not_called()
+
+    async def test_confirm_can_restate_the_stake(self):
+        await self.bot._cmd_parlay(self._update(), SimpleNamespace(args="2 browns + 1 guardians 5".split()))
+        update = self._update()
+        await self.bot._confirm_pending(update, stake=10.0)
+        args = self.service.place_sports_parlay.call_args.args
+        self.assertEqual(args[1], 10.0)
+        self.assertEqual(args[2], 0.25)  # the previewed price ceiling is kept
+
+    async def test_needs_two_legs(self):
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args=["browns", "5"]))
+        self.service.quote_sports_parlay.assert_not_called()
+        self.assertIn("2 or more", update.message.reply_text.await_args.args[0])
+
+    async def test_ambiguous_leg_asks_which(self):
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="cleveland + steelers 5".split()))
+        self.service.quote_sports_parlay.assert_not_called()
+        self.assertIn("2 matches", update.message.reply_text.await_args.args[0])
+
+    async def test_refused_plan_leaves_nothing_pending(self):
+        self.service.quote_sports_parlay.return_value = {"ok": False, "reason": "no combo"}
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="browns + guardians".split()))
+        self.assertIsNone(self.bot._pending_bet)
+        self.assertIn("no combo", update.message.reply_text.await_args.args[0])
+
+    async def test_props_lists_numbered_markets_and_parlay_uses_them(self):
+        self.service.list_sports_props = MagicMock(return_value=[
+            {"ticker": "KXNFLPASSYDS-X-A-250", "player": "Josh Allen", "stat": "250+ passing yards", "yes_ask": 0.4,
+             "game": "Bills at Ravens", "start_label": "Sun Oct 4 8:00 AM"}])
+        update = self._update()
+        await self.bot._cmd_props(update, SimpleNamespace(args=["allen"]))
+        self.service.list_sports_props.assert_called_once_with("allen")
+        text = "\n".join(c.args[0] for c in update.message.reply_text.await_args_list)
+        self.assertIn("<b>Josh Allen</b>", text)
+        self.assertIn("passing yards: p1 250+ 40\u00a2", text)
+        self.bot._games = []  # prop-only legs don't need the games board
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="p1 + p1 3 max 20".split()))
+        legs, amount, max_price = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual(legs, [{"ticker": "KXNFLPASSYDS-X-A-250", "side": "yes"}] * 2)
+        self.assertEqual((amount, max_price), (3.0, 0.2))
+        self.service.list_sports_games.assert_not_called()
+
+    def test_props_ladder_groups_thresholds_by_player_and_stat(self):
+        from trading_bot.telegram_bot import _format_props_ladder
+        props = [
+            {"player": "Jalen Hurts", "stat": "175+ passing yards", "yes_ask": 0.58, "game": "PHI @ JAC", "start_label": "Sun 1:00 PM"},
+            {"player": "Jalen Hurts", "stat": "200+ passing yards", "yes_ask": 0.43, "game": "PHI @ JAC", "start_label": "Sun 1:00 PM"},
+            {"player": "Jalen Hurts", "stat": "1+ touchdowns", "yes_ask": 0.40, "game": "PHI @ JAC", "start_label": "Sun 1:00 PM"},
+        ]
+        text = "\n".join(_format_props_ladder(props))
+        self.assertEqual(text.count("Jalen Hurts"), 1)
+        self.assertIn("passing yards: p1 175+ 58\u00a2 \u00b7 p2 200+ 43\u00a2", text)
+        self.assertIn("touchdowns: p3 1+ 40\u00a2", text)
+
+    async def test_parlay_leg_can_be_a_player_named_in_plain_words(self):
+        prop = {"ticker": "KXNFLPASSYDS-X-HURTS-200", "player": "Jalen Hurts", "stat": "200+ passing yards",
+                "yes_ask": 0.43, "game": "PHI @ JAC", "start_label": "x"}
+        rush = {"ticker": "KXNFLRSHYDS-X-BARK-80", "player": "Saquon Barkley", "stat": "80+ rushing yards",
+                "yes_ask": 0.30, "game": "PHI @ JAC", "start_label": "x"}
+        self.service.list_sports_props = MagicMock(side_effect=lambda q: [prop] if "hurts" in q else [rush])
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="hurts 200 passing + barkley 80 rushing 3".split()))
+        legs = self.service.quote_sports_parlay.call_args.args[0]
+        self.assertEqual([l["ticker"] for l in legs], [prop["ticker"], rush["ticker"]])
+        self.assertEqual(self.service.quote_sports_parlay.call_args.args[1], 3.0)
+
+    async def test_ambiguous_player_leg_lists_choices(self):
+        many = [{"ticker": f"T{i}", "player": "Jalen Hurts", "stat": f"{100 + 25 * i}+ passing yards",
+                 "yes_ask": 0.5, "game": "PHI @ JAC", "start_label": "x"} for i in range(3)]
+        self.service.list_sports_props = MagicMock(return_value=many)
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="hurts + browns 3".split()))
+        self.service.quote_sports_parlay.assert_not_called()
+        text = "\n".join(c.args[0] for c in update.message.reply_text.await_args_list)
+        self.assertIn("3 player markets match 'hurts'", text)
+        self.assertEqual([p["ticker"] for p in self.bot._props], ["T0", "T1", "T2"])
+
+    def test_parse_stack_args(self):
+        self.assertEqual(_parse_stack_args("eagles jaguars legs 9 p 85 2 max 20".split()),
+                         {"query": "eagles jaguars", "legs": 9, "leg_prob": 0.85, "amount": 2.0, "max_price": 0.2})
+        self.assertEqual(_parse_stack_args(["eagles"]), {"query": "eagles", "legs": 6, "leg_prob": 0.85,
+                                                         "amount": None, "max_price": None})
+        self.assertEqual(_parse_stack_args("eagles jaguars p 90 $1.50".split())["leg_prob"], 0.9)
+        self.assertEqual(_parse_stack_args("eagles jaguars p 90 $1.50".split())["amount"], 1.5)
+
+    async def test_stack_builds_previews_and_confirm_buys_it(self):
+        legs = [{"ticker": "A-1", "side": "yes"}, {"ticker": "S-1", "side": "no"}]
+        self.service.build_sports_stack = MagicMock(return_value={
+            "ok": True, "game": "Eagles @ Jaguars", "legs": legs, "leg_prob": 0.85, "reference": 0.7, "rows": []})
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args="eagles jaguars legs 2 p 85 3".split()))
+        self.service.build_sports_stack.assert_called_once_with("eagles jaguars", 2, 0.85)
+        self.assertEqual(self.service.quote_sports_parlay.call_args.args, (legs, 3.0, None))
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Stack for Eagles @ Jaguars: 2 legs", text)
+        self.assertIn("Parlay preview", text)
+        self.service.place_sports_parlay.assert_not_called()
+        await self.bot._cmd_confirm(self._update(), SimpleNamespace(args=[]))
+        self.assertEqual(self.service.place_sports_parlay.call_args.args[0], legs)
+
+    async def test_stack_errors_are_reported_and_nothing_is_pending(self):
+        self.service.build_sports_stack = MagicMock(return_value={"ok": False, "reason": "matches several games"})
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args=["a"]))
+        self.assertIn("matches several games", update.message.reply_text.await_args.args[0])
+        self.assertIsNone(self.bot._pending_bet)
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args=[]))
+        self.assertIn("Name the game", update.message.reply_text.await_args.args[0])
+        update = self._update()
+        await self.bot._cmd_stack(update, SimpleNamespace(args="eagles p 99".split()))
+        self.assertIn("between 5 and 97", update.message.reply_text.await_args.args[0])
+
+    async def test_spread_no_leg_keeps_its_side_from_props(self):
+        spread = {"ticker": "KXNFLSPREAD-X-BAL10", "side": "no", "player": "Spread", "stat": "BAL don't win by over 9.5",
+                  "yes_ask": 0.77, "game": "BUF @ BAL", "start_label": "x"}
+        self.bot._props = [spread, dict(spread, ticker="Y", side="yes")]
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="p1 + p2 2".split()))
+        legs = self.service.quote_sports_parlay.call_args.args[0]
+        self.assertEqual([l["side"] for l in legs], ["no", "yes"])
+
+    def test_slip_caption_and_summary(self):
+        self.assertEqual(_parse_slip_caption("$5 max 30"), {"amount": 5.0, "max_price": 0.3})
+        self.assertEqual(_parse_slip_caption(""), {"amount": None, "max_price": None})
+        text = _format_slip_summary({
+            "slip": {"game": "PHI @ JAC", "odds": "+478"},
+            "matched": [{"pick": "Jalen Hurts 125+ passing yards", "ask": 0.85}],
+            "unmatched": [{"text": "Strange 25+ <Yards>", "reason": "Kalshi has 20+, 30+"}]})
+        self.assertIn("2 legs", text)
+        self.assertIn("(+478 at the book)", text)
+        self.assertIn("Jalen Hurts 125+ passing yards \u2014 85\u00a2", text)
+        self.assertIn("Strange 25+ &lt;Yards&gt;", text)
+
+    def _photo_update(self, caption="2", chat_id=123):
+        tg_file = SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"\x89PNGdata")))
+        photo = SimpleNamespace(get_file=AsyncMock(return_value=tg_file))
+        message = SimpleNamespace(photo=[photo, photo], document=None, caption=caption, reply_text=AsyncMock())
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id), message=message)
+
+    async def test_photo_of_a_slip_previews_the_matched_parlay(self):
+        self.service.read_sports_slip = MagicMock(return_value={
+            "ok": True, "slip": {"game": "PHI @ JAC", "odds": "+478"},
+            "matched": [{"pick": "A", "ask": 0.8, "ticker": "T1", "side": "yes"},
+                        {"pick": "B", "ask": 0.7, "ticker": "T2", "side": "no"}],
+            "unmatched": [{"text": "C 25+", "reason": "not listed"}], "game": "PHI @ JAC"})
+        update = self._photo_update("2 max 30")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        data, media_type = self.service.read_sports_slip.call_args.args
+        self.assertEqual((data, media_type), (b"\x89PNGdata", "image/jpeg"))
+        legs, amount, max_price, anchor = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual(legs, [{"ticker": "T1", "side": "yes"}, {"ticker": "T2", "side": "no"}])
+        self.assertEqual((amount, max_price), (2.0, 0.3))
+        self.assertIsNone(anchor)  # a shorter parlay isn't comparable to the slip's price
+        texts = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any("Read your slip" in t for t in texts))
+        self.assertIn("only the 2 matched legs", texts[-1])
+        self.assertIn("Parlay preview", texts[-1])
+        self.service.place_sports_parlay.assert_not_called()  # reading a picture never buys anything
+        self.assertEqual(self.bot._pending_bet["kind"], "parlay")
+
+    def test_caption_intent_and_slip_price(self):
+        self.assertTrue(_caption_wants_bet("bet $10 with this parlay"))
+        self.assertTrue(_caption_wants_bet("Put 10 on this"))
+        self.assertFalse(_caption_wants_bet("$10"))
+        self.assertFalse(_caption_wants_bet("what would a $10 bet pay"))
+        self.assertFalse(_caption_wants_bet(""))
+        self.assertAlmostEqual(_slip_price("+478"), 100 / 578)
+        self.assertAlmostEqual(_slip_price("-150"), 0.6)
+        self.assertIsNone(_slip_price(None))
+        self.assertIsNone(_slip_price("n/a"))
+
+    def _full_match(self, unmatched=()):
+        return {"ok": True, "slip": {"game": "PHI @ JAC", "odds": "+478"},
+                "matched": [{"pick": "A", "ask": 0.8, "ticker": "T1", "side": "yes"},
+                            {"pick": "B", "ask": 0.7, "ticker": "T2", "side": "no"}],
+                "unmatched": list(unmatched), "game": "PHI @ JAC"}
+
+    async def test_bet_caption_with_every_leg_matched_places_the_parlay_without_confirm(self):
+        self.service.read_sports_slip = MagicMock(return_value=self._full_match())
+        update = self._photo_update("bet $10 with this parlay")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        legs, amount, max_price, anchor = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual((amount, max_price), (10.0, None))
+        self.assertAlmostEqual(anchor, 100 / 578)  # the slip's own price is an acceptable ceiling
+        place_args = self.service.place_sports_parlay.call_args.args
+        self.assertEqual((place_args[0], place_args[1], place_args[2]), (legs, 5.0, 0.25))  # plan's stake and ceiling
+        texts = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any(t.startswith("Placing $5.00") for t in texts))
+        self.assertIn("Parlay placed", texts[-1])
+        self.assertIsNone(self.bot._pending_bet)
+
+    async def test_bet_caption_with_missing_legs_previews_instead_of_placing(self):
+        self.service.read_sports_slip = MagicMock(return_value=self._full_match(
+            unmatched=[{"text": "C", "reason": "not listed"}]))
+        update = self._photo_update("bet $10 on this")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIsNone(self.service.quote_sports_parlay.call_args.args[3])
+        self.assertIn("didn't place it", update.message.reply_text.await_args.args[0])
+        self.assertIsNotNone(self.bot._pending_bet)
+
+    async def test_plain_caption_still_only_previews(self):
+        self.service.read_sports_slip = MagicMock(return_value=self._full_match())
+        update = self._photo_update("10")
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.service.place_sports_parlay.assert_not_called()
+        self.assertIn("Parlay preview", update.message.reply_text.await_args.args[0])
+
+    async def test_photo_with_too_few_matches_or_a_read_error_leaves_nothing_pending(self):
+        self.service.read_sports_slip = MagicMock(return_value={
+            "ok": True, "slip": {}, "matched": [{"pick": "A", "ask": 0.8, "ticker": "T1", "side": "yes"}], "unmatched": []})
+        update = self._photo_update()
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.assertIn("Fewer than 2", update.message.reply_text.await_args.args[0])
+        self.service.quote_sports_parlay.assert_not_called()
+        self.service.read_sports_slip.return_value = {"ok": False, "reason": "needs ANTHROPIC_API_KEY"}
+        update = self._photo_update()
+        await self.bot._on_photo(update, SimpleNamespace(args=[]))
+        self.assertIn("needs ANTHROPIC_API_KEY", update.message.reply_text.await_args.args[0])
+        self.assertIsNone(self.bot._pending_bet)
+
+    async def test_photo_from_another_chat_is_ignored(self):
+        self.service.read_sports_slip = MagicMock()
+        await self.bot._on_photo(self._photo_update(chat_id=999), SimpleNamespace(args=[]))
+        self.service.read_sports_slip.assert_not_called()
+
+    async def test_unknown_prop_number_and_empty_search(self):
+        self.service.list_sports_props = MagicMock(return_value=[])
+        update = self._update()
+        await self.bot._cmd_props(update, SimpleNamespace(args=[]))
+        self.service.list_sports_props.assert_not_called()
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="p4 + p5".split()))
+        self.assertIn("No player market p4", update.message.reply_text.await_args.args[0])
+        self.service.quote_sports_parlay.assert_not_called()
+
+    def test_preview_and_result_wording(self):
+        text = _format_parlay_preview(self.PLAN)
+        self.assertIn("all must win", text)
+        self.assertIn("25\u00a2", text)
+        self.assertIn("no quote", text)  # fair-price ceiling warns about little action
+        higher = _format_parlay_preview({**self.PLAN, "max_price": 0.32})
+        self.assertIn("expected cost", higher)
+        props = _format_parlay_preview({**self.PLAN, "fair": None, "reference": 0.18, "max_price": 0.18})
+        self.assertIn("Kalshi's own prices put all legs hitting at about 18", props)
+        self.assertIn("no view on player stats", props)
+        self.assertIn("not placed", _format_parlay_result({"ok": False, "reason": "x"}).lower())
+        warned = _format_parlay_result({**self.service.place_sports_parlay.return_value, "warning": "wrong side"})
+        self.assertIn("wrong side", warned)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+def _route(**fields):
+    base = {"action": "reply", "team": "", "legs": [], "game": "", "query": "", "filter": "", "amount": None,
+            "max_cents": None, "leg_count": None, "leg_percent": None, "reply_text": ""}
+    base.update(fields)
+    return base
+
+
+class PlainTextTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)
+        self.bot = TradingTelegramBot(config, logging.getLogger("test_plain_text"))
+        self.bot.set_service(SimpleNamespace(config=SimpleNamespace(trading_agents=SimpleNamespace(api_key="k"))))
+        self.calls = []
+        for name in ("games", "bet", "parlay", "stack", "props", "status", "positions", "confirm", "cancel"):
+            setattr(self.bot, f"_cmd_{name}", self._recorder(name))
+        self.bot._cmd_kalshi_sports = self._recorder("sports")
+
+        async def confirm_pending(update, stake=None):
+            self.calls.append(("confirm", [] if stake is None else [stake]))
+        self.bot._confirm_pending = confirm_pending
+        self.routes = []
+        self.bot._route_text = MagicMock(side_effect=lambda text, pending: self.routes.pop(0))
+
+    def _recorder(self, name):
+        async def run(update, context):
+            self.calls.append((name, list(context.args or [])))
+        return run
+
+    def _update(self, text, chat_id=123):
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+                               message=SimpleNamespace(text=text, reply_text=AsyncMock()))
+
+    def _wait(self, label="single bet on Browns"):
+        import time
+        self.bot._pending_bet = {"kind": "bet", "label": label, "expires": time.monotonic() + 600}
+
+    def _ctx(self):
+        return SimpleNamespace(args=[], bot=None)
+
+    async def test_route_to_command_builds_slash_arguments(self):
+        self.assertEqual(_route_to_command(_route(action="bet", team="cleveland browns", amount=5.0)),
+                         ("bet", ["cleveland", "browns", "5"]))
+        self.assertEqual(_route_to_command(_route(action="parlay", legs=["hurts 200 passing", "browns"], amount=3.0,
+                                                  max_cents=12.0)),
+                         ("parlay", ["hurts", "200", "passing", "+", "browns", "3", "max", "12"]))
+        self.assertEqual(_route_to_command(_route(action="stack", game="eagles jaguars", leg_count=9, leg_percent=85.0,
+                                                  amount=2.0)),
+                         ("stack", ["eagles", "jaguars", "legs", "9", "p", "85", "2"]))
+        self.assertEqual(_route_to_command(_route(action="games", filter="nfl")), ("games", ["nfl"]))
+        self.assertEqual(_route_to_command(_route(action="status")), ("status", []))
+        self.assertIsNone(_route_to_command(_route(action="bet")))
+        self.assertIsNone(_route_to_command(_route(action="parlay", legs=["only one"])))
+
+    async def test_yes_and_no_use_the_waiting_bet_without_calling_the_model(self):
+        self._wait()
+        await self.bot._on_text(self._update("Yes!"), self._ctx())
+        self._wait()
+        await self.bot._on_text(self._update("never mind"), self._ctx())
+        self.assertEqual([c[0] for c in self.calls], ["confirm", "cancel"])
+        self.bot._route_text.assert_not_called()
+
+    async def test_yes_with_nothing_waiting_or_an_expired_preview_does_not_confirm(self):
+        self.routes = [_route(action="reply", reply_text="Nothing is waiting."), _route(action="confirm")]
+        update = self._update("yes")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(self.calls, [])
+        self._wait()
+        self.bot._pending_bet["expires"] -= 1000
+        update2 = self._update("yes")
+        await self.bot._on_text(update2, self._ctx())
+        self.assertEqual(self.calls, [])
+        self.assertIn("nothing waiting", update2.message.reply_text.await_args.args[0].lower())
+
+    async def test_a_spoken_bet_runs_the_bet_command_preview_only(self):
+        self.routes = [_route(action="bet", team="browns", amount=5.0)]
+        await self.bot._on_text(self._update("put five bucks on the browns"), self._ctx())
+        self.assertEqual(self.calls, [("bet", ["browns", "5"])])  # a preview; /confirm still needed
+
+    async def test_model_confirm_only_counts_when_a_bet_is_waiting(self):
+        self.routes = [_route(action="confirm")]
+        update = self._update("sounds good, go for it")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(self.calls, [])
+        self._wait()
+        self.routes = [_route(action="confirm")]
+        await self.bot._on_text(self._update("sounds good, go for it"), self._ctx())
+        self.assertEqual(self.calls, [("confirm", [])])
+
+    async def test_bet_an_amount_on_this_restates_the_stake_and_places(self):
+        self._wait("9-leg parlay, $2.00")
+        self.routes = [_route(action="confirm", amount=10.0)]
+        await self.bot._on_text(self._update("bet $10 on this parlay"), self._ctx())
+        self.assertEqual(self.calls, [("confirm", [10.0])])
+
+    async def test_pause_and_kill_are_never_run_from_text(self):
+        self.routes = [_route(action="control")]
+        update = self._update("shut everything down")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(self.calls, [])
+        self.assertIn("/kill", update.message.reply_text.await_args.args[0])
+
+    async def test_replies_errors_and_missing_detail_are_sent_back(self):
+        self.routes = [_route(action="reply", reply_text="Try: bet $5 on the browns")]
+        update = self._update("hello")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(update.message.reply_text.await_args.args[0], "Try: bet $5 on the browns")
+        self.bot._route_text.side_effect = RuntimeError("needs ANTHROPIC_API_KEY")
+        update = self._update("bet")
+        await self.bot._on_text(update, self._ctx())
+        self.assertIn("ANTHROPIC_API_KEY", update.message.reply_text.await_args.args[0])
+        self.bot._route_text.side_effect = lambda text, pending: self.routes.pop(0)
+        self.routes = [_route(action="bet", reply_text="Which team?")]
+        update = self._update("bet something")
+        await self.bot._on_text(update, self._ctx())
+        self.assertEqual(update.message.reply_text.await_args.args[0], "Which team?")
+        self.assertEqual(self.calls, [])
+
+    async def test_other_chats_and_disabled_mode_are_ignored(self):
+        await self.bot._on_text(self._update("yes", chat_id=999), self._ctx())
+        self.bot._route_text.assert_not_called()
+        self.bot.config.natural_language = False
+        update = self._update("status")
+        await self.bot._on_text(update, self._ctx())
+        self.bot._route_text.assert_not_called()
+        self.assertIn("off", update.message.reply_text.await_args.args[0])
+
+    async def test_pending_label_is_given_to_the_router(self):
+        self._wait("2-leg parlay (A + B), $2.00")
+        self.routes = [_route(action="status")]
+        await self.bot._on_text(self._update("how am i doing"), self._ctx())
+        self.assertEqual(self.bot._route_text.call_args.args[1], "2-leg parlay (A + B), $2.00")

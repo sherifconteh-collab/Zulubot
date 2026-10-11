@@ -178,6 +178,10 @@ class TelegramConfig:
     # message every this many hours. 0 sends each alert immediately. Replies to commands
     # (/status, /sports, ...) and a kill switch firing are always immediate.
     digest_hours: float = 6.0
+    # Plain-text messages are understood by Claude (needs ANTHROPIC_API_KEY) and run the same
+    # commands as the slash versions. Buying always still needs a yes/confirm.
+    natural_language: bool = True
+    nl_model: str = "claude-haiku-4-5-20251001"
 
     @property
     def is_configured(self) -> bool:
@@ -500,6 +504,18 @@ class KalshiSportsConfig:
     # legs from different games. 0 disables. Kalshi combos are quoted on request, not
     # via an order book, so they are placed manually in Kalshi's parlay builder.
     parlay_max_legs: int = 4
+    # Bets you pick yourself in Telegram (/games, /bet): default stake and per-bet cap, as a
+    # share of the wallet. Your call overrides the model's, so the cap is the only guard.
+    user_bet_default_pct: float = 0.05
+    user_bet_max_pct: float = 0.25
+    # Parlays you build in Telegram (/parlay): stake share of the wallet, and how long to
+    # wait for market makers to quote. A parlay is a long shot, so the default stake is small.
+    user_parlay_default_pct: float = 0.02
+    user_parlay_max_pct: float = 0.25
+    user_parlay_max_legs: int = 10
+    # Model that reads bet-slip screenshots posted to Telegram (needs ANTHROPIC_API_KEY).
+    slip_model: str = "claude-sonnet-4-6"
+    parlay_quote_wait_seconds: float = 20.0
     hold_to_settlement: bool = True          # sports bets are held to the final whistle
     stop_loss_pct: float = 0.0               # only used when hold_to_settlement is False
     take_profit_pct: float = 0.0
@@ -685,6 +701,8 @@ class AppConfig:
                 bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
                 chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
                 digest_hours=_env_float("TELEGRAM_DIGEST_HOURS", 6.0),
+                natural_language=_env_bool("TELEGRAM_NATURAL_LANGUAGE", True),
+                nl_model=os.getenv("TELEGRAM_NL_MODEL", "claude-haiku-4-5-20251001").strip(),
             ),
             scheduler=SchedulerConfig(
                 crypto_interval_minutes=_env_int("SCHEDULER_CRYPTO_INTERVAL_MINUTES", 10),
@@ -913,6 +931,13 @@ class AppConfig:
                 ignore_global_halt=_env_bool("KALSHI_SPORTS_IGNORE_GLOBAL_HALT", True),
                 use_polymarket=_env_bool("KALSHI_SPORTS_USE_POLYMARKET", True),
                 parlay_max_legs=_env_int("KALSHI_SPORTS_PARLAY_MAX_LEGS", 4),
+                user_bet_default_pct=_env_float("KALSHI_SPORTS_USER_BET_DEFAULT_PCT", 0.05),
+                user_bet_max_pct=_env_float("KALSHI_SPORTS_USER_BET_MAX_PCT", 0.25),
+                user_parlay_default_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT", 0.02),
+                user_parlay_max_pct=_env_float("KALSHI_SPORTS_USER_PARLAY_MAX_PCT", 0.25),
+                user_parlay_max_legs=_env_int("KALSHI_SPORTS_USER_PARLAY_MAX_LEGS", 10),
+                slip_model=os.getenv("KALSHI_SPORTS_SLIP_MODEL", "claude-sonnet-4-6").strip(),
+                parlay_quote_wait_seconds=_env_float("KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS", 20.0),
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
