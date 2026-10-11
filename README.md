@@ -287,6 +287,19 @@ KALSHI_SPORTS_IGNORE_GLOBAL_HALT=true
 KALSHI_SPORTS_USE_POLYMARKET=true
 # Max legs in suggested parlays (0 = off). Suggestions only: never placed automatically.
 KALSHI_SPORTS_PARLAY_MAX_LEGS=4
+# Bets you place yourself from Telegram (/games, /bet, /confirm): default stake and the
+# largest single bet, as a share of the wallet.
+KALSHI_SPORTS_USER_BET_DEFAULT_PCT=0.05
+KALSHI_SPORTS_USER_BET_MAX_PCT=0.25
+# Parlays you build with /parlay: default stake and largest stake (share of the wallet), and
+# how many seconds to wait for market makers to quote before giving up.
+KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT=0.02
+KALSHI_SPORTS_USER_PARLAY_MAX_PCT=0.25
+# Most legs in a parlay you build with /parlay or /stack (same sport; 0-1 turns them off).
+KALSHI_SPORTS_USER_PARLAY_MAX_LEGS=10
+# Model that reads bet-slip screenshots sent to the Telegram bot (uses ANTHROPIC_API_KEY).
+KALSHI_SPORTS_SLIP_MODEL=claude-sonnet-4-6
+KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS=20
 KALSHI_SPORTS_HOLD_TO_SETTLEMENT=true
 KALSHI_SPORTS_STOP_LOSS=0
 KALSHI_SPORTS_TAKE_PROFIT=0
@@ -349,6 +362,54 @@ OPTIONS_MIN_VOLUME=100          # skip contracts with volume below this
 OPTIONS_MIN_OPEN_INTEREST=500   # skip contracts with OI below this
 OPTIONS_MAX_IV=1.50             # skip contracts with implied volatility above 150%
 - **Coinbase is data-only by default.** `COINBASE_TRADING_ENABLED=false` (the default) means the bot never sends Coinbase an order, skips the Coinbase balance sync (cash is treated as 0), and does not run the crypto/rotation strategies live; prices from Coinbase still feed the Kalshi strategies. All live trading happens on Kalshi. Set it to `true` only if you really trade crypto on Coinbase.
+
+## Betting from Telegram
+
+Everything below places **real Kalshi orders** when `PAPER_MODE=false`. Only the configured `TELEGRAM_CHAT_ID` can use it.
+
+### Just type it
+
+You don't need to remember commands. Type what you want ("what games are on today", "bet $5 on the browns", "parlay hurts 200 passing and barkley 80 rushing for 3 bucks", "how am I doing?") and Claude picks the matching command. This needs `ANTHROPIC_API_KEY`; it uses `TELEGRAM_NL_MODEL` (default Haiku, one small call per message) and can be turned off with `TELEGRAM_NATURAL_LANGUAGE=false`. The model only *chooses* a command from a fixed list, so the same limits apply and bets are still **previewed** first: reply "yes" / "do it" / "confirm" to place the one that's waiting, or "no" / "cancel" to drop it (matched by simple rules, only while a preview is waiting, 10 minutes). Plain text can never pause, resume or kill the bot; use `/pause`, `/resume`, `/kill`.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `/games [league or team]` | Rescans ESPN + Kalshi (+ Polymarket) and lists numbered upcoming games with each side's Kalshi price and the model's win probability. |
+| `/bet <team> [$amount]` | Previews a single bet, e.g. `/bet browns 5` or `/bet 3 browns`. If the name matches several teams (Browns, Guardians) it asks you to be specific. Add `now` to skip the confirm step. |
+| `/props <player, team or stat>` | Football player-stat markets (NFL passing/rushing/receiving yards, receptions, passing TDs, anytime TD, alternate spreads), grouped per player: `passing yards: p1 125+ 85¢ · p2 150+ 73¢`. |
+| `/parlay <leg> + <leg> [$amount] [max <cents>]` | Previews a Kalshi combo (see below). |
+| `/stack <game> [legs N] [p %] [$stake] [max c]` | Auto-builds a same-game player-stat parlay (see below). |
+| `/confirm` / `/cancel` | Place or drop the previewed bet. Previews expire after 10 minutes. |
+
+Single bets show contracts, price, Kalshi's fee, what you win or lose, and the model's honest view: if it thinks the price is too high it says so, and the bet is still yours. Orders are immediate-or-cancel and only contracts that actually fill are booked.
+
+### Parlays (Kalshi combos)
+
+`/parlay hurts 200 passing + barkley 80 rushing + browns 3 max 12`. Up to `KALSHI_SPORTS_USER_PARLAY_MAX_LEGS` legs (default 10), **all in the same sport** (football with football, never football with baseball). A leg is a team to win (`/games`; different games), or a player stat / spread: by number from `/props` (`p3`) or in plain words (a number matches the exact `N+` threshold; ambiguous names list the choices). Same-game legs are allowed; the same player can't appear twice and a game gets one winner/spread leg.
+
+Combos have no order book. After you confirm, the bot creates the combo market, sends a request for quote, waits up to `KALSHI_SPORTS_PARLAY_QUOTE_WAIT_SECONDS` for market-maker quotes and accepts the best one **only if its all-in price (fee included) is at or under a ceiling**:
+
+- the model's fair probability for all legs when it has a view on every leg; otherwise Kalshi's own mid prices multiplied (the model has no view on player stats);
+- or your `max <cents>`; for a slip screenshot with every leg matched, the slip's own price when higher.
+
+Contracts are sized so the worst-case cost stays within your stake (default `KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT` = 2% of bankroll, capped at `KALSHI_SPORTS_USER_PARLAY_MAX_PCT` = 25%). If no maker quotes at or under the ceiling, nothing is bought and you are told the best price offered. Makers price combos above the product of the legs and same-game legs are correlated, so expect "no quote" at the default ceiling; raise `max` only if you accept paying that margin (an expected cost, not an edge). After execution the bot reads the position back from Kalshi and warns if it holds the opposite side. Parlays need live trading (`PAPER_MODE=false`). The bot never builds or buys a parlay on its own.
+
+### Same-game stacks (`/stack`)
+
+`/stack eagles jaguars legs 9 p 85 2` builds a same-game parlay like a sportsbook SGP (nine near-certain legs: low receptions, rushing and receiving yards, a passing floor, an alternate spread). For each player it picks the one liquid Kalshi market whose mid price is closest to `p` (percent chance per leg, default 85), skips one-sided or wide-spread markets, ranks players by closeness then volume and adds one alternate-spread leg when it fits (spreads are offered on both sides: "PHI don't win by over 3.5" is Eagles +3.5). Nine legs near 85% multiply to roughly +330. The trailing number is your stake. It then shows the usual parlay preview and waits for `/confirm`.
+
+### Copy a bet slip from a screenshot
+
+Send a screenshot (photo or image file) of a bet slip, such as a sportsbook same-game parlay. Claude reads the legs (`ANTHROPIC_API_KEY`, model `KALSHI_SPORTS_SLIP_MODEL`, one image call per picture) into a fixed schema; text inside the picture is only data and can't trigger anything. Each leg is mapped onto Kalshi **exactly**: same player, stat and number, or same team and spread line (Team +16.5 = the opponent does *not* win by over 16.5). The bot replies with what matched and what didn't, with Kalshi's nearest alternatives for near misses ("Kalshi doesn't list 15+ rushing yards for them, it has 20+, 25+..."). Nothing is silently swapped for a different bet; unders, totals and legs Kalshi doesn't offer are reported as not matched.
+
+- **Caption `bet $10 with this parlay`** (any bet word plus your stake) is the instruction: when every leg matched, the bot places it straight away, no `/confirm`. Or send the picture first, then text `bet $10 on this`.
+- **Caption `10`** (or `what would $10 pay`) shows the preview and waits for `/confirm`.
+- If some legs aren't on Kalshi the bot **never** auto-places the shorter parlay: it shows the preview and asks you to reply yes.
+
+### Limits that always apply
+
+Market open, game not started, price within 2¢ of the preview (single bets), one bet per game for game-winner legs, at least `KALSHI_SPORTS_MIN_TRADE_USD`, at most `KALSHI_SPORTS_USER_BET_MAX_PCT` (25%) of your bankroll for a single bet and `KALSHI_SPORTS_USER_PARLAY_MAX_PCT` (25%) for a parlay, and no more than the cash available. Sports is exempt from the global kill switch (`KALSHI_SPORTS_IGNORE_GLOBAL_HALT`). Hand-picked bets settle and are counted like any other sports bet.
 
 ## Telegram digest
 

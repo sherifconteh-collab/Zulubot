@@ -11,11 +11,16 @@ import asyncio
 import html
 import json
 import logging
+import re
+import time
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+from trading_bot.integrations import nl_router
 
 if TYPE_CHECKING:
     from trading_bot.config import TelegramConfig
@@ -149,6 +154,333 @@ def _format_sports_picks(predictions: list[dict[str, Any]], limit: int = 10) -> 
     return [_format_sports_pick(p) for p in ordered[:limit]]
 
 
+_BET_TTL_SECONDS = 600
+_PRICE_SLIP = 0.02  # /confirm refuses if the ask has risen more than this since the preview
+_MAX_GAMES_SHOWN = 40
+_MAX_PROPS_SHOWN = 60
+_PROP_REF_RE = re.compile(r"^p(\d+)$", re.IGNORECASE)
+_THRESHOLD_RE = re.compile(r"^(\d+(?:\.\d+)?)\+\s*(.*)$")
+_AMOUNT_RE = re.compile(r"^\$?(\d+(?:\.\d+)?)$")
+
+
+def _parse_bet_args(args: list[str]) -> dict[str, Any]:
+    """Split ``/bet`` arguments into game number, team query, dollar amount and ``now`` flag.
+
+    ``/bet cleveland 5``, ``/bet 3 browns``, ``/bet 3 browns $5 now``.
+    """
+    tokens = [a for a in args if a]
+    now_flag = bool(tokens) and tokens[-1].lower() == "now"
+    if now_flag:
+        tokens = tokens[:-1]
+    game_no: int | None = None
+    if len(tokens) > 1 and tokens[0].isdigit():
+        game_no = int(tokens[0])
+        tokens = tokens[1:]
+    amount: float | None = None
+    if len(tokens) > 1 and _AMOUNT_RE.match(tokens[-1]):
+        amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
+        tokens = tokens[:-1]
+    return {"game_no": game_no, "query": " ".join(tokens).strip(), "amount": amount, "now": now_flag}
+
+
+def _find_bet_options(
+    games: list[dict[str, Any]], game_no: int | None, query: str,
+) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """(game number, game, option) rows whose team name contains every word of ``query``."""
+    words = query.lower().split()
+    rows = []
+    for number, game in enumerate(games, start=1):
+        if game_no is not None and number != game_no:
+            continue
+        for option in game["options"]:
+            label = str(option["label"]).lower()
+            if all(w in label for w in words):
+                rows.append((number, game, option))
+    return rows
+
+
+def _format_games_board(games: list[dict[str, Any]], title: str) -> list[str]:
+    lines = [title]
+    for number, game in enumerate(games[:_MAX_GAMES_SHOWN], start=1):
+        parts = []
+        for option in game["options"]:
+            text = f"{html.escape(str(option['label']))} {float(option['ask']) * 100:.0f}\u00a2"
+            if option.get("p") is not None:
+                text += f" (model {float(option['p']):.0%})"
+            parts.append(text)
+        lines.append(
+            f"{number}. <b>{html.escape(str(game['league']).upper())}</b> {html.escape(str(game['game']))}"
+            f" \u00b7 {html.escape(str(game.get('start_label', game['start'])))}\n   " + "  |  ".join(parts)
+        )
+    if len(games) > _MAX_GAMES_SHOWN:
+        lines.append(f"\u2026 +{len(games) - _MAX_GAMES_SHOWN} more: filter with /games &lt;league or team&gt;")
+    return lines
+
+
+def _format_bet_preview(quote: dict[str, Any]) -> str:
+    ask, fee, qty = float(quote["ask"]), float(quote["fee_each"]), int(quote["quantity"])
+    cost = float(quote["cost"])
+    all_in = ask + fee
+    pick = html.escape(str(quote["pick"]))
+    lines = [
+        f"<b>Bet preview</b> \u2014 {'LIVE money' if quote.get('live') else 'paper'}",
+        f"<b>{pick}</b> in {html.escape(str(quote['game']))} ({html.escape(str(quote['league']).upper())})",
+        f"Buy {qty} contracts @ {ask * 100:.0f}\u00a2 + {fee * 100:.1f}\u00a2 fee = <b>${cost:.2f}</b>",
+        f"Win: ${qty:.2f} back (profit ${qty - cost:.2f}). Lose: ${cost:.2f}.",
+    ]
+    p = quote.get("model_prob")
+    if p is None:
+        lines.append("No model view on this game (no sportsbook line), so this is purely your call.")
+    elif float(p) >= all_in:
+        lines.append(f"Model agrees: {float(p):.0%} to win vs {all_in * 100:.0f}\u00a2 all-in.")
+    else:
+        lines.append(
+            f"Heads up: the model gives {pick} {float(p):.0%} vs {all_in * 100:.0f}\u00a2 all-in "
+            f"(about {(all_in - float(p)) * 100:.0f}\u00a2 of expected cost per $1). Your call."
+        )
+    lines.append("Send /confirm within 10 minutes to place it, or /cancel.")
+    return "\n".join(lines)
+
+
+_LEGS_RE = re.compile(r"\blegs?\s+(\d+)\b", re.IGNORECASE)
+_PCT_RE = re.compile(r"\bp\s+(\d+(?:\.\d+)?)\s*%?(?=\s|$)", re.IGNORECASE)
+_MAX_RE = re.compile(r"\bmax\s+\$?(\d+(?:\.\d+)?)\s*(?:c|\u00a2|cents?)?\b", re.IGNORECASE)
+
+
+def _parse_parlay_args(args: list[str]) -> dict[str, Any]:
+    """``/parlay browns + guardians 5 max 30``: legs split on ``+``/``,``, optional stake, optional ceiling in cents."""
+    text = " ".join(args)
+    max_price: float | None = None
+    match = _MAX_RE.search(text)
+    if match:
+        max_price = float(match.group(1)) / 100.0
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    parts = [p.strip() for p in re.split(r"[+,]", text) if p.strip()]
+    amount: float | None = None
+    if parts:
+        tokens = parts[-1].split()
+        if len(tokens) > 1 and _AMOUNT_RE.match(tokens[-1]):
+            amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
+            parts[-1] = " ".join(tokens[:-1])
+    legs = []
+    for part in parts:
+        tokens = part.split()
+        game_no = int(tokens[0]) if len(tokens) > 1 and tokens[0].isdigit() else None
+        legs.append({"game_no": game_no, "query": " ".join(tokens[1:] if game_no else tokens)})
+    return {"legs": legs, "amount": amount, "max_price": max_price}
+
+
+def _parse_stack_args(args: list[str]) -> dict[str, Any]:
+    """``/stack eagles jaguars legs 9 p 85 2 max 20``: game words, legs, per-leg chance %, stake, ceiling."""
+    text = " ".join(args)
+    legs, leg_prob, max_price = 6, 0.85, None
+    match = _MAX_RE.search(text)
+    if match:
+        max_price = float(match.group(1)) / 100.0
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    match = _LEGS_RE.search(text)
+    if match:
+        legs = int(match.group(1))
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    match = _PCT_RE.search(text)
+    if match:
+        leg_prob = float(match.group(1)) / 100.0
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    tokens = text.split()
+    amount: float | None = None
+    if len(tokens) > 1 and _AMOUNT_RE.match(tokens[-1]):
+        amount = float(_AMOUNT_RE.match(tokens[-1]).group(1))  # type: ignore[union-attr]
+        tokens = tokens[:-1]
+    return {"query": " ".join(tokens), "legs": legs, "leg_prob": leg_prob, "amount": amount, "max_price": max_price}
+
+
+_YES_WORDS = {"yes", "y", "yep", "yeah", "yup", "confirm", "confirmed", "ok", "okay", "go", "sure", "place it",
+              "do it", "send it", "lets go", "let's go", "go ahead", "bet it", "yes please", "confirm it"}
+_NO_WORDS = {"no", "n", "nope", "cancel", "stop", "nevermind", "never mind", "forget it", "dont", "don't",
+             "cancel it", "scrap it", "no thanks"}
+
+
+def _parlay_label(plan: dict[str, Any]) -> str:
+    picks = " + ".join(str(l["pick"]) for l in plan["legs"])
+    return f"{len(plan['legs'])}-leg parlay ({picks}), ${float(plan['stake']):.2f}"
+
+
+def _normalise_reply(text: str) -> str:
+    return " ".join(text.lower().replace("!", " ").replace(".", " ").split())
+
+
+def _route_to_command(route: dict[str, Any]) -> tuple[str, list[str]] | None:
+    """Turn a validated route into (command name, args), or None for actions handled elsewhere."""
+    action = route["action"]
+    args: list[str] = []
+    if action == "games":
+        args = route["filter"].split()
+    elif action == "props":
+        args = (route["query"] or route["team"]).split()
+    elif action == "bet":
+        if not route["team"]:
+            return None
+        args = route["team"].split()
+        if route["amount"] is not None:
+            args.append(f"{route['amount']:g}")
+    elif action == "parlay":
+        if len(route["legs"]) < 2:
+            return None
+        args = " + ".join(route["legs"]).split()
+        if route["amount"] is not None:
+            args.append(f"{route['amount']:g}")
+        if route["max_cents"] is not None:
+            args += ["max", f"{route['max_cents']:g}"]
+    elif action == "stack":
+        game = route["game"] or route["team"]
+        if not game:
+            return None
+        args = game.split()
+        if route["leg_count"] is not None:
+            args += ["legs", str(route["leg_count"])]
+        if route["leg_percent"] is not None:
+            args += ["p", f"{route['leg_percent']:g}"]
+        if route["amount"] is not None:
+            args.append(f"{route['amount']:g}")
+        if route["max_cents"] is not None:
+            args += ["max", f"{route['max_cents']:g}"]
+    return action, args
+
+
+_BET_WORDS = re.compile(r"\b(bet|place|put|wager|play|lock|submit|take|do it|go for it|send it)\b", re.IGNORECASE)
+_PREVIEW_WORDS = re.compile(r"\b(preview|show|what|how much|would|price|check)\b", re.IGNORECASE)
+
+
+def _caption_wants_bet(caption: str) -> bool:
+    """A caption like "bet $10 on this" is an instruction to place the bet; "$10" alone just previews it."""
+    return bool(_BET_WORDS.search(caption or "")) and not _PREVIEW_WORDS.search(caption or "")
+
+
+def _slip_price(odds: str | None) -> float | None:
+    """Break-even price (dollars per $1) of American odds read from a slip, e.g. '+478' -> 0.173."""
+    try:
+        value = float(str(odds).replace("\u2212", "-").strip())
+    except (TypeError, ValueError):
+        return None
+    if value >= 100:
+        return 100.0 / (value + 100.0)
+    if value <= -100:
+        return -value / (-value + 100.0)
+    return None
+
+
+def _parse_slip_caption(caption: str) -> dict[str, Any]:
+    """Photo caption such as ``2`` or ``$5 max 30``: the stake and an optional price ceiling in cents."""
+    text = caption or ""
+    max_price: float | None = None
+    match = _MAX_RE.search(text)
+    if match:
+        max_price = float(match.group(1)) / 100.0
+        text = (text[:match.start()] + " " + text[match.end():]).strip()
+    amount: float | None = None
+    for token in text.split():
+        found = _AMOUNT_RE.match(token)
+        if found:
+            amount = float(found.group(1))
+            break
+    return {"amount": amount, "max_price": max_price}
+
+
+def _format_slip_summary(result: dict[str, Any]) -> str:
+    slip = result.get("slip") or {}
+    matched, unmatched = result.get("matched") or [], result.get("unmatched") or []
+    total = len(matched) + len(unmatched)
+    head = f"<b>Read your slip</b>: {total} legs"
+    if slip.get("game"):
+        head += f" \u2014 {html.escape(str(slip['game']))}"
+    if slip.get("odds"):
+        head += f" ({html.escape(str(slip['odds']))} at the book)"
+    lines = [head]
+    if matched:
+        lines.append(f"\u2705 On Kalshi ({len(matched)}):")
+        for leg in matched:
+            lines.append(f"  \u2022 {html.escape(str(leg['pick']))} \u2014 {float(leg['ask']) * 100:.0f}\u00a2")
+    if unmatched:
+        lines.append(f"\u274c Not matched ({len(unmatched)}):")
+        for leg in unmatched:
+            lines.append(f"  \u2022 {html.escape(str(leg['text']))} \u2014 {html.escape(str(leg['reason']))}")
+    return "\n".join(lines)
+
+
+def _format_props_ladder(props: list[dict[str, Any]], start: int = 1) -> list[str]:
+    """Group player markets by player and stat: ``passing yards: p1 125+ 85c | p2 150+ 73c ...``."""
+    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for number, prop in enumerate(props, start=start):
+        match = _THRESHOLD_RE.match(str(prop["stat"]))
+        threshold, family = (f"{match.group(1)}+", match.group(2)) if match else ("", str(prop["stat"]))
+        header = (
+            f"\n<b>{html.escape(str(prop['player']))}</b> \u00b7 {html.escape(str(prop['game']))}"
+            f" \u00b7 {html.escape(str(prop.get('start_label', '')))}"
+        )
+        item = f"p{number} {html.escape(threshold or family)} {float(prop['yes_ask']) * 100:.0f}\u00a2"
+        groups.setdefault((header, str(prop["player"])), {}).setdefault(family, []).append(item)
+    lines: list[str] = []
+    for (header, _), families in groups.items():
+        lines.append(header)
+        for family, items in families.items():
+            lines.append(f"  {html.escape(family)}: " + " \u00b7 ".join(items))
+    return lines
+
+
+def _format_parlay_preview(plan: dict[str, Any]) -> str:
+    legs = plan["legs"]
+    fair, ceiling = plan.get("fair"), float(plan["max_price"])
+    lines = [
+        f"<b>Parlay preview</b> \u2014 LIVE money, {len(legs)} legs, all must win",
+    ]
+    for leg in legs:
+        if leg.get("p") is not None:
+            p = f" ({float(leg['p']):.0%})"
+        else:
+            p = f" (Kalshi {float(leg['ask']) * 100:.0f}\u00a2)" if leg.get("ask") else ""
+        lines.append(f"\u2022 <b>{html.escape(str(leg['pick']))}</b>{p} \u2014 {html.escape(str(leg['game']))}")
+    reference = plan.get("reference") if plan.get("reference") is not None else fair
+    if fair is not None:
+        lines.append(f"Model chance all hit: {float(fair):.1%} (fair price {float(fair) * 100:.0f}\u00a2 per $1).")
+    elif reference is not None:
+        lines.append(
+            f"Kalshi's own prices put all legs hitting at about {float(reference) * 100:.0f}\u00a2 per $1 "
+            "(the model has no view on player stats)."
+        )
+    lines.append(
+        f"I'll ask Kalshi's market makers for a price and buy only if it's {ceiling * 100:.0f}\u00a2 or less "
+        f"per $1 (fee included): up to {int(plan['contracts'])} contracts, at most ${float(plan['max_cost']):.2f}, "
+        f"paying ${float(plan['payout']):.2f} if every leg wins."
+    )
+    if reference is not None and ceiling > float(reference) + 1e-9:
+        lines.append(
+            f"Heads up: that ceiling is {(ceiling - float(reference)) * 100:.0f}\u00a2 above the reference price, "
+            "so it's an expected cost. Your call."
+        )
+    elif reference is not None:
+        lines.append("Market makers usually price parlays above that, so you may get no quote at this "
+                     "ceiling (then nothing is bought). Raise it with 'max <cents>' if you want more action.")
+    if plan.get("same_game"):
+        lines.append("Legs from the same game move together (a shootout lifts everyone's yards), so the "
+                     "true chance differs from the simple product; makers price that in.")
+    lines.append("Send /confirm within 10 minutes to request quotes, or /cancel.")
+    return "\n".join(lines)
+
+
+def _format_parlay_result(outcome: dict[str, Any]) -> str:
+    if not outcome.get("ok"):
+        return f"Parlay not placed: {html.escape(str(outcome.get('reason', 'unknown reason')))}"
+    legs = " + ".join(html.escape(str(l["pick"])) for l in outcome["legs"])
+    text = (
+        f"\u2705 Parlay placed: {int(outcome['filled'])} contracts on {legs} @ "
+        f"{float(outcome['price']) * 100:.1f}\u00a2 (+{float(outcome['fee_each']) * 100:.1f}\u00a2 fee), "
+        f"${float(outcome['spent']):.2f} in; pays ${float(outcome['payout']):.2f} if every leg wins."
+    )
+    if outcome.get("warning"):
+        text += f"\n\u26a0\ufe0f {html.escape(str(outcome['warning']))}"
+    return text
+
+
 def _format_lead_line(lead: dict[str, Any]) -> str:
     """One-line representation of a lead for the Telegram leads alert."""
     symbol = html.escape(str(lead.get("symbol", "?")))
@@ -200,6 +532,10 @@ class TradingTelegramBot:
         self._service: Any = None
         self._paused = False
         self._trade_history: list[dict[str, Any]] = []
+        # Numbered list from the last /games, and the one bet awaiting /confirm.
+        self._games: list[dict[str, Any]] = []
+        self._pending_bet: dict[str, Any] | None = None
+        self._props: list[dict[str, Any]] = []
 
     @property
     def is_configured(self) -> bool:
@@ -731,6 +1067,13 @@ class TradingTelegramBot:
             "predict": self._cmd_predictions,
             "perps": self._cmd_kalshi_perps,
             "sports": self._cmd_kalshi_sports,
+            "games": self._cmd_games,
+            "bet": self._cmd_bet,
+            "parlay": self._cmd_parlay,
+            "props": self._cmd_props,
+            "stack": self._cmd_stack,
+            "confirm": self._cmd_confirm,
+            "cancel": self._cmd_cancel,
             "backtest": self._cmd_backtest,
             "ai": self._cmd_ai,
             "history": self._cmd_history,
@@ -742,6 +1085,10 @@ class TradingTelegramBot:
         }
         for name, callback in commands.items():
             self._app.add_handler(CommandHandler(name, callback))
+        # A photo (or image file) of a bet slip: read its legs and propose the matching Kalshi parlay.
+        self._app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._on_photo))
+        # Plain text: "bet $5 on the browns", "how am I doing?", "yes".
+        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
     def _check_auth(self, update: Update) -> bool:
         if not update.effective_chat:
@@ -767,6 +1114,16 @@ class TradingTelegramBot:
             "<b>Run</b>\n"
             "/crypto /stocks /rotation /predict /perps /sports /polymarket /btc5min /markov /options\n"
             "/backtest [range]\n"
+            "\n"
+            "<b>Your own sports bets</b>\n"
+            "/games [league or team] — games you can bet on\n"
+            "/bet &lt;team&gt; [$amount] — preview a bet (e.g. /bet cleveland 5)\n"
+            "/props &lt;player or team&gt; — football player-stat markets (NFL)\n"
+            "Or just type what you want in plain words (\"bet $5 on the browns\", \"how am I doing?\", \"yes\")\n"
+            "Send a screenshot of a bet slip (caption: stake, e.g. 2) — I match its legs to Kalshi and preview the parlay\n"
+            "/stack &lt;game&gt; [legs N] [p %] [$stake] — auto-build a same-game player-stat parlay\n"
+            "/parlay &lt;team or p#&gt; + &lt;team or p#&gt; [$amount] [max cents] — preview a same-sport parlay\n"
+            "/confirm — place the previewed bet; /cancel — drop it\n"
             "\n"
             "<b>Control</b>\n"
             "/pause /resume /kill\n"
@@ -1101,6 +1458,420 @@ class TradingTelegramBot:
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_games(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List upcoming games you can bet on, with Kalshi prices and the model's view."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            games = await self._load_games(update)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+            return
+        query = " ".join(context.args or []).strip().lower()
+        if query:
+            games = [g for g in games if query == str(g["league"]).lower() or query in str(g["game"]).lower()
+                     or any(query in str(o["label"]).lower() for o in g["options"])]
+        self._games = games
+        if not games:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "No bettable games found" + (f" for '{html.escape(query)}'." if query else " right now."),
+            )
+            return
+        title = f"<b>Games to bet on</b> ({len(games)}) \u2014 soonest first"
+        lines = _format_games_board(games, title)
+        lines.append("\nBet: /bet &lt;team&gt; [$amount], e.g. /bet browns 5 (or /bet 3 browns 5)")
+        await _send_html_chunks(update, "\n".join(lines))
+
+    async def _load_games(self, update: Update) -> list[dict[str, Any]]:
+        await update.message.reply_text("Checking games and prices\u2026")  # type: ignore[union-attr]
+        return await asyncio.to_thread(self._service.list_sports_games)
+
+    async def _cmd_bet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Preview a bet on the team you name; /confirm places it."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        parsed = _parse_bet_args(list(context.args or []))
+        if not parsed["query"]:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Which team? e.g. /bet cleveland 5 \u2014 or send /games first and use /bet 3 browns.",
+            )
+            return
+        try:
+            if not self._games:
+                self._games = await self._load_games(update)
+            rows = _find_bet_options(self._games, parsed["game_no"], parsed["query"])
+            if not rows:
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    f"No team matching '{parsed['query']}' on the board. Send /games to see what's available.",
+                )
+                return
+            if len(rows) > 1:
+                lines = [f"{len(rows)} matches for '{html.escape(parsed['query'])}'. Be specific, e.g. /bet {rows[0][0]} {html.escape(parsed['query'])}:"]
+                for number, game, option in rows[:8]:
+                    lines.append(
+                        f"{number}. <b>{html.escape(str(option['label']))}</b> \u2014 {html.escape(str(game['game']))}"
+                        f" ({html.escape(str(game['league']).upper())}, {html.escape(str(game.get('start_label', '')))})"
+                    )
+                await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
+                return
+            _, game, option = rows[0]
+            quote = await asyncio.to_thread(
+                self._service.quote_sports_bet, option["ticker"], option["side"], parsed["amount"],
+            )
+            if not quote.get("ok"):
+                await update.message.reply_text(f"Can't place that bet: {quote.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+                return
+            self._pending_bet = {
+                "ticker": option["ticker"], "side": option["side"], "stake": float(quote["stake"]),
+                "ask": float(quote["ask"]), "pick": quote["pick"], "game": quote["game"],
+                "label": f"single bet on {quote['pick']} in {quote['game']}, ${float(quote['stake']):.2f}",
+                "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            await update.message.reply_text(_format_bet_preview(quote), parse_mode="HTML")  # type: ignore[union-attr]
+            if parsed["now"]:
+                await self._cmd_confirm(update, context)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_props(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Search football player-stat markets, e.g. /props hurts or /props passing eagles."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        query = " ".join(context.args or []).strip()
+        if not query:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Name a player, team or stat, e.g. /props hurts  or  /props passing yards eagles.",
+            )
+            return
+        try:
+            await update.message.reply_text("Searching player markets\u2026")  # type: ignore[union-attr]
+            props = await asyncio.to_thread(self._service.list_sports_props, query)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+            return
+        self._props = props
+        if not props:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"No upcoming football player markets match '{html.escape(query)}'.",
+            )
+            return
+        lines = [f"<b>Player stats</b> ({len(props)}) \u2014 YES = the player hits it"]
+        lines.extend(_format_props_ladder(props[:_MAX_PROPS_SHOWN], start=1))
+        if len(props) > _MAX_PROPS_SHOWN:
+            lines.append(f"\u2026 +{len(props) - _MAX_PROPS_SHOWN} more: narrow the search")
+        lines.append("\nParlay: /parlay p1 + p9 3  \u2014 or by name: /parlay hurts 200 passing + barkley 80 rushing 3")
+        await _send_html_chunks(update, "\n".join(lines))
+
+    async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Plain-text messages: yes/no for a waiting bet, otherwise Claude picks the matching command."""
+        if not self._check_auth(update):
+            return
+        message = update.message
+        text = (message.text or "").strip() if message is not None else ""
+        if not text or self._service is None:
+            return
+        if not getattr(self.config, "natural_language", True):
+            await message.reply_text("Plain-text chat is off (TELEGRAM_NATURAL_LANGUAGE). Try /help.")
+            return
+        pending = self._pending_bet
+        waiting = pending is not None and time.monotonic() <= pending["expires"]
+        reply = _normalise_reply(text)
+        if waiting and reply in _YES_WORDS:
+            await self._cmd_confirm(update, context)
+            return
+        if waiting and reply in _NO_WORDS:
+            await self._cmd_cancel(update, context)
+            return
+        try:
+            route = await asyncio.to_thread(self._route_text, text, pending["label"] if waiting else None)
+        except RuntimeError as exc:
+            await message.reply_text(str(exc))
+            return
+        action = route["action"]
+        if action == "reply":
+            await message.reply_text(route["reply_text"] or "I'm not sure what you mean. Try /help.")
+            return
+        if action == "control":
+            await message.reply_text(
+                "I won't pause, resume or kill the bot from plain text. Send /pause, /resume or /kill yourself.",
+            )
+            return
+        if action == "confirm":
+            if waiting:
+                await message.reply_text("Placing it\u2026")
+                await self._confirm_pending(update, stake=route["amount"])
+            else:
+                await message.reply_text("There's nothing waiting to confirm. Tell me what you'd like to bet on.")
+            return
+        mapped = _route_to_command(route)
+        if mapped is None:
+            await message.reply_text(
+                route["reply_text"] or "I need a bit more detail, like the team or players and how much to bet.",
+            )
+            return
+        name, args = mapped
+        handler = self._text_commands().get(name)
+        if handler is None:
+            await message.reply_text("I'm not sure what you mean. Try /help.")
+            return
+        await handler(update, SimpleNamespace(args=args, bot=getattr(context, "bot", None)))
+
+    def _text_commands(self) -> dict[str, Any]:
+        return {
+            "status": self._cmd_status, "positions": self._cmd_positions, "risk": self._cmd_risk,
+            "history": self._cmd_history, "sports": self._cmd_kalshi_sports, "leads": self._cmd_leads,
+            "config": self._cmd_config, "help": self._cmd_help, "games": self._cmd_games,
+            "props": self._cmd_props, "bet": self._cmd_bet, "parlay": self._cmd_parlay,
+            "stack": self._cmd_stack, "cancel": self._cmd_cancel,
+        }
+
+    def _route_text(self, text: str, pending: str | None) -> dict[str, Any]:
+        cfg = self._service.config
+        return nl_router.route_message(
+            text, pending=pending, api_key=cfg.trading_agents.api_key,
+            model=getattr(self.config, "nl_model", "claude-haiku-4-5-20251001"), logger=self.logger,
+        )
+
+    async def _on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Read a bet-slip screenshot and preview the matching Kalshi parlay (caption: stake, max cents)."""
+        if not self._check_auth(update):
+            return
+        message = update.message
+        if self._service is None or message is None:
+            return
+        try:
+            if message.photo:
+                media_type, tg_file = "image/jpeg", await message.photo[-1].get_file()
+            else:
+                media_type = str(message.document.mime_type or "image/png")
+                tg_file = await message.document.get_file()
+            data = bytes(await tg_file.download_as_bytearray())
+            options = _parse_slip_caption(message.caption or "")
+            await message.reply_text("Reading your slip and checking Kalshi\u2026")
+            result = await asyncio.to_thread(self._service.read_sports_slip, data, media_type)
+            if not result.get("ok"):
+                await message.reply_text(f"Couldn't use that picture: {result.get('reason', 'unknown reason')}")
+                return
+            await _send_html_chunks(update, _format_slip_summary(result))
+            matched = result["matched"]
+            if len(matched) < 2:
+                await message.reply_text("Fewer than 2 legs matched, so there's no parlay to build.")
+                return
+            legs = [{"ticker": m["ticker"], "side": m["side"]} for m in matched]
+            complete = not result["unmatched"]
+            # With every leg matched, the slip's own price is one the user already accepted.
+            anchor = _slip_price((result.get("slip") or {}).get("odds")) if complete else None
+            plan = await asyncio.to_thread(
+                self._service.quote_sports_parlay, legs, options["amount"], options["max_price"], anchor,
+            )
+            if not plan.get("ok"):
+                await message.reply_text(f"Can't place that parlay: {plan.get('reason', 'unknown reason')}")
+                return
+            self._pending_bet = {
+                "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
+                "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            wants_bet = _caption_wants_bet(message.caption or "")
+            if wants_bet and complete:
+                # "bet $10 on this": the caption is the instruction, so no separate /confirm.
+                await message.reply_text(
+                    f"Placing ${float(plan['stake']):.2f} on this {len(legs)}-leg parlay "
+                    f"(paying up to {float(plan['max_price']) * 100:.0f}\u00a2 per $1).",
+                )
+                await self._confirm_pending(update)
+                return
+            note = ""
+            if result["unmatched"]:
+                note = (f"Heads up: this previews only the {len(matched)} matched legs, a shorter (and likelier) "
+                        "parlay than your slip.\n")
+                if wants_bet:
+                    note += "I didn't place it because not every leg is on Kalshi. Reply yes to bet this shorter one.\n"
+            await message.reply_text(note + _format_parlay_preview(plan), parse_mode="HTML")
+        except Exception as exc:
+            await message.reply_text(f"Error reading the picture: {exc}")
+
+    async def _cmd_stack(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Build a same-game stack of high-probability player legs, e.g. /stack eagles jaguars legs 9 p 85 2."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        parsed = _parse_stack_args(list(context.args or []))
+        if not parsed["query"]:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Name the game, e.g. /stack eagles jaguars legs 9 p 85 2  "
+                "(legs = how many, p = chance each leg should have on Kalshi in %, then your stake; "
+                "add max 20 for a price ceiling in cents).",
+            )
+            return
+        if not 0.05 <= parsed["leg_prob"] <= 0.97:
+            await update.message.reply_text("p should be between 5 and 97 (percent per leg).")  # type: ignore[union-attr]
+            return
+        try:
+            await update.message.reply_text("Building the stack\u2026")  # type: ignore[union-attr]
+            built = await asyncio.to_thread(
+                self._service.build_sports_stack, parsed["query"], parsed["legs"], parsed["leg_prob"],
+            )
+            if not built.get("ok"):
+                await update.message.reply_text(f"Can't build that stack: {built.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+                return
+            plan = await asyncio.to_thread(
+                self._service.quote_sports_parlay, built["legs"], parsed["amount"], parsed["max_price"],
+            )
+            if not plan.get("ok"):
+                await update.message.reply_text(f"Can't place that stack: {plan.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+                return
+            self._pending_bet = {
+                "kind": "parlay", "legs": built["legs"], "stake": float(plan["stake"]),
+                "max_price": float(plan["max_price"]), "label": _parlay_label(plan),
+                "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"Stack for {html.escape(str(built['game']))}: {len(built['legs'])} legs, each about "
+                f"{float(built['leg_prob']):.0%} on Kalshi.\n" + _format_parlay_preview(plan), parse_mode="HTML",
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_parlay(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Preview a parlay of teams from /games, e.g. /parlay browns + guardians 5 max 30."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        parsed = _parse_parlay_args(list(context.args or []))
+        if len(parsed["legs"]) < 2 or not all(l["query"] for l in parsed["legs"]):
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Name 2 or more legs from the same sport, separated by +: teams from /games or player "
+                "stats from /props (p1, p2...). e.g. /parlay browns + steelers 5  or  /parlay p1 + p2 3 max 8 "
+                "(max = price ceiling in cents).",
+            )
+            return
+        try:
+            if not self._games and not all(_PROP_REF_RE.match(l["query"]) for l in parsed["legs"]):
+                self._games = await self._load_games(update)
+            legs = []
+            for spec in parsed["legs"]:
+                ref = _PROP_REF_RE.match(spec["query"]) if spec["game_no"] is None else None
+                if ref:
+                    number = int(ref.group(1))
+                    if not 1 <= number <= len(self._props):
+                        await update.message.reply_text(  # type: ignore[union-attr]
+                            f"No player market p{number}. Search first with /props <player>.",
+                        )
+                        return
+                    legs.append({"ticker": self._props[number - 1]["ticker"], "side": self._props[number - 1].get("side", "yes")})
+                    continue
+                rows = _find_bet_options(self._games, spec["game_no"], spec["query"])
+                if not rows and spec["game_no"] is None:
+                    # Not a team on the board: try it as a football player stat ("hurts 200 passing").
+                    props = await asyncio.to_thread(self._service.list_sports_props, spec["query"])
+                    if len(props) == 1:
+                        legs.append({"ticker": props[0]["ticker"], "side": props[0].get("side", "yes")})
+                        continue
+                    if props:
+                        self._props = props
+                        lines = [f"{len(props)} player markets match '{html.escape(spec['query'])}'. "
+                                 "Pick one by number (p#) or add the stat and number:"]
+                        lines.extend(_format_props_ladder(props[:12], start=1))
+                        await _send_html_chunks(update, "\n".join(lines))
+                        return
+                if not rows:
+                    await update.message.reply_text(  # type: ignore[union-attr]
+                        f"No team or player market matching '{spec['query']}'. Send /games or /props to see what's available.",
+                    )
+                    return
+                if len(rows) > 1:
+                    lines = [f"{len(rows)} matches for '{html.escape(spec['query'])}'. Be specific, e.g. 3 {html.escape(spec['query'])}:"]
+                    for number, game, option in rows[:8]:
+                        lines.append(
+                            f"{number}. <b>{html.escape(str(option['label']))}</b> \u2014 {html.escape(str(game['game']))}"
+                        )
+                    await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
+                    return
+                legs.append({"ticker": rows[0][2]["ticker"], "side": rows[0][2]["side"]})
+            plan = await asyncio.to_thread(
+                self._service.quote_sports_parlay, legs, parsed["amount"], parsed["max_price"],
+            )
+            if not plan.get("ok"):
+                await update.message.reply_text(f"Can't build that parlay: {plan.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+                return
+            self._pending_bet = {
+                "kind": "parlay", "legs": legs, "stake": float(plan["stake"]), "max_price": float(plan["max_price"]),
+                "label": _parlay_label(plan), "expires": time.monotonic() + _BET_TTL_SECONDS,
+            }
+            await update.message.reply_text(_format_parlay_preview(plan), parse_mode="HTML")  # type: ignore[union-attr]
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._confirm_pending(update)
+
+    async def _confirm_pending(self, update: Update, stake: float | None = None) -> None:
+        """Place the previewed bet; ``stake`` (dollars) replaces the previewed stake when the user restates it."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        pending, self._pending_bet = self._pending_bet, None
+        if pending is None or time.monotonic() > pending["expires"]:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Nothing to confirm (previews expire after 10 minutes). Send /bet <team> again.",
+            )
+            return
+        if pending.get("kind") == "parlay":
+            await update.message.reply_text("Asking Kalshi market makers for a price (up to ~30 seconds)\u2026")  # type: ignore[union-attr]
+            try:
+                outcome = await asyncio.to_thread(
+                    self._service.place_sports_parlay, pending["legs"],
+                    pending["stake"] if stake is None else stake, pending["max_price"],
+                )
+            except Exception as exc:
+                await update.message.reply_text(f"Error placing the parlay: {exc}")  # type: ignore[union-attr]
+                return
+            await update.message.reply_text(_format_parlay_result(outcome), parse_mode="HTML")  # type: ignore[union-attr]
+            return
+        try:
+            outcome = await asyncio.to_thread(
+                self._service.place_sports_bet, pending["ticker"], pending["side"],
+                pending["stake"] if stake is None else stake, pending["ask"] + _PRICE_SLIP,
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"Error placing the bet: {exc}")  # type: ignore[union-attr]
+            return
+        if not outcome.get("ok"):
+            await update.message.reply_text(f"Not placed: {outcome.get('reason', 'unknown reason')}")  # type: ignore[union-attr]
+            return
+        filled = int(outcome.get("filled", outcome["quantity"]))
+        await update.message.reply_text(  # type: ignore[union-attr]
+            f"\u2705 {'Bet placed' if outcome.get('live') else 'Paper bet placed'}: {filled} contracts on "
+            f"<b>{html.escape(str(outcome['pick']))}</b> ({html.escape(str(outcome['game']))}) "
+            f"@ {float(outcome['ask']) * 100:.0f}\u00a2, ${float(outcome['spent']):.2f} in. "
+            "It settles automatically after the game.",
+            parse_mode="HTML",
+        )
+
+    async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._check_auth(update):
+            return
+        had = self._pending_bet is not None
+        self._pending_bet = None
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "Cancelled. Nothing was bought." if had else "Nothing pending.",
+        )
 
     async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._check_auth(update):
