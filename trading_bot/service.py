@@ -576,6 +576,17 @@ class TradingBotService:
             game["start_label"] = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M %p}"
         return games
 
+    @_locked
+    def list_sports_props(self, query: str) -> list[dict[str, Any]]:
+        """Football player-stat markets matching ``query`` (a player, team or stat); places nothing."""
+        if not self.config.kalshi_sports.enabled:
+            return []
+        props = self.kalshi_sports_strategy.refresh_props(datetime.now(self.config.timezone), query)
+        for prop in props:
+            local = datetime.fromisoformat(prop["start"]).astimezone(self.config.timezone)
+            prop["start_label"] = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M %p}"
+        return props
+
     def _sports_bet_blocker(self, state: PortfolioState) -> str | None:
         cfg = self.config.kalshi_sports
         if not cfg.enabled:
