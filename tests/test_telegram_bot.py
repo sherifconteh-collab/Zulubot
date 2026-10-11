@@ -606,6 +606,33 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bot._pending_bet)
         self.assertIn("no combo", update.message.reply_text.await_args.args[0])
 
+    async def test_props_lists_numbered_markets_and_parlay_uses_them(self):
+        self.service.list_sports_props = MagicMock(return_value=[
+            {"ticker": "KXNFLPASSYDS-X-A-250", "player": "Josh Allen", "stat": "250+ passing yards", "yes_ask": 0.4,
+             "game": "Bills at Ravens", "start_label": "Sun Oct 4 8:00 AM"}])
+        update = self._update()
+        await self.bot._cmd_props(update, SimpleNamespace(args=["allen"]))
+        self.service.list_sports_props.assert_called_once_with("allen")
+        text = "\n".join(c.args[0] for c in update.message.reply_text.await_args_list)
+        self.assertIn("p1. <b>Josh Allen</b> 250+ passing yards", text)
+        self.bot._games = []  # prop-only legs don't need the games board
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="p1 + p1 3 max 20".split()))
+        legs, amount, max_price = self.service.quote_sports_parlay.call_args.args
+        self.assertEqual(legs, [{"ticker": "KXNFLPASSYDS-X-A-250", "side": "yes"}] * 2)
+        self.assertEqual((amount, max_price), (3.0, 0.2))
+        self.service.list_sports_games.assert_not_called()
+
+    async def test_unknown_prop_number_and_empty_search(self):
+        self.service.list_sports_props = MagicMock(return_value=[])
+        update = self._update()
+        await self.bot._cmd_props(update, SimpleNamespace(args=[]))
+        self.service.list_sports_props.assert_not_called()
+        update = self._update()
+        await self.bot._cmd_parlay(update, SimpleNamespace(args="p4 + p5".split()))
+        self.assertIn("No player market p4", update.message.reply_text.await_args.args[0])
+        self.service.quote_sports_parlay.assert_not_called()
+
     def test_preview_and_result_wording(self):
         text = _format_parlay_preview(self.PLAN)
         self.assertIn("all must win", text)

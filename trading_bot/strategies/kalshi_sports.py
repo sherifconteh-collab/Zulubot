@@ -78,6 +78,21 @@ _MAX_OUTCOME_CHECKS = 25
 # Shrink small-sample records toward .500 (equivalent to 5 phantom wins + 5 losses).
 _RECORD_PRIOR_GAMES = 10.0
 _RESOLVED_STATUSES = {"settled", "finalized", "determined"}
+# Kalshi player-stat series for football (one market per player and threshold, e.g. "Hurts: 250+ passing yards").
+FOOTBALL_PROP_SERIES = (
+    "KXNFLPASSYDS", "KXNFLPASSTDS", "KXNFLRSHYDS", "KXNFLRECYDS", "KXNFLREC", "KXNFLTD",
+)
+
+
+def sport_of(league: str) -> str:
+    """'football/nfl' -> 'football': parlays may not mix sports."""
+    return str(league).split("/")[0].lower()
+
+
+def _ticker_player(ticker: str) -> str:
+    """Player token of a prop ticker (KXNFLPASSYDS-26OCT11MINNO-NOTSHOUGH6-375 -> NOTSHOUGH6)."""
+    parts = ticker.split("-")
+    return parts[2] if len(parts) >= 4 else ""
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +413,8 @@ class KalshiSportsStrategy:
         self.live_trading_enabled = live_trading_enabled
         # ticker -> every matched market from the last scan (for hand-picked bets).
         self.board: dict[str, dict[str, Any]] = {}
+        # ticker -> football player-stat markets from the last /props search.
+        self.props: dict[str, dict[str, Any]] = {}
         self._combo_collections: tuple[float, list[tuple[str, frozenset[str]]]] | None = None
         self._sleep = time.sleep
 
@@ -528,16 +545,18 @@ class KalshiSportsStrategy:
             self._series_fee[series] = multiplier
         return self._series_fee[series]
 
-    def _fetch_markets(self, series: str) -> list[dict[str, Any]]:
+    def _fetch_markets(self, series: str, pages: int = 3, pause: float = 0.0) -> list[dict[str, Any]]:
         markets: list[dict[str, Any]] = []
         cursor = None
-        for _ in range(3):
+        for _ in range(pages):
             page, cursor = self.kalshi.get_markets(
                 status="open", series_ticker=series, limit=200, cursor=cursor,
             )
             markets.extend(page)
             if not cursor:
                 break
+            if pause:
+                self._sleep(pause)  # long prop listings trip Kalshi's rate limit when fetched back to back
         return markets
 
     def _build_candidates(self, now: datetime, result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1177,6 +1196,46 @@ class KalshiSportsStrategy:
         quote.pop("market", None)
         return quote
 
+    def refresh_props(self, now: datetime, query: str) -> list[dict[str, Any]]:
+        """Football player-stat markets (YES side) for upcoming board games matching ``query``."""
+        if not self.board:
+            self.refresh_board(now)
+        games: dict[str, dict[str, Any]] = {}
+        for entry in self.board.values():
+            start = _parse_iso(entry["start"])
+            if sport_of(entry["league"]) != "football" or start is None or start <= now + timedelta(
+                    minutes=self.config.min_minutes_to_start):
+                continue
+            games[entry["event_ticker"].split("-", 1)[-1]] = entry
+        words = query.lower().split()
+        found: dict[str, dict[str, Any]] = {}
+        for series in FOOTBALL_PROP_SERIES:
+            try:
+                markets = self._fetch_markets(series, pages=10, pause=0.3)
+            except Exception as exc:
+                self.logger.warning("Prop fetch failed for %s: %s", series, exc)
+                continue
+            for market in markets:
+                game = games.get(str(market.get("event_ticker", "")).split("-", 1)[-1])
+                if game is None:
+                    continue
+                title = str(market.get("title") or market.get("yes_sub_title") or "")
+                if not all(w in f"{title} {game['game']}".lower() for w in words):
+                    continue
+                ask = _kalshi_price(market, "yes_ask")
+                if not 0.0 < ask < 1.0:
+                    continue
+                player, _, stat = title.partition(":")
+                ticker = str(market.get("ticker", ""))
+                found[ticker] = {
+                    "ticker": ticker, "event_ticker": str(market.get("event_ticker", "")),
+                    "league": game["league"], "game": game["game"], "start": game["start"],
+                    "player": player.strip(), "stat": stat.strip() or title, "title": title,
+                    "yes_ask": ask,
+                }
+        self.props = found
+        return sorted(found.values(), key=lambda p: (p["start"], p["game"], p["player"], p["title"]))
+
     # ------------------------------------------------------------------
     # Hand-built parlays (Telegram /parlay): Kalshi combo + request for quote
     # ------------------------------------------------------------------
@@ -1233,29 +1292,40 @@ class KalshiSportsStrategy:
         for leg in legs:
             ticker, side = leg["ticker"], str(leg["side"]).lower()
             entry = self.board.get(ticker)
-            if entry is None or side not in ("yes", "no"):
-                return {"ok": False, "reason": "A leg isn't on the board any more. Send /games to refresh."}
-            start = _parse_iso(entry["start"])
+            prop = self.props.get(ticker) if entry is None else None
+            if (entry is None and prop is None) or side not in ("yes", "no") or (prop is not None and side != "yes"):
+                return {"ok": False, "reason": "A leg isn't on the board any more. Send /games (or /props) to refresh."}
+            source = entry or prop
+            start = _parse_iso(source["start"])
             if start is None or start <= now:
-                return {"ok": False, "reason": f"{entry['game']} has already started."}
+                return {"ok": False, "reason": f"{source['game']} has already started."}
             try:
                 market = self.kalshi.get_market(ticker)
             except Exception as exc:
-                return {"ok": False, "reason": f"Couldn't read the Kalshi market for {entry['game']}: {exc}"}
+                return {"ok": False, "reason": f"Couldn't read the Kalshi market for {source['game']}: {exc}"}
             if str(market.get("status", "")).lower() not in ("open", "active"):
-                return {"ok": False, "reason": f"Kalshi has closed betting on {entry['game']}."}
-            if entry["event_ticker"] in held:
-                return {"ok": False, "reason": f"You already have a bet on {entry['game']}."}
-            p_yes = entry["p_yes"]
+                return {"ok": False, "reason": f"Kalshi has closed betting on {source['game']}."}
+            if source["event_ticker"] in held:
+                return {"ok": False, "reason": f"You already have a bet on {source['game']}."}
+            if prop is not None:
+                p, pick = None, f"{prop['player']} {prop['stat']}"
+            else:
+                p_yes = entry["p_yes"]
+                p = None if p_yes is None else (p_yes if side == "yes" else 1.0 - p_yes)
+                pick = entry["yes_team"] if side == "yes" else entry["no_team"]
             rows.append({
-                "market_ticker": ticker, "event_ticker": entry["event_ticker"], "side": side,
-                "game": entry["game"], "league": entry["league"], "start": entry["start"],
-                "pick": entry["yes_team"] if side == "yes" else entry["no_team"],
-                "p": None if p_yes is None else (p_yes if side == "yes" else 1.0 - p_yes),
-                "ask": _kalshi_price(market, f"{side}_ask"),
+                "market_ticker": ticker, "event_ticker": source["event_ticker"], "side": side,
+                "game": source["game"], "league": source["league"], "start": source["start"],
+                "sport": sport_of(source["league"]), "kind": "prop" if prop is not None else "game",
+                "pick": pick, "p": p, "ask": _kalshi_price(market, f"{side}_ask"),
             })
-        if len({r["event_ticker"] for r in rows}) != len(rows):
-            return {"ok": False, "reason": "Use one leg per game (two legs on the same game aren't independent)."}
+        sports = sorted({r["sport"] for r in rows})
+        if len(sports) > 1:
+            return {"ok": False, "reason": f"Parlays have to stay in one sport. You mixed {' and '.join(sports)}."}
+        if len({(r["event_ticker"], _ticker_player(r["market_ticker"])) for r in rows}) != len(rows):
+            return {"ok": False, "reason": (
+                "Each leg needs a different game or a different player (two legs on the same game "
+                "winner, or the same player's stat, aren't independent).")}
 
         fair = None
         if all(r["p"] is not None for r in rows):
@@ -1264,8 +1334,12 @@ class KalshiSportsStrategy:
                 fair *= r["p"]
         ceiling = max_price if max_price is not None else fair
         if ceiling is None:
+            implied = 1.0
+            for r in rows:
+                implied *= r["ask"] if r["ask"] > 0 else 1.0
             return {"ok": False, "reason": (
-                "The model has no view on one of those games, so there's no fair price. "
+                "The model has no view on every leg (player stats, or a game without a sportsbook line), so there "
+                f"is no fair price. Kalshi's own asking prices multiply to about {implied * 100:.0f}¢ for all legs. "
                 "Set your own ceiling, e.g. /parlay a + b 5 max 30 (cents).")}
         if not 0.0 < ceiling < 1.0:
             return {"ok": False, "reason": "The maximum price has to be between 0 and 100 cents."}

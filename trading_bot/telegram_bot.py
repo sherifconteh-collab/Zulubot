@@ -148,6 +148,8 @@ def _format_sports_picks(predictions: list[dict[str, Any]], limit: int = 10) -> 
 _BET_TTL_SECONDS = 600
 _PRICE_SLIP = 0.02  # /confirm refuses if the ask has risen more than this since the preview
 _MAX_GAMES_SHOWN = 40
+_MAX_PROPS_SHOWN = 25
+_PROP_REF_RE = re.compile(r"^p(\d+)$", re.IGNORECASE)
 _AMOUNT_RE = re.compile(r"^\$?(\d+(?:\.\d+)?)$")
 
 
@@ -263,7 +265,10 @@ def _format_parlay_preview(plan: dict[str, Any]) -> str:
         f"<b>Parlay preview</b> \u2014 LIVE money, {len(legs)} legs, all must win",
     ]
     for leg in legs:
-        p = f" ({float(leg['p']):.0%})" if leg.get("p") is not None else ""
+        if leg.get("p") is not None:
+            p = f" ({float(leg['p']):.0%})"
+        else:
+            p = f" (Kalshi {float(leg['ask']) * 100:.0f}\u00a2)" if leg.get("ask") else ""
         lines.append(f"\u2022 <b>{html.escape(str(leg['pick']))}</b>{p} \u2014 {html.escape(str(leg['game']))}")
     if fair is None:
         lines.append("No model view on at least one leg, so there's no fair price.")
@@ -354,6 +359,7 @@ class TradingTelegramBot:
         # Numbered list from the last /games, and the one bet awaiting /confirm.
         self._games: list[dict[str, Any]] = []
         self._pending_bet: dict[str, Any] | None = None
+        self._props: list[dict[str, Any]] = []
 
     @property
     def is_configured(self) -> bool:
@@ -887,6 +893,7 @@ class TradingTelegramBot:
             "games": self._cmd_games,
             "bet": self._cmd_bet,
             "parlay": self._cmd_parlay,
+            "props": self._cmd_props,
             "confirm": self._cmd_confirm,
             "cancel": self._cmd_cancel,
             "backtest": self._cmd_backtest,
@@ -929,7 +936,8 @@ class TradingTelegramBot:
             "<b>Your own sports bets</b>\n"
             "/games [league or team] — games you can bet on\n"
             "/bet &lt;team&gt; [$amount] — preview a bet (e.g. /bet cleveland 5)\n"
-            "/parlay &lt;team&gt; + &lt;team&gt; [$amount] [max cents] — preview a parlay (live Kalshi quotes)\n"
+            "/props &lt;player or team&gt; — football player-stat markets (NFL)\n"
+            "/parlay &lt;team or p#&gt; + &lt;team or p#&gt; [$amount] [max cents] — preview a same-sport parlay\n"
             "/confirm — place the previewed bet; /cancel — drop it\n"
             "\n"
             "<b>Control</b>\n"
@@ -1343,6 +1351,43 @@ class TradingTelegramBot:
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
+    async def _cmd_props(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Search football player-stat markets, e.g. /props hurts or /props passing eagles."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        query = " ".join(context.args or []).strip()
+        if not query:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                "Name a player, team or stat, e.g. /props hurts  or  /props passing yards eagles.",
+            )
+            return
+        try:
+            await update.message.reply_text("Searching player markets\u2026")  # type: ignore[union-attr]
+            props = await asyncio.to_thread(self._service.list_sports_props, query)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+            return
+        self._props = props
+        if not props:
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"No upcoming football player markets match '{html.escape(query)}'.",
+            )
+            return
+        lines = [f"<b>Player stats</b> ({len(props)}) \u2014 YES = the player hits it"]
+        for number, prop in enumerate(props[:_MAX_PROPS_SHOWN], start=1):
+            lines.append(
+                f"p{number}. <b>{html.escape(str(prop['player']))}</b> {html.escape(str(prop['stat']))}"
+                f" \u2014 {float(prop['yes_ask']) * 100:.0f}\u00a2 \u00b7 {html.escape(str(prop['game']))},"
+                f" {html.escape(str(prop.get('start_label', '')))}"
+            )
+        if len(props) > _MAX_PROPS_SHOWN:
+            lines.append(f"\u2026 +{len(props) - _MAX_PROPS_SHOWN} more: narrow the search")
+        lines.append("\nParlay them with other football legs: /parlay p1 + p3 + eagles 3 max 8")
+        await _send_html_chunks(update, "\n".join(lines))
+
     async def _cmd_parlay(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Preview a parlay of teams from /games, e.g. /parlay browns + guardians 5 max 30."""
         if not self._check_auth(update):
@@ -1353,15 +1398,26 @@ class TradingTelegramBot:
         parsed = _parse_parlay_args(list(context.args or []))
         if len(parsed["legs"]) < 2 or not all(l["query"] for l in parsed["legs"]):
             await update.message.reply_text(  # type: ignore[union-attr]
-                "Name 2 or more teams from different games, separated by +, e.g. "
-                "/parlay browns + guardians 5   (optional: max 30 for a 30\u00a2 price ceiling).",
+                "Name 2 or more legs from the same sport, separated by +: teams from /games or player "
+                "stats from /props (p1, p2...). e.g. /parlay browns + steelers 5  or  /parlay p1 + p2 3 max 8 "
+                "(max = price ceiling in cents).",
             )
             return
         try:
-            if not self._games:
+            if not self._games and not all(_PROP_REF_RE.match(l["query"]) for l in parsed["legs"]):
                 self._games = await self._load_games(update)
             legs = []
             for spec in parsed["legs"]:
+                ref = _PROP_REF_RE.match(spec["query"]) if spec["game_no"] is None else None
+                if ref:
+                    number = int(ref.group(1))
+                    if not 1 <= number <= len(self._props):
+                        await update.message.reply_text(  # type: ignore[union-attr]
+                            f"No player market p{number}. Search first with /props <player>.",
+                        )
+                        return
+                    legs.append({"ticker": self._props[number - 1]["ticker"], "side": "yes"})
+                    continue
                 rows = _find_bet_options(self._games, spec["game_no"], spec["query"])
                 if not rows:
                     await update.message.reply_text(  # type: ignore[union-attr]

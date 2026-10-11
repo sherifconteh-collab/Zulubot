@@ -1010,11 +1010,86 @@ class ParlayRfqTests(unittest.TestCase):
         same_game = [{"ticker": by_label["Baltimore Ravens"]["ticker"], "side": by_label["Baltimore Ravens"]["side"]},
                      {"ticker": by_label["Buffalo Bills"]["ticker"], "side": by_label["Buffalo Bills"]["side"]}]
         out = strat.quote_user_parlay(self._state(), broker, legs=same_game, amount=5, max_price=None, now=_NOW)
-        self.assertIn("one leg per game", out["reason"])
+        self.assertIn("different game or a different player", out["reason"])
         kalshi.get_multivariate_collections.return_value = [{"collection_ticker": "X-R", "associated_event_tickers": []}]
         strat._combo_collections = None
         out = strat.quote_user_parlay(self._state(), broker, legs=self._legs(strat), amount=5, max_price=None, now=_NOW)
         self.assertIn("doesn't offer a combo", out["reason"])
+
+    def test_mixed_sports_are_refused(self):
+        strat, _ = self._setup()
+        legs = self._legs(strat)
+        strat.board[legs[1]["ticker"]]["league"] = "baseball/mlb"
+        out = strat.quote_user_parlay(self._state(), PaperBroker(True, logging.getLogger("t")),
+                                      legs=legs, amount=5, max_price=None, now=_NOW)
+        self.assertFalse(out["ok"])
+        self.assertIn("one sport", out["reason"])
+        self.assertIn("baseball", out["reason"])
+        self.assertIn("football", out["reason"])
+
+    def _props(self, strat, kalshi, query="allen"):
+        prop = {
+            "ticker": "KXNFLPASSYDS-26OCT04BUFBAL-BUFJALLEN17-250", "event_ticker": "KXNFLPASSYDS-26OCT04BUFBAL",
+            "title": "Josh Allen: 250+ passing yards", "yes_sub_title": "Josh Allen: 250+", "status": "active",
+            "yes_ask_dollars": "0.40", "no_ask_dollars": "0.62",
+        }
+        other = dict(prop, ticker="KXNFLPASSYDS-26OCT04BUFBAL-BALLJACKSON8-200",
+                     title="Lamar Jackson: 200+ passing yards", yes_ask_dollars="0.55")
+        elsewhere = dict(prop, ticker="KXNFLPASSYDS-26OCT04XXXYYY-Z-1", event_ticker="KXNFLPASSYDS-26OCT04XXXYYY")
+        by_series = {"KXNFLPASSYDS": [prop, other, elsewhere]}
+        kalshi.get_markets.side_effect = lambda **kw: (by_series.get(kw["series_ticker"], []), None)
+        base = kalshi.get_market.side_effect
+        kalshi.get_market.side_effect = lambda t: prop if t == prop["ticker"] else (
+            other if t == other["ticker"] else base(t))
+        kalshi.get_multivariate_collections.return_value = [{
+            "collection_ticker": "KXMVESPORTS-R",
+            "associated_event_tickers": ["KXNFLGAME-26OCT04BUFBAL", "KXNFLGAME-26OCT04DENKC", "KXNFLPASSYDS-26OCT04BUFBAL"]}]
+        strat._combo_collections = None
+        return strat.refresh_props(_NOW, query), prop, other
+
+    def test_props_search_matches_player_and_upcoming_football_games_only(self):
+        strat, kalshi = self._setup()
+        props, prop, _ = self._props(strat, kalshi, "allen")
+        self.assertEqual([p["ticker"] for p in props], [prop["ticker"]])
+        self.assertEqual(props[0]["player"], "Josh Allen")
+        self.assertEqual(props[0]["stat"], "250+ passing yards")
+        self.assertAlmostEqual(props[0]["yes_ask"], 0.40)
+        both, _, _ = self._props(strat, kalshi, "passing yards")
+        self.assertEqual(len(both), 2)  # the market for a game not on the board is dropped
+
+    def test_prop_parlay_needs_a_ceiling_then_places(self):
+        strat, kalshi = self._setup()
+        props, prop, _ = self._props(strat, kalshi, "allen")
+        legs = [{"ticker": prop["ticker"], "side": "yes"}, self._legs(strat)[1]]  # Allen 250+ and Kansas City
+        broker = PaperBroker(True, logging.getLogger("t"))
+        plan = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=None, now=_NOW)
+        self.assertFalse(plan["ok"])
+        self.assertIn("no fair price", plan["reason"])
+        self.assertIn("Kalshi's own asking prices", plan["reason"])
+        plan = strat.quote_user_parlay(self._state(), broker, legs=legs, amount=10, max_price=0.25, now=_NOW)
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual([l["kind"] for l in plan["legs"]], ["prop", "game"])
+        self.assertIsNone(plan["fair"])
+        self.assertEqual(plan["legs"][0]["pick"], "Josh Allen 250+ passing yards")
+        state, out = self._place(strat, legs=legs, amount=10.0, max_price=0.25)
+        self.assertTrue(out["ok"], out)
+        sent = kalshi.create_combo_market.call_args.args[1]
+        self.assertEqual(sent[0]["event_ticker"], "KXNFLPASSYDS-26OCT04BUFBAL")
+
+    def test_same_player_twice_or_a_prop_with_baseball_is_refused(self):
+        strat, kalshi = self._setup()
+        props, prop, other = self._props(strat, kalshi, "passing yards")
+        broker = PaperBroker(True, logging.getLogger("t"))
+        twice = [{"ticker": prop["ticker"], "side": "yes"}, {"ticker": prop["ticker"].replace("-250", "-300"), "side": "yes"}]
+        strat.props[twice[1]["ticker"]] = dict(strat.props[prop["ticker"]], ticker=twice[1]["ticker"])
+        out = strat.quote_user_parlay(self._state(), broker, legs=twice, amount=5, max_price=0.3, now=_NOW)
+        self.assertIn("different player", out["reason"])
+        two_players = [{"ticker": prop["ticker"], "side": "yes"}, {"ticker": other["ticker"], "side": "yes"}]
+        self.assertTrue(strat.quote_user_parlay(self._state(), broker, legs=two_players, amount=5, max_price=0.3, now=_NOW)["ok"])
+        game_leg = self._legs(strat)[1]
+        strat.board[game_leg["ticker"]]["league"] = "baseball/mlb"
+        mixed = [{"ticker": prop["ticker"], "side": "yes"}, game_leg]
+        self.assertIn("one sport", strat.quote_user_parlay(self._state(), broker, legs=mixed, amount=5, max_price=0.3, now=_NOW)["reason"])
 
     def test_stake_limits(self):
         strat, _ = self._setup()
