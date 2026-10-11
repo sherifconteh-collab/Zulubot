@@ -365,6 +365,8 @@ OPTIONS_MAX_IV=1.50             # skip contracts with implied volatility above 1
 
 ## Picking your own sports bets in Telegram
 
+You don't need to remember the commands: type what you want in plain words ("what games are on today", "bet $5 on the browns", "parlay hurts 200 passing and barkley 80 rushing for 3 bucks", "how am I doing?") and Claude (`ANTHROPIC_API_KEY`, `TELEGRAM_NL_MODEL`, one small call per message, `TELEGRAM_NATURAL_LANGUAGE=false` to turn it off) picks the matching command. It runs exactly what the slash command would, so the same limits apply and bets are still only **previewed**; reply "yes" (or "do it", "confirm") to place the one that's waiting, or "no"/"cancel" to drop it. "Yes"/"no" are matched by simple rules without a model, and only while a preview is waiting (10 minutes). Plain text can never pause, resume or kill the bot; use `/pause`, `/resume` or `/kill` for that. The slash commands below still work.
+
 You can choose the games and let the bot place the orders:
 
 | Command | What it does |
