@@ -115,17 +115,21 @@ The repo ships a `Procfile` and `railway.toml` (nixpacks build, `python -m tradi
 
 Everything is configured through **environment variables**. [`.env.example`](.env.example) lists every setting with a short comment; copy it to `.env` locally, or set the same names in Railway.
 
-### Secrets (set these yourself, never commit them)
+### Which keys do you need?
 
-| Variable | Used for |
+Almost none. Start with nothing and add a key only when you want the feature it unlocks.
+
+| You want | Set |
 | --- | --- |
-| `KALSHI_KEY_ID`, `KALSHI_PRIVATE_KEY` | Kalshi trading and balance (RSA key, `\n` for newlines) |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telegram control and alerts |
-| `ANTHROPIC_API_KEY` | Plain-text chat, slip screenshots, optional AI analysis |
-| `FMP_API_KEY` | Stock fundamentals |
-| `COINBASE_API_KEY`, `COINBASE_API_SECRET` | Coinbase prices (and trading, if enabled) |
-| `POLYMARKET_*` | Polymarket (optional; the strategy is simulated only) |
-| `ROBINHOOD_USERNAME`, `ROBINHOOD_PASSWORD`, `ROBINHOOD_MFA_SECRET` | Options trading (optional) |
+| Try it in paper mode, nothing sent anywhere | Nothing |
+| Control it and get alerts on your phone | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| Real Kalshi bets and parlays | `KALSHI_KEY_ID`, `KALSHI_PRIVATE_KEY`, then `PAPER_MODE=false` |
+| Plain-English chat and bet-slip screenshots | `ANTHROPIC_API_KEY` (slash commands and pasted leg lists work without it) |
+| Crypto trading on Coinbase (rare) | `COINBASE_TRADING_ENABLED=true`, `COINBASE_API_KEY`, `COINBASE_API_SECRET`. Prices need no key. |
+| Options on Robinhood (rare) | `ROBINHOOD_USERNAME`, `ROBINHOOD_PASSWORD`, `ROBINHOOD_MFA_SECRET` |
+| Polymarket | `POLYMARKET_*`, optional; the strategy is simulated only |
+
+Set these yourself and never commit them. `FMP_API_KEY` from older versions is no longer used (stock data comes from yfinance); you can delete it. A value copied unchanged from `.env.example` (`your_..._here`) counts as not set.
 
 ### The settings you will actually touch
 

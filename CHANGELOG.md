@@ -8,6 +8,7 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 - Strategy table now says, per strategy, whether it is on by default and what happens with `PAPER_MODE=false`: sports, predictions, latency arbitrage, perpetuals and the BTC 5-minute Kalshi leg place real Kalshi orders; crypto and rotation run only with `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only with credentials; stocks, Polymarket and Markov are simulated only.
 - Corrected "all live trading happens on Kalshi" and the Coinbase data-only wording, and noted that Railway's Variables panel, not `railway.toml`, decides what is actually enabled.
 - Full Telegram command reference with a description for every command (added `/start`, `/ai`, `/config`, `/perps`, `/markov`, `/options`, `/backtest [range]`, `/resume force`, `/kill`).
+- Replaced the long secrets table with "Which keys do you need?": almost none, and each key is listed with the feature it unlocks. `FMP_API_KEY` is gone from the docs, `.env.example` and `railway.toml` (nothing reads it any more).
 - Documented the `/data` volume requirement and the Robinhood variables. No secrets or personal tokens in the README or `.env.example`.
 
 ### Never buy a market the Kalshi account already holds
