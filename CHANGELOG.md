@@ -7,6 +7,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 ### SECURITY.md repository settings match ai-grc-platform
 - The settings list now mirrors ai-grc-platform's: branch protection (reviews, stale-approval dismissal, Code Owners, required and up-to-date checks, signed commits, no bypass, restricted pushes, linear history, administrators included), the code-security features, the read-only Actions token and approval for first-time contributors. It notes two things to settle before enforcing it: one approving review while there is one maintainer, and a bypass for the weekly release bot.
 
+### `.env.example` lists the missing rotation, prediction and stock settings
+- Added `ROTATION_ENABLED`, `ROTATION_FEE_PCT`, `ROTATION_MIN_TRADE_USD`, `ROTATION_EXCLUDED_COINS`, `ROTATION_MAX_COINS_TO_TRACK`, `PREDICTION_TAKE_PROFIT`, `PREDICTION_STOP_LOSS_PCT`, `PREDICTION_MIN_TRADE_USD` and `STOCK_MIN_POSITIVE_FCF_SIGNAL`, with the code defaults. They were read by the bot but undocumented (recovered from an old unmerged branch).
+
 ### Kalshi is the source of truth, not the bot's own files
 - **Exposure comes from the account.** The sports exposure budget (and `open $` in `/sports`) now uses the larger of the bot's own records and what Kalshi says is at risk in sports markets (cost of open positions). Before, a redeploy without a persistent volume reset it to $0 and the budget could be spent again. Combo (parlay) positions are only known from the bot's records. If Kalshi can't be read, the bot's records apply and the held-market guard still stops all buying.
 - **No more alarm about volumes.** `/sports` and `doctor` now say plainly that without a persistent volume only the bot's own notes (today's counters, learned weights) reset on redeploy, and that your balance and holdings are read from Kalshi. The README marks the Railway Volume as optional.
