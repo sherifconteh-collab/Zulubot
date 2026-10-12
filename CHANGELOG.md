@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### `python -m trading_bot doctor`
+- New command that checks the setup without starting the bot or touching the network: mode (paper or live), Kalshi, Telegram, Anthropic and Coinbase keys, Railway storage, keys left over from older versions, and `.env.example` placeholder text still in place. It prints "set" or "missing", never a value, and exits non-zero only for real problems (half-configured Telegram, a malformed Kalshi key, Coinbase trading without keys, Railway without `BOT_STORAGE_DIR`).
+
 ### Never buy a market the Kalshi account already holds
 - **Duplicate bets fixed at the source.** `/sports` always showed `open $0.00` and the same market was bought again (the Golden Knights bet doubled): the bot was relying on its own records of what it holds, which can be missing or late (for example after a redeploy without a persistent volume). Before any live order the sports engine and the predictions strategy now ask Kalshi what the account actually holds (`GET /portfolio/positions`) and skip any game or market already held. Hand-picked bets and parlays respect it too.
 - **Fail safe.** If the account's positions can't be read in live mode, the bot places no new bets that cycle (`positions_unavailable` in `/sports`) rather than risking a duplicate.
