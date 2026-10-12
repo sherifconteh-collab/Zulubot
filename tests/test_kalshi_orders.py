@@ -163,6 +163,53 @@ def _cand(side="yes", ask=0.50):
             "game": game, "decision": decision, "posterior": post, "pick": "A", "depth": 0, "edge": 0.008}
 
 
+class SportsAccountGuardTests(unittest.TestCase):
+    """The account, not the bot's own records, decides whether a game already has a bet."""
+
+    def _strat(self, held):
+        kalshi = MagicMock()
+        if isinstance(held, Exception):
+            kalshi.get_held_tickers.side_effect = held
+        else:
+            kalshi.get_held_tickers.return_value = held
+        return _sports(kalshi), kalshi
+
+    def test_events_come_from_the_tickers_the_account_holds(self):
+        strat, _ = self._strat({"KXNHLGAME-26OCT11VGKMIN-VGK", "KXNFLPASSYDS-26OCT12DENLAC-DENJOHN4-100"})
+        self.assertEqual(strat._account_held_events(),
+                         {"KXNHLGAME-26OCT11VGKMIN", "KXNFLPASSYDS-26OCT12DENLAC-DENJOHN4"})
+
+    def test_unreadable_positions_are_none_and_paper_mode_asks_nobody(self):
+        strat, _ = self._strat(RuntimeError("down"))
+        self.assertIsNone(strat._account_held_events())
+        strat.live_trading_enabled = False
+        self.assertEqual(strat._account_held_events(), set())
+
+    def test_a_cycle_places_nothing_when_the_account_cannot_be_read(self):
+        strat, kalshi = self._strat(RuntimeError("down"))
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        result = {"decisions": [], "buys": [], "bankroll": {}, "predictions": []}
+        strat._execute_candidates(state, broker, [_cand()], _NOW, result)
+        kalshi.place_order.assert_not_called()
+        self.assertIn("positions_unavailable", [d["reason"] for d in result["decisions"]])
+
+    def test_a_game_the_account_already_holds_is_not_bet_again(self):
+        strat, kalshi = self._strat({"KXNFLGAME-26OCT04ABAB-A"})   # same event as the candidate, local state empty
+        kalshi.place_order.return_value = {"order": {"order_id": "o", "fill_count": 5}}
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        result = {"decisions": [], "buys": [], "bankroll": {}, "predictions": []}
+        strat._execute_candidates(state, broker, [_cand()], _NOW, result)
+        kalshi.place_order.assert_not_called()
+        self.assertEqual(result["buys"], [])
+        # ...and a different game is still bet
+        other = _cand()
+        other["market"] = {"ticker": "KXNFLGAME-26OCT04CDCD-C", "event_ticker": "KXNFLGAME-26OCT04CDCD"}
+        strat._execute_candidates(state, broker, [other], _NOW, result)
+        kalshi.place_order.assert_called_once()
+
+
 class SportsLiveBookingTests(unittest.TestCase):
     def _run(self, order_response=None, order_error=None, side="yes"):
         kalshi = MagicMock()

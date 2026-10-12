@@ -556,6 +556,29 @@ class KalshiClient:
         result = self._get("/portfolio/positions", auth=True)
         return result.get("market_positions", [])
 
+    def get_held_tickers(self) -> set[str]:
+        """Market tickers the account holds a non-zero position in right now (YES or NO), from Kalshi itself.
+
+        The bot's own records can be wrong or lost (a redeploy without a persistent volume, an order whose
+        fill was reported late), so anything that must not buy the same market twice asks the account.
+        """
+        held: set[str] = set()
+        for pos in self.get_positions():
+            ticker = str(pos.get("ticker") or "")
+            raw = pos.get("position_fp", pos.get("position"))
+            try:
+                count = float(raw) if raw not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                count = 0.0
+            if ticker and abs(count) > 1e-9:
+                held.add(ticker)
+        return held
+
+    @staticmethod
+    def event_of(ticker: str) -> str:
+        """The event a market belongs to: ``KXNHLGAME-26OCT11VGKMIN-VGK`` -> ``KXNHLGAME-26OCT11VGKMIN``."""
+        return ticker.rsplit("-", 1)[0] if "-" in ticker else ticker
+
     def get_balance(self) -> float:
         """Get account balance in dollars."""
         if not self.can_trade:

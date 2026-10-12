@@ -61,6 +61,7 @@ class FakeKalshiClient:
         self._markets = markets or []
         self.can_trade = can_trade
         self.orders: list[dict[str, Any]] = []
+        self.held: set[str] | Exception = set()   # what the account really holds
 
     def get_markets(self, **kwargs: Any) -> tuple[list[dict[str, Any]], None]:
         return self._markets, None
@@ -74,6 +75,11 @@ class FakeKalshiClient:
     def place_order(self, **kwargs: Any) -> dict[str, Any]:
         self.orders.append(kwargs)
         return {"order": kwargs}
+
+    def get_held_tickers(self) -> set[str]:
+        if isinstance(self.held, Exception):
+            raise self.held
+        return set(self.held)
 
 
 class CoinbasePredictionStrategyTests(unittest.TestCase):
@@ -353,6 +359,34 @@ class CoinbasePredictionStrategyTests(unittest.TestCase):
             strategy._evaluate_signal(market, mid=0.29, fear_greed_value=20),
             ("yes", 0.30),
         )
+
+    def _live_run(self, kalshi: "FakeKalshiClient"):
+        strategy = CoinbasePredictionStrategy(
+            config=self.config, kalshi_client=kalshi, logger=self.logger, live_trading_enabled=True,  # type: ignore[arg-type]
+        )
+        state = PortfolioState(
+            cash=0.0, cash_reserves={"kalshi": 50.0}, daily_baseline_equity=50.0,
+            daily_baseline_date=self.now.date().isoformat(), peak_equity=50.0,
+        )
+        result = strategy.run(state, broker=self.paper_broker, risk_manager=self.risk_manager, now=self.now)
+        return result, kalshi
+
+    def test_never_buys_a_market_the_account_already_holds(self) -> None:
+        market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=10_000.0)
+        kalshi = FakeKalshiClient([market], can_trade=True)
+        kalshi.held = {market["ticker"]}            # Kalshi shows a position (the bot's own records may have been lost)
+        result, kalshi = self._live_run(kalshi)
+        self.assertEqual(result["buys"], [])
+        self.assertEqual(kalshi.orders, [])
+
+    def test_buys_nothing_when_the_accounts_positions_cannot_be_read(self) -> None:
+        market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=10_000.0)
+        kalshi = FakeKalshiClient([market], can_trade=True)
+        kalshi.held = RuntimeError("positions endpoint down")
+        result, kalshi = self._live_run(kalshi)
+        self.assertEqual(result["buys"], [])
+        self.assertEqual(kalshi.orders, [])
+        self.assertIn("positions_unavailable", [d["reason"] for d in result["decisions"]])
 
     def test_live_trading_uses_kalshi_cash_bucket(self) -> None:
         market = _make_market(yes_ask=0.20, yes_bid=0.18, volume=10_000.0)

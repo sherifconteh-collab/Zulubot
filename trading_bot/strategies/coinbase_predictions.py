@@ -541,6 +541,21 @@ class CoinbasePredictionStrategy:
         }
         events_entered: set[str] = set()
 
+        # Ask the account what it really holds (live): local records can be lost or late, and buying a
+        # market again is a second real bet. If it can't be read, place nothing this cycle.
+        account_tickers: set[str] = set()
+        if self.live_trading_enabled:
+            try:
+                account_tickers = set(self.kalshi.get_held_tickers())
+            except Exception as exc:
+                self.logger.warning("Could not read the account's positions; no new prediction bets: %s", exc)
+                result["decisions"].append({
+                    "strategy": "coinbase_predictions", "symbol": "*", "action": "skip_buy",
+                    "reason": "positions_unavailable", "signals": {},
+                })
+                slots_available = 0
+        account_events = {t.rsplit("-", 1)[0] for t in account_tickers if "-" in t}
+
         for market in markets:
             if slots_available <= 0:
                 break
@@ -558,6 +573,8 @@ class CoinbasePredictionStrategy:
             event = market.get("event_ticker") or ticker
             if event in held_events or event in events_entered:
                 continue
+            if ticker in account_tickers or event in account_events:
+                continue  # the account already holds this market (or its event)
             if best_by_event.get(event) not in (None, ticker):
                 # A sibling outcome in the same event has a better edge.
                 continue
