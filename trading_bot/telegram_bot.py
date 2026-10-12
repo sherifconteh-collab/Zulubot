@@ -436,6 +436,16 @@ def _storage_line(service: Any) -> str:
     )
 
 
+def _action_picks_line(info: Any) -> str:
+    """Whether the small "best value" bets are on, and how many of today's allowance are used."""
+    if not isinstance(info, dict) or not info:
+        return ""
+    if not info.get("enabled"):
+        return "Action picks: OFF (KALSHI_SPORTS_ACTION_BETS=false). Only bets with an edge after fees are placed."
+    return (f"Action picks: on, {int(info.get('today', 0))} of {int(info.get('per_day', 0))} used today "
+            f"(at most {int(info.get('per_scan', 0))} per scan).")
+
+
 def _sports_mode_line(service: Any, module: dict[str, Any]) -> str:
     """Say plainly whether orders go to Kalshi: PAPER_MODE=false is not enough without credentials."""
     live = bool(module.get("can_trade_live"))
@@ -1523,6 +1533,9 @@ class TradingTelegramBot:
             lines.append(_sports_mode_line(self._service, module))
             lines.append(_build_line())
             lines.append(_storage_line(self._service))
+            picks_line = _action_picks_line(module.get("action_picks"))
+            if picks_line:
+                lines.append(picks_line)
             bank = module.get("bankroll") or {}
             shards = bank.get("shards") or []
             if len(shards) > 1:
