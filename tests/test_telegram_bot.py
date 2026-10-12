@@ -9,6 +9,7 @@ from trading_bot.telegram_bot import (
     TradingTelegramBot,
     _format_auto_parlays,
     _build_line,
+    _storage_line,
     _skip_examples,
     _skip_reason_summary,
     _sports_mode_line,
@@ -942,6 +943,21 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_build_line(), "Build: 00be3ee \u2014 Place live orders through V2 &lt;fix&gt;")
         with patch.dict(os.environ, {"RAILWAY_GIT_COMMIT_SHA": ""}):
             self.assertIn("unknown", _build_line())
+
+    def test_storage_line_says_whether_state_survives_a_redeploy(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        service = SimpleNamespace(config=SimpleNamespace(state_path=Path("/data/data/state.json")))
+        with patch("trading_bot.telegram_bot.os.path.ismount", side_effect=lambda p: str(p) == "/data"):
+            line = _storage_line(service)
+        self.assertIn("mounted volume /data", line)
+        self.assertIn("survives redeploys", line)
+        with patch("trading_bot.telegram_bot.os.path.ismount", return_value=False):
+            line = _storage_line(service)
+        self.assertIn("NOT on a mounted volume", line)
+        self.assertIn("BOT_STORAGE_DIR=/data", line)
+        self.assertEqual(_storage_line(SimpleNamespace(config=SimpleNamespace(state_path=None))), "Storage: unknown.")
 
     def test_preview_and_result_wording(self):
         text = _format_parlay_preview(self.PLAN)
