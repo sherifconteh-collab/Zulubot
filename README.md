@@ -74,7 +74,7 @@ You need Python 3.12.
 ```bash
 git clone https://github.com/sherifconteh-collab/Zulubot.git
 cd Zulubot
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env        # then edit .env (it is git-ignored)
@@ -83,13 +83,16 @@ python -m trading_bot kalshi_sports # run the sports strategy once (paper)
 python -m trading_bot run-daemon    # start the scheduler
 ```
 
+You do not need any API key to try it: with an empty `.env` the bot runs in paper mode on public data (`status` prints the portfolio; some price lookups may log warnings if a data source is unreachable). Add keys only for the features you want (Telegram, Kalshi, Anthropic: see [Configuration](#configuration)). The optional integrations have their own requirements files (`requirements-freqtrade.txt`, `requirements-polymarket.txt`, `requirements-tradingagents.txt`); install one only if you use that feature.
+
 `PAPER_MODE=true` is the default: nothing is sent to a broker. Other one-shot commands: `stocks`, `crypto`, `rotation`, `predictions`, `polymarket`, `latency_arb`, `btc5min`, `markov` and `all`. `run-daemon --once` runs a single scheduler cycle and exits.
 
 ### Connecting Telegram
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token into `TELEGRAM_BOT_TOKEN`.
-2. Send your bot a message, find your chat ID, and set `TELEGRAM_CHAT_ID`. **The bot only answers this one chat.**
-3. For plain-text chat and screenshot reading, also set `ANTHROPIC_API_KEY`.
+2. Send your new bot any message, then open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser (keep that URL private, it contains your token) and copy the number at `"chat":{"id":...}`. Set it as `TELEGRAM_CHAT_ID`. **The bot only answers this one chat.**
+3. For plain-text chat and screenshot reading, also set `ANTHROPIC_API_KEY`. Pasted leg lists and all slash commands work without it.
+4. Start with `python -m trading_bot run-daemon` and send `/help` to the bot.
 
 ### Going live on Kalshi
 
