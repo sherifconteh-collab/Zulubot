@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Storage check in `/sports`; Kalshi market probe is now a proper script
+- `/sports` prints a `Storage:` line saying where the state file lives and whether that is a mounted volume. On Railway with no Volume attached the bot forgets its bets and daily counters at every redeploy (which is how a bet can be placed twice), and now says so plainly with the fix.
+- The root `test_predictions.py` (a manual script, not a test) is now `scripts/probe_kalshi_markets.py`: read-only, public data only, with `--series`, `--buy-yes`, `--buy-no` and `--min-volume` options.
+- SECURITY.md: repository settings are owned by the maintainers' OpenClaw agent once the repository is public.
+
 ### Never buy a market the Kalshi account already holds
 - **Duplicate bets fixed at the source.** `/sports` always showed `open $0.00` and the same market was bought again (the Golden Knights bet doubled): the bot was relying on its own records of what it holds, which can be missing or late (for example after a redeploy without a persistent volume). Before any live order the sports engine and the predictions strategy now ask Kalshi what the account actually holds (`GET /portfolio/positions`) and skip any game or market already held. Hand-picked bets and parlays respect it too.
 - **Fail safe.** If the account's positions can't be read in live mode, the bot places no new bets that cycle (`positions_unavailable` in `/sports`) rather than risking a duplicate.
