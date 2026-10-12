@@ -544,6 +544,37 @@ class KalshiSportsStrategy:
             self.logger.warning("Could not read the account's positions: %s", exc)
             return None
 
+    def _sports_series(self) -> set[str]:
+        """Kalshi series this strategy trades (game winners, football props, configured extras)."""
+        series: set[str] = set(FOOTBALL_PROP_SERIES)
+        for spec in LEAGUES.values():
+            series.update(spec.kalshi_series)
+        for entry in self.config.series_overrides:
+            if "=" in entry:
+                series.add(entry.split("=", 1)[1].strip().upper())
+        return series
+
+    def _account_sports_exposure(self) -> float:
+        """Dollars the account has at risk in sports markets right now, from Kalshi (live only).
+
+        The bot's own position records vanish on a redeploy without a persistent volume, which would
+        reset the exposure budget to zero; the account itself is the source of truth. Combo (parlay)
+        positions have their own tickers and are only known from the bot's records. Best effort: if
+        Kalshi can't be read this returns 0 and the bot's own records apply (the held-market guard
+        still fails safe on its own).
+        """
+        if not self.live_trading_enabled:
+            return 0.0
+        reader = getattr(self.kalshi, "get_exposure_by_ticker", None)
+        if reader is None:
+            return 0.0
+        try:
+            series = self._sports_series()
+            return sum(cost for ticker, cost in reader().items() if ticker.split("-", 1)[0].upper() in series)
+        except Exception as exc:
+            self.logger.warning("Could not read the account's exposure: %s", exc)
+            return 0.0
+
     def _shard_balances(self) -> list[dict[str, Any]]:
         """Kalshi balance per exchange shard, for /sports (best effort)."""
         try:
@@ -935,7 +966,7 @@ class KalshiSportsStrategy:
             "per_scan": cfg.action_max_per_scan,
         }
         open_positions = self._open_positions(state)
-        exposure = sum(p.quantity * p.entry_price for p in open_positions)
+        exposure = max(sum(p.quantity * p.entry_price for p in open_positions), self._account_sports_exposure())
         exposure_cap = equity * cfg.capital_allocation_pct
         held_events = self._held_events(open_positions)
         result["bankroll"] = {

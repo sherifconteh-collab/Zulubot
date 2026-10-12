@@ -210,6 +210,48 @@ class SportsAccountGuardTests(unittest.TestCase):
         kalshi.place_order.assert_called_once()
 
 
+class AccountExposureTests(unittest.TestCase):
+    """How much is at risk comes from the account, so a redeploy cannot reset the exposure budget."""
+
+    def test_client_sums_cost_of_open_positions_only(self):
+        c = KalshiClient(logger=logging.getLogger("t"))
+        c.get_positions = MagicMock(return_value=[
+            {"ticker": "KXNHLGAME-26OCT11VGKMIN-VGK", "position_fp": "4.00", "market_exposure_dollars": "3.9800"},
+            {"ticker": "KXGDP-26-T3.5", "position_fp": "-13.00", "market_exposure_dollars": "1.7300"},
+            {"ticker": "KXOLD-1-A", "position_fp": "0.00", "market_exposure_dollars": "0.0000"},
+            {"ticker": "KXBAD-1-A", "position_fp": "x", "market_exposure_dollars": "1.0"},
+        ])
+        self.assertEqual(c.get_exposure_by_ticker(), {"KXNHLGAME-26OCT11VGKMIN-VGK": 3.98, "KXGDP-26-T3.5": 1.73})
+
+    def test_only_sports_series_count_toward_the_sports_budget(self):
+        kalshi = MagicMock()
+        kalshi.get_exposure_by_ticker.return_value = {
+            "KXNHLGAME-26OCT11VGKMIN-VGK": 3.98, "KXUCLGAME-26OCT14LENSCP-LEN": 1.88,
+            "KXNFLPASSYDS-26OCT12DENLAC-DENJOHN4-100": 2.0, "KXGDP-26-T3.5": 1.73, "KXINFL-26-T3.3": 3.2}
+        self.assertAlmostEqual(_sports(kalshi)._account_sports_exposure(), 7.86)
+
+    def test_unreadable_account_falls_back_to_zero_and_paper_asks_nobody(self):
+        kalshi = MagicMock()
+        kalshi.get_exposure_by_ticker.side_effect = RuntimeError("down")
+        strat = _sports(kalshi)
+        self.assertEqual(strat._account_sports_exposure(), 0.0)
+        strat.live_trading_enabled = False
+        kalshi.get_exposure_by_ticker.side_effect = None
+        kalshi.get_exposure_by_ticker.return_value = {"KXNHLGAME-26OCT11VGKMIN-VGK": 3.98}
+        self.assertEqual(strat._account_sports_exposure(), 0.0)
+
+    def test_bankroll_shows_what_the_account_holds_when_local_records_are_empty(self):
+        kalshi = MagicMock()
+        kalshi.get_held_tickers.return_value = set()
+        kalshi.get_exposure_by_ticker.return_value = {"KXNHLGAME-26OCT11VGKMIN-VGK": 15.0}
+        strat = _sports(kalshi)
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        result = {"decisions": [], "buys": [], "bankroll": {}, "predictions": []}
+        strat._execute_candidates(state, broker, [], _NOW, result)
+        self.assertAlmostEqual(result["bankroll"]["open_exposure"], 15.0)
+
+
 class SportsLiveBookingTests(unittest.TestCase):
     def _run(self, order_response=None, order_error=None, side="yes"):
         kalshi = MagicMock()

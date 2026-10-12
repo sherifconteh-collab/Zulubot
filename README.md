@@ -108,7 +108,7 @@ Create an API key in Kalshi, set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY`, then 
 The repo ships a `Procfile` and `railway.toml` (nixpacks build, `python -m trading_bot run-daemon`).
 
 1. Create a Railway project from your fork of this repo.
-2. Attach a **Volume** mounted at `/data` and set `BOT_STORAGE_DIR=/data` so state and logs survive deploys (`Service → Volumes → Add`). Without it the bot forgets its positions and daily counters on every redeploy.
+2. Optional but recommended: attach a **Volume** mounted at `/data` and set `BOT_STORAGE_DIR=/data` so the bot's own notes survive deploys. Without it, today's counters (action picks, parlays tried) and the learned model weights reset on every redeploy. **Kalshi is the source of truth**: your balance, what you hold and how much is at risk are read from your account every cycle, so a redeploy never makes the bot forget a position or buy a game twice.
 3. Add your secrets in the **Variables** panel (see below). They are intentionally not in `railway.toml`.
 4. Deploy. The bot starts in paper mode.
 
