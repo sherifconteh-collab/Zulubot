@@ -17,11 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             "stocks", "crypto", "polymarket", "rotation", "predictions",
             "latency_arb", "kalshi_sports", "btc5min", "markov", "all", "status",
-            "run-daemon", "backtest", "hyperopt", "download-data", "btc-terminal",
+            "run-daemon", "backtest", "hyperopt", "download-data", "btc-terminal", "doctor",
         ],
         help=(
             "Which bot module to run. 'run-daemon' for autonomous operation. "
-            "'backtest'/'hyperopt' for Freqtrade analysis."
+            "'backtest'/'hyperopt' for Freqtrade analysis. 'doctor' checks which settings are present."
         ),
     )
     parser.add_argument(
@@ -70,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "doctor":
+        # Before AppConfig/service: it must work with an empty environment and never touch the network.
+        import os
+        from trading_bot.doctor import run as run_doctor
+        return run_doctor(os.environ)
 
     config = AppConfig.load()
     logger = setup_logging(config.log_dir, config.log_level)
