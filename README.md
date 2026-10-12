@@ -78,10 +78,13 @@ python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\ac
 pip install -r requirements.txt
 
 cp .env.example .env        # then edit .env (it is git-ignored)
+python -m trading_bot doctor        # which settings are present and what each unlocks
 python -m trading_bot status        # print portfolio and risk status
 python -m trading_bot kalshi_sports # run the sports strategy once (paper)
 python -m trading_bot run-daemon    # start the scheduler
 ```
+
+`doctor` prints which keys are set and what each one unlocks (it never prints a secret value). Run it whenever something does not seem to work, for example if `PAPER_MODE=false` but orders stay on paper.
 
 You do not need any API key to try it: with an empty `.env` the bot runs in paper mode on public data (`status` prints the portfolio; some price lookups may log warnings if a data source is unreachable). Add keys only for the features you want (Telegram, Kalshi, Anthropic: see [Configuration](#configuration)). The optional integrations have their own requirements files (`requirements-freqtrade.txt`, `requirements-polymarket.txt`, `requirements-tradingagents.txt`); install one only if you use that feature.
 
