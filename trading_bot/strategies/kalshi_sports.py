@@ -928,6 +928,12 @@ class KalshiSportsStrategy:
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
         day = self.session.update(now.date().isoformat(), equity)
         scale = drawdown_scale(day["drawdown"], cfg.drawdown_throttle)
+        result["action_picks"] = {
+            "enabled": bool(cfg.action_bets),
+            "today": self.session.actions,
+            "per_day": cfg.action_bets_per_day,
+            "per_scan": cfg.action_max_per_scan,
+        }
         open_positions = self._open_positions(state)
         exposure = sum(p.quantity * p.entry_price for p in open_positions)
         exposure_cap = equity * cfg.capital_allocation_pct
@@ -1020,6 +1026,7 @@ class KalshiSportsStrategy:
                 equity=equity, scale=scale, bucket=bucket, exposure=exposure, exposure_cap=exposure_cap,
                 held_events=held_events, open_positions=open_positions,
             )
+            result["action_picks"]["today"] = self.session.actions
 
     def _place_action_picks(
         self,
@@ -1047,6 +1054,9 @@ class KalshiSportsStrategy:
         cfg = self.config
         allowance = min(cfg.action_max_per_scan, max(0, cfg.action_bets_per_day - self.session.actions))
         if allowance <= 0 or not picks:
+            if picks:
+                self._log_skip(result, "action_picks", "action_picks_used_up_today",
+                               placed=self.session.actions, per_day=cfg.action_bets_per_day)
             return
         placed = 0
         ranked = sorted(picks, key=lambda c: c["edge"], reverse=True)
@@ -1060,6 +1070,7 @@ class KalshiSportsStrategy:
             market = cand["market"]
             event_ticker = str(market.get("event_ticker", ""))
             if event_ticker and event_ticker in held_events:
+                self._log_skip(result, str(market.get("ticker", "")), "already_bet_on_game")
                 continue
             decision = cand["decision"]
             is_dog = decision.p < 0.5

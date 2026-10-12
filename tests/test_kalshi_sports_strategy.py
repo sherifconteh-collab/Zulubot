@@ -708,6 +708,26 @@ class ActionPickTests(unittest.TestCase):
         self.assertTrue(result["predictions"][0]["action"])
         self.assertLess(result["predictions"][0]["net_edge"], 0)         # honest: no edge after fees
 
+    def test_result_reports_action_pick_status(self):
+        games, markets = _fav_and_dog_games(1)
+        strat, _ = _strategy(_config(action_bets=True, action_bets_per_day=5, action_max_per_scan=2), games, markets)
+        _, _, result = _run(strat)
+        self.assertEqual(result["action_picks"], {"enabled": True, "today": 1, "per_day": 5, "per_scan": 2})
+        off, _ = _strategy(_config(action_bets=False), games, markets)
+        _, _, result = _run(off)
+        self.assertFalse(result["action_picks"]["enabled"])
+
+    def test_says_so_when_the_days_picks_are_used_up(self):
+        games, markets = _fav_and_dog_games(3)
+        strat, _ = _strategy(_config(action_bets=True, action_bets_per_day=1, action_max_per_scan=2,
+                                     capital_allocation_pct=1.0), games, markets)
+        state = PortfolioState(cash=10_000.0)
+        _run(strat, state)
+        _, _, second = _run(strat, state)
+        reasons = [d["reason"] for d in second["decisions"]]
+        self.assertIn("action_picks_used_up_today", reasons)
+        self.assertEqual(second["buys"], [])
+
     def test_off_switch_restores_value_bets_only(self):
         games, markets = _fav_and_dog_games(1)
         strat, _ = _strategy(_config(action_bets=False), games, markets)
