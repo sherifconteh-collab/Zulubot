@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Kalshi is the source of truth, not the bot's own files
+- **Exposure comes from the account.** The sports exposure budget (and `open $` in `/sports`) now uses the larger of the bot's own records and what Kalshi says is at risk in sports markets (cost of open positions). Before, a redeploy without a persistent volume reset it to $0 and the budget could be spent again. Combo (parlay) positions are only known from the bot's records. If Kalshi can't be read, the bot's records apply and the held-market guard still stops all buying.
+- **No more alarm about volumes.** `/sports` and `doctor` now say plainly that without a persistent volume only the bot's own notes (today's counters, learned weights) reset on redeploy, and that your balance and holdings are read from Kalshi. The README marks the Railway Volume as optional.
+- Still local: today's action-pick and parlay counters, parlay quote tries, and the learned source weights.
+
 ### `python -m trading_bot doctor`
 - New command that checks the setup without starting the bot or touching the network: mode (paper or live), Kalshi, Telegram, Anthropic and Coinbase keys, Railway storage, keys left over from older versions, and `.env.example` placeholder text still in place. It prints "set" or "missing", never a value, and exits non-zero only for real problems (half-configured Telegram, a malformed Kalshi key, Coinbase trading without keys, Railway without `BOT_STORAGE_DIR`).
 
