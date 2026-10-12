@@ -58,7 +58,7 @@ Only the latest commit on `main` receives security fixes.
 
 ## Repository settings (maintainers)
 
-These live in GitHub settings, not in files. Recommended for `main`:
+These live in GitHub settings, not in files. Once the repository is public, the maintainers' OpenClaw agent owns them and keeps `main` at this target state:
 
 - **Branch protection / ruleset:** require a pull request, require review from Code Owners, require the status checks (`test`, `secrets`, and the `security.yml` jobs), dismiss stale approvals on new commits, block force pushes and deletion, apply to administrators.
 - **Signed commits** required (a plain signature check; set up GPG or SSH signing).
