@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Storage check in `/sports`; Kalshi market probe is now a proper script
+- `/sports` prints a `Storage:` line saying where the state file lives and whether that is a mounted volume. On Railway with no Volume attached the bot forgets its bets and daily counters at every redeploy (which is how a bet can be placed twice), and now says so plainly with the fix.
+- The root `test_predictions.py` (a manual script, not a test) is now `scripts/probe_kalshi_markets.py`: read-only, public data only, with `--series`, `--buy-yes`, `--buy-no` and `--min-volume` options.
+- SECURITY.md: repository settings are owned by the maintainers' OpenClaw agent once the repository is public.
+
 ### Orders on markets Kalshi routes to an unfunded shard
 - **Kalshi holds funds per exchange shard and routes each order to the shard its market lives on.** Some sports markets answered `404 insufficient_shard_balance (Exchange user not found)` or `400 insufficient_balance` even though the account total was enough. The bot now treats those as a property of the market series: it skips that series for 6 hours (instead of retrying every game) and keeps placing orders on markets that do work. Hand-picked bets are never skipped silently.
 - `/sports` shows `Kalshi balance by shard: #0 $X, #1 $Y` (from Kalshi's balance breakdown) so you can see where the money is, and order errors are no longer cut off (full Kalshi message, with the market ticker).

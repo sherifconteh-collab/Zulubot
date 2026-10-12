@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -418,6 +419,21 @@ def _build_line() -> str:
     if message and message[0]:
         text += f" \u2014 {html.escape(_clip_text(message[0], 80))}"
     return text
+
+
+def _storage_line(service: Any) -> str:
+    """Say where state is kept and whether that is a mounted volume: bet records vanish on redeploy otherwise."""
+    state_path = getattr(getattr(service, "config", None), "state_path", None)
+    if state_path is None:
+        return "Storage: unknown."
+    folder = Path(state_path).resolve().parent
+    mounted = next((p for p in (folder, *folder.parents) if p != p.parent and os.path.ismount(p)), None)
+    if mounted is not None:
+        return f"Storage: {html.escape(str(folder))} (on mounted volume {html.escape(str(mounted))}, survives redeploys)."
+    return (
+        f"Storage: {html.escape(str(folder))} is NOT on a mounted volume. On Railway the bot forgets its "
+        "bets and counters at every redeploy: attach a Volume at /data and set BOT_STORAGE_DIR=/data."
+    )
 
 
 def _sports_mode_line(service: Any, module: dict[str, Any]) -> str:
@@ -1506,6 +1522,7 @@ class TradingTelegramBot:
             ]
             lines.append(_sports_mode_line(self._service, module))
             lines.append(_build_line())
+            lines.append(_storage_line(self._service))
             bank = module.get("bankroll") or {}
             shards = bank.get("shards") or []
             if len(shards) > 1:
