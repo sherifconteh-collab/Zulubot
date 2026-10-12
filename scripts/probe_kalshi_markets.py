@@ -1,4 +1,16 @@
-"""Quick test: fetch live prediction markets from Kalshi and evaluate signals."""
+"""Read-only probe: list open Kalshi markets for a few series and show which ones the
+predictions strategy would consider (price below the buy-YES threshold or above the buy-NO one).
+
+Uses only Kalshi's public market data. No credentials, no orders, nothing is written.
+
+    python scripts/probe_kalshi_markets.py
+    python scripts/probe_kalshi_markets.py --series KXBTC KXGDP --buy-yes 0.30 --buy-no 0.70 --min-volume 100
+
+The defaults mirror the predictions strategy's example settings (PREDICTION_BUY_YES_THRESHOLD,
+PREDICTION_BUY_NO_THRESHOLD, PREDICTION_MIN_VOLUME_USD); the bot itself reads its own settings.
+"""
+
+import argparse
 
 import os
 import sys
@@ -30,14 +42,15 @@ def categorize(ticker, title):
     return "other"
 
 
-def main():
+def main(args):
+    series = args.series
     print("\n" + "=" * 90)
     print("  KALSHI PREDICTION MARKET - LIVE SIGNAL ANALYSIS")
     print("=" * 90)
 
     # Fetch active markets from known series
     all_markets = []
-    for s in SERIES:
+    for s in series:
         try:
             r = requests.get(f"{BASE}/markets", params={
                 "series_ticker": s, "status": "open", "limit": 20,
@@ -59,12 +72,12 @@ def main():
                     m["_cat"] = categorize(m.get("ticker", ""), m.get("title", ""))
                     all_markets.append(m)
             time.sleep(0.35)
-        except Exception as e:
-            pass
+        except Exception as exc:
+            print(f"  (skipped {s}: {exc})", file=sys.stderr)
 
     all_markets.sort(key=lambda m: m["_vol"], reverse=True)
 
-    print(f"\n  Found {len(all_markets)} active markets across {len(SERIES)} series\n")
+    print(f"\n  Found {len(all_markets)} active markets across {len(series)} series\n")
 
     # Show top markets by volume
     print(f"{'-' * 90}")
@@ -94,9 +107,9 @@ def main():
             print(f"  {t:<32} ${m['_yes_bid']:>4.2f} ${m['_yes_ask']:>4.2f} ${m['_last']:>4.2f} {m['_vol']:>8.0f}  {sub}")
 
     # --- SIGNAL EVALUATION ---
-    buy_yes_thresh = 0.30  # From .env
-    buy_no_thresh = 0.70
-    min_volume = 100  # Require some liquidity
+    buy_yes_thresh = args.buy_yes
+    buy_no_thresh = args.buy_no
+    min_volume = args.min_volume
 
     print(f"\n{'=' * 90}")
     print(f"  STRATEGY SIGNAL EVALUATION")
@@ -197,12 +210,14 @@ def main():
     print(f"  BUY NO signals:     {len(buy_no_signals)}")
     print(f"  Total actionable:   {total_signals}")
     print()
-    print(f"  To place real trades, add Kalshi credentials to .env:")
-    print(f"    KALSHI_KEY_ID=your-key-id")
-    print(f"    KALSHI_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----...")
-    print(f"    Sign up: https://kalshi.com > Settings > API Keys")
+    print("  This script only reads public data and never places an order.")
     print()
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Read-only probe of open Kalshi markets.")
+    parser.add_argument("--series", nargs="+", default=SERIES, help="Kalshi series tickers to scan")
+    parser.add_argument("--buy-yes", type=float, default=0.30, help="flag YES when the mid price is below this")
+    parser.add_argument("--buy-no", type=float, default=0.70, help="flag NO when the mid price is above this")
+    parser.add_argument("--min-volume", type=float, default=100, help="ignore markets with less volume")
+    main(parser.parse_args())

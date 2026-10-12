@@ -7,6 +7,18 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 ### `python -m trading_bot doctor`
 - New command that checks the setup without starting the bot or touching the network: mode (paper or live), Kalshi, Telegram, Anthropic and Coinbase keys, Railway storage, keys left over from older versions, and `.env.example` placeholder text still in place. It prints "set" or "missing", never a value, and exits non-zero only for real problems (half-configured Telegram, a malformed Kalshi key, Coinbase trading without keys, Railway without `BOT_STORAGE_DIR`).
 
+### README audit for the public release
+- Strategy table now says, per strategy, whether it is on by default and what happens with `PAPER_MODE=false`: sports, predictions, latency arbitrage, perpetuals and the BTC 5-minute Kalshi leg place real Kalshi orders; crypto and rotation run only with `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only with credentials; stocks, Polymarket and Markov are simulated only.
+- Corrected "all live trading happens on Kalshi" and the Coinbase data-only wording, and noted that Railway's Variables panel, not `railway.toml`, decides what is actually enabled.
+- Full Telegram command reference with a description for every command (added `/start`, `/ai`, `/config`, `/perps`, `/markov`, `/options`, `/backtest [range]`, `/resume force`, `/kill`).
+- Replaced the long secrets table with "Which keys do you need?": almost none, and each key is listed with the feature it unlocks. `FMP_API_KEY` is gone from the docs, `.env.example` and `railway.toml` (nothing reads it any more).
+- Documented the `/data` volume requirement and the Robinhood variables. No secrets or personal tokens in the README or `.env.example`.
+
+### Storage check in `/sports`; Kalshi market probe is now a proper script
+- `/sports` prints a `Storage:` line saying where the state file lives and whether that is a mounted volume. On Railway with no Volume attached the bot forgets its bets and daily counters at every redeploy (which is how a bet can be placed twice), and now says so plainly with the fix.
+- The root `test_predictions.py` (a manual script, not a test) is now `scripts/probe_kalshi_markets.py`: read-only, public data only, with `--series`, `--buy-yes`, `--buy-no` and `--min-volume` options.
+- SECURITY.md: repository settings are owned by the maintainers' OpenClaw agent once the repository is public.
+
 ### Never buy a market the Kalshi account already holds
 - **Duplicate bets fixed at the source.** `/sports` always showed `open $0.00` and the same market was bought again (the Golden Knights bet doubled): the bot was relying on its own records of what it holds, which can be missing or late (for example after a redeploy without a persistent volume). Before any live order the sports engine and the predictions strategy now ask Kalshi what the account actually holds (`GET /portfolio/positions`) and skip any game or market already held. Hand-picked bets and parlays respect it too.
 - **Fail safe.** If the account's positions can't be read in live mode, the bot places no new bets that cycle (`positions_unavailable` in `/sports`) rather than risking a duplicate.
