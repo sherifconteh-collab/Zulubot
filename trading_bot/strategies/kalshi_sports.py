@@ -442,13 +442,25 @@ class KalshiSportsStrategy:
         self._sleep = time.sleep
         # Live orders that failed or didn't fill this cycle, so /sports can say why nothing was bought.
         self._order_issues: list[dict[str, Any]] = []
+        # Market series Kalshi refused for a shard/funding reason -> when it happened (monotonic seconds).
+        self._unroutable: dict[str, float] = {}
+
+    _UNROUTABLE_SECONDS = 6 * 3600.0
+
+    @staticmethod
+    def _is_shard_problem(exc: BaseException) -> bool:
+        """The order failed because of where the market lives or which shard holds the funds, not the order itself."""
+        response = getattr(exc, "response", None)
+        text = (str(getattr(response, "text", "") or "") or str(exc)).lower()
+        status = getattr(response, "status_code", None)
+        return status == 404 or "shard" in text or "exchange user not found" in text or "insufficient_balance" in text
 
     @staticmethod
     def _describe_order_error(exc: BaseException) -> str:
         """Kalshi's own words for a rejected order (HTTP status and body), clipped."""
         response = getattr(exc, "response", None)
         if response is not None:
-            body = str(getattr(response, "text", "") or "")[:220]
+            body = str(getattr(response, "text", "") or "")[:500]
             return f"HTTP {getattr(response, 'status_code', '?')}: {body}".strip()
         return str(exc)[:220]
 
@@ -517,6 +529,14 @@ class KalshiSportsStrategy:
             result["source_accuracy"] = self.calibration.summary()
             self.calibration.save()
         return result
+
+    def _shard_balances(self) -> list[dict[str, Any]]:
+        """Kalshi balance per exchange shard, for /sports (best effort)."""
+        try:
+            return [{"index": index, "balance": round(balance, 2)} for index, balance in self.kalshi.get_balance_breakdown()]
+        except Exception as exc:
+            self.logger.debug("Could not read the per-shard balance: %s", exc)
+            return []
 
     def _score_past_forecasts(self) -> None:
         """Teach the model which sources were right: score forecasts for settled games."""
@@ -908,6 +928,7 @@ class KalshiSportsStrategy:
             "exposure_budget": round(exposure_cap, 2),
             # What the bot believes Kalshi has available to bet right now (live only), to compare with the app.
             "cash": round(broker.get_cash_balance(state, cash_bucket=bucket), 2) if bucket else None,
+            "shards": self._shard_balances() if bucket else [],
         }
 
         # Size every candidate first, then fit them into the exposure budget together
@@ -1094,8 +1115,13 @@ class KalshiSportsStrategy:
         symbol = f"{_SYMBOL_PREFIX}:{ticker}:{side.upper()}"
         if symbol in state.positions:
             return None
-        if self.live_trading_enabled and sum(i["reason"] == "order_failed" for i in self._order_issues) >= 3:
-            return None  # Kalshi keeps rejecting orders this cycle: stop instead of trying every game
+        series = ticker.split("-", 1)[0]
+        if self.live_trading_enabled and not cand.get("user_bet"):
+            since = self._unroutable.get(series)
+            if since is not None and time.monotonic() - since < self._UNROUTABLE_SECONDS:
+                return None  # Kalshi refused this series for a shard/funding reason: don't keep asking
+            if sum(i["reason"] == "order_failed" and not i.get("shard") for i in self._order_issues) >= 3:
+                return None  # Kalshi keeps rejecting orders for other reasons: stop instead of trying every game
 
         # Paper accounting books the fee into the entry price so simulated PnL is
         # net of costs; live, Kalshi debits the fee from the balance itself.
@@ -1127,9 +1153,12 @@ class KalshiSportsStrategy:
                 )
             except Exception as exc:
                 self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
+                shard = self._is_shard_problem(exc)
+                if shard:
+                    self._unroutable[series] = time.monotonic()
                 self._order_issues.append({
-                    "ticker": ticker, "reason": "order_failed",
-                    "error": f"{side} x{quantity} @ {ask:.2f}: {self._describe_order_error(exc)}"})
+                    "ticker": ticker, "reason": "order_failed", "shard": shard,
+                    "error": f"{ticker} {side} x{quantity} @ {ask:.2f}: {self._describe_order_error(exc)}"})
                 return None
             order_id = str(order.get("order", {}).get("order_id", ""))
             filled = order_fill_count(order)
