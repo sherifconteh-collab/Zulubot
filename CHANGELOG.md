@@ -4,6 +4,8 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+## [2026.10.0] — 2026-10-12
+
 ### SECURITY.md repository settings match ai-grc-platform
 - The settings list now mirrors ai-grc-platform's: branch protection (reviews, stale-approval dismissal, Code Owners, required and up-to-date checks, signed commits, no bypass, restricted pushes, linear history, administrators included), the code-security features, the read-only Actions token and approval for first-time contributors. It notes two things to settle before enforcing it: one approving review while there is one maintainer, and a bypass for the weekly release bot.
 
