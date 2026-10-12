@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Never buy a market the Kalshi account already holds
+- **Duplicate bets fixed at the source.** `/sports` always showed `open $0.00` and the same market was bought again (the Golden Knights bet doubled): the bot was relying on its own records of what it holds, which can be missing or late (for example after a redeploy without a persistent volume). Before any live order the sports engine and the predictions strategy now ask Kalshi what the account actually holds (`GET /portfolio/positions`) and skip any game or market already held. Hand-picked bets and parlays respect it too.
+- **Fail safe.** If the account's positions can't be read in live mode, the bot places no new bets that cycle (`positions_unavailable` in `/sports`) rather than risking a duplicate.
+- `KalshiClient.get_held_tickers()` is the new source of truth for what is held.
+
 ### Orders on markets Kalshi routes to an unfunded shard
 - **Kalshi holds funds per exchange shard and routes each order to the shard its market lives on.** Some sports markets answered `404 insufficient_shard_balance (Exchange user not found)` or `400 insufficient_balance` even though the account total was enough. The bot now treats those as a property of the market series: it skips that series for 6 hours (instead of retrying every game) and keeps placing orders on markets that do work. Hand-picked bets are never skipped silently.
 - `/sports` shows `Kalshi balance by shard: #0 $X, #1 $Y` (from Kalshi's balance breakdown) so you can see where the money is, and order errors are no longer cut off (full Kalshi message, with the market ticker).
