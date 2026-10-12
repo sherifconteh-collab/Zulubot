@@ -574,6 +574,21 @@ class KalshiClient:
                 held.add(ticker)
         return held
 
+    def get_exposure_by_ticker(self) -> dict[str, float]:
+        """Dollars at risk per market the account holds (cost of the position), from Kalshi itself."""
+        out: dict[str, float] = {}
+        for pos in self.get_positions():
+            ticker = str(pos.get("ticker") or "")
+            raw = pos.get("position_fp", pos.get("position"))
+            try:
+                count = float(raw) if raw not in (None, "") else 0.0
+                exposure = float(pos.get("market_exposure_dollars") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if ticker and abs(count) > 1e-9 and exposure > 0:
+                out[ticker] = out.get(ticker, 0.0) + exposure
+        return out
+
     @staticmethod
     def event_of(ticker: str) -> str:
         """The event a market belongs to: ``KXNHLGAME-26OCT11VGKMIN-VGK`` -> ``KXNHLGAME-26OCT11VGKMIN``."""

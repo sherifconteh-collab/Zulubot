@@ -956,8 +956,8 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("survives redeploys", line)
         with patch("trading_bot.telegram_bot.os.path.ismount", return_value=False):
             line = _storage_line(service)
-        self.assertIn("NOT on a mounted volume", line)
-        self.assertIn("BOT_STORAGE_DIR=/data", line)
+        self.assertIn("not a persistent volume", line)
+        self.assertIn("read from Kalshi", line)
         self.assertEqual(_storage_line(SimpleNamespace(config=SimpleNamespace(state_path=None))), "Storage: unknown.")
 
     def test_action_picks_line(self):

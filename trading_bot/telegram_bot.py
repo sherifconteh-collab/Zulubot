@@ -422,7 +422,7 @@ def _build_line() -> str:
 
 
 def _storage_line(service: Any) -> str:
-    """Say where state is kept and whether that is a mounted volume: bet records vanish on redeploy otherwise."""
+    """Say where the bot's own notes live and whether they survive a redeploy (Kalshi stays the source of truth)."""
     state_path = getattr(getattr(service, "config", None), "state_path", None)
     if state_path is None:
         return "Storage: unknown."
@@ -431,8 +431,8 @@ def _storage_line(service: Any) -> str:
     if mounted is not None:
         return f"Storage: {html.escape(str(folder))} (on mounted volume {html.escape(str(mounted))}, survives redeploys)."
     return (
-        f"Storage: {html.escape(str(folder))} is NOT on a mounted volume. On Railway the bot forgets its "
-        "bets and counters at every redeploy: attach a Volume at /data and set BOT_STORAGE_DIR=/data."
+        f"Storage: {html.escape(str(folder))} (not a persistent volume: the bot's own notes, such as today's "
+        "counters and learned weights, reset on redeploy. Your balance and what you hold are read from Kalshi.)"
     )
 
 

@@ -119,8 +119,9 @@ def diagnose(env: Mapping[str, str]) -> list[Finding]:
             out.append(Finding(OK, f"Railway: BOT_STORAGE_DIR={storage}. Make sure a Volume is mounted there "
                                    "(send /sports and look at the Storage line)."))
         else:
-            out.append(Finding(FAIL, "Railway: BOT_STORAGE_DIR is not set, so state is lost on every redeploy. "
-                                     "Attach a Volume at /data and set BOT_STORAGE_DIR=/data."))
+            out.append(Finding(INFO, "Railway: BOT_STORAGE_DIR is not set, so the bot's own notes (daily counters, "
+                                     "learned weights) reset on every redeploy. Balance and holdings are always "
+                                     "read from Kalshi. Optional: attach a Volume at /data and set BOT_STORAGE_DIR=/data."))
 
     # Leftover keys nothing reads.
     if _has(env, "FMP_API_KEY"):

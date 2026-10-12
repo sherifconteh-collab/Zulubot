@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Kalshi is the source of truth, not the bot's own files
+- **Exposure comes from the account.** The sports exposure budget (and `open $` in `/sports`) now uses the larger of the bot's own records and what Kalshi says is at risk in sports markets (cost of open positions). Before, a redeploy without a persistent volume reset it to $0 and the budget could be spent again. Combo (parlay) positions are only known from the bot's records. If Kalshi can't be read, the bot's records apply and the held-market guard still stops all buying.
+- **No more alarm about volumes.** `/sports` and `doctor` now say plainly that without a persistent volume only the bot's own notes (today's counters, learned weights) reset on redeploy, and that your balance and holdings are read from Kalshi. The README marks the Railway Volume as optional.
+- Still local: today's action-pick and parlay counters, parlay quote tries, and the learned source weights.
+
 ### `/sports` says why the "best value" action picks did or did not fire
 - New line `Action picks: on, N of 5 used today (at most 2 per scan)`, or `OFF (KALSHI_SPORTS_ACTION_BETS=false)`. "No bets right now" used to be the only answer whether the picks were switched off, used up for the day, or had nothing to bet.
 - The action path now records why it skipped: `action_picks_used_up_today` and `already_bet_on_game` (a game the account already holds) show up in the skip reasons instead of vanishing.

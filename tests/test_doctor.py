@@ -44,9 +44,9 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("Coinbase: data only", texts({}, INFO))
         self.assertIn("COINBASE_API_KEY", texts({"COINBASE_TRADING_ENABLED": "true"}, FAIL))
 
-    def test_railway_without_storage_dir_fails(self):
-        self.assertIn("lost on every redeploy", texts({"RAILWAY_ENVIRONMENT": "production"}, FAIL))
-        self.assertNotIn("lost on every redeploy",
+    def test_railway_without_storage_dir_is_only_a_note(self):
+        self.assertIn("reset on every redeploy", texts({"RAILWAY_ENVIRONMENT": "production"}, INFO))
+        self.assertNotIn("reset on every redeploy",
                          texts({"RAILWAY_ENVIRONMENT": "production", "BOT_STORAGE_DIR": "/data"}))
 
     def test_unused_fmp_key_is_called_out(self):
