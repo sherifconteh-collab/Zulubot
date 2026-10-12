@@ -9,6 +9,10 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 - **No more alarm about volumes.** `/sports` and `doctor` now say plainly that without a persistent volume only the bot's own notes (today's counters, learned weights) reset on redeploy, and that your balance and holdings are read from Kalshi. The README marks the Railway Volume as optional.
 - Still local: today's action-pick and parlay counters, parlay quote tries, and the learned source weights.
 
+### `/sports` says why the "best value" action picks did or did not fire
+- New line `Action picks: on, N of 5 used today (at most 2 per scan)`, or `OFF (KALSHI_SPORTS_ACTION_BETS=false)`. "No bets right now" used to be the only answer whether the picks were switched off, used up for the day, or had nothing to bet.
+- The action path now records why it skipped: `action_picks_used_up_today` and `already_bet_on_game` (a game the account already holds) show up in the skip reasons instead of vanishing.
+
 ### `python -m trading_bot doctor`
 - New command that checks the setup without starting the bot or touching the network: mode (paper or live), Kalshi, Telegram, Anthropic and Coinbase keys, Railway storage, keys left over from older versions, and `.env.example` placeholder text still in place. It prints "set" or "missing", never a value, and exits non-zero only for real problems (half-configured Telegram, a malformed Kalshi key, Coinbase trading without keys, Railway without `BOT_STORAGE_DIR`).
 

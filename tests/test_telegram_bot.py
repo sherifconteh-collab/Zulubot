@@ -10,6 +10,7 @@ from trading_bot.telegram_bot import (
     _format_auto_parlays,
     _build_line,
     _storage_line,
+    _action_picks_line,
     _skip_examples,
     _skip_reason_summary,
     _sports_mode_line,
@@ -958,6 +959,14 @@ class ParlayCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not a persistent volume", line)
         self.assertIn("read from Kalshi", line)
         self.assertEqual(_storage_line(SimpleNamespace(config=SimpleNamespace(state_path=None))), "Storage: unknown.")
+
+    def test_action_picks_line(self):
+        self.assertEqual(_action_picks_line(None), "")
+        on = _action_picks_line({"enabled": True, "today": 2, "per_day": 5, "per_scan": 2})
+        self.assertIn("2 of 5 used today", on)
+        off = _action_picks_line({"enabled": False, "today": 0, "per_day": 5, "per_scan": 2})
+        self.assertIn("OFF", off)
+        self.assertIn("KALSHI_SPORTS_ACTION_BETS=false", off)
 
     def test_preview_and_result_wording(self):
         text = _format_parlay_preview(self.PLAN)
