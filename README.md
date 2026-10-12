@@ -31,17 +31,21 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine**, controlled
 
 Zulubot runs several independent strategies on a schedule, sizes every trade through one shared risk manager, and reports to you over Telegram.
 
-| Strategy | What it trades | Notes |
-| --- | --- | --- |
-| **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues | Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. On by default. |
-| **Kalshi predictions** | Crypto, economics, politics, weather and other Kalshi markets | Threshold-based, spread across categories |
-| **Latency arbitrage** | Short-dated Kalshi crypto contracts | Coinbase price feed moves first, Kalshi lags |
-| **BTC 5-minute spread** | Kalshi and Polymarket implied price vs Coinbase spot | |
-| **Polymarket** | Crypto and finance markets | Paper only |
-| **Stocks** | Value screen (P/E, P/B, debt, ROE, free cash flow) gated by VIX | Runs every few days, paper only |
-| **Crypto** | BTC and ETH on Fear & Greed with trend and funding filters | Needs `COINBASE_TRADING_ENABLED=true` to trade |
-| **Altcoin rotation** | Rotates into coins that lead the market | Needs `COINBASE_TRADING_ENABLED=true` to trade |
-| **Options** | Deep in-the-money calls and puts on extreme fear or greed | Opt-in |
+| Strategy | What it trades | On by default? | With `PAPER_MODE=false` |
+| --- | --- | --- | --- |
+| **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues, plus automatic same-game parlays. Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. | Yes | Real Kalshi orders |
+| **Kalshi predictions** | Crypto, economics, finance, politics, weather and other Kalshi markets, on price thresholds spread across categories | No (`PREDICTION_ENABLED`) | Real Kalshi orders |
+| **Latency arbitrage** | Short-dated Kalshi crypto contracts when the Coinbase price feed moves before Kalshi does | No (`LATENCY_ARB_ENABLED`) | Real Kalshi orders |
+| **Kalshi perpetuals** | Kalshi crypto perpetuals (BTC, ETH, SOL, XRP) on momentum, leverage capped | No (`KALSHI_PERP_ENABLED`) | Real Kalshi orders |
+| **BTC 5-minute spread** | Kalshi and Polymarket implied BTC price vs Coinbase spot | Yes (`BTC5MIN_ENABLED`) | Kalshi leg is real; the Polymarket leg is skipped; spot leg needs Coinbase trading |
+| **Polymarket** | Crypto and finance markets | No (`POLYMARKET_ENABLED`) | Never live: live execution is not implemented, so it stays simulated |
+| **Stocks** | Value screen (P/E, P/B, debt, ROE, free cash flow) gated by VIX | Yes | Simulated only: no stock broker is connected, so it never sends an order |
+| **Crypto** | BTC and ETH on Fear & Greed with trend and funding filters | Yes | Runs only if `COINBASE_TRADING_ENABLED=true`, then real Coinbase orders |
+| **Altcoin rotation** | Rotates into coins that lead the market | Yes (`ROTATION_ENABLED`) | Runs only if `COINBASE_TRADING_ENABLED=true`, then real Coinbase orders |
+| **Markov regime** | Bull / bear / sideways regime model on daily prices; opens and closes long positions on the signal | Yes (`MARKOV_ENABLED`) | Simulated only: it trades the paper book, never a venue |
+| **Options** | Deep in-the-money calls and puts on extreme fear or greed | No (`OPTIONS_ENABLED`) | Real Robinhood orders if `ROBINHOOD_*` credentials are set |
+
+In paper mode (the default) every row is simulated. The "on by default" column is the code default; Railway's Variables panel is what the running bot actually uses, so check it (the `railway.toml` values are only defaults). Send `/status` or `/help` to see what is running.
 
 Around the strategies:
 
@@ -50,7 +54,7 @@ Around the strategies:
 - **Backtesting:** Freqtrade integration for backtests and hyperopt.
 - **Telegram:** two-way control, a 6-hourly digest, and the betting tools below.
 
-All live trading happens on **Kalshi**. Coinbase is used as a data source only, unless you explicitly enable it.
+Live trading happens on **Kalshi** (sports, predictions, latency arbitrage, perpetuals, BTC 5-minute). Coinbase is a data source only, unless you set `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only if you add credentials; stocks and Polymarket never send real orders.
 
 ## Sports betting from Telegram
 
@@ -98,7 +102,7 @@ Create an API key in Kalshi, set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY`, then 
 The repo ships a `Procfile` and `railway.toml` (nixpacks build, `python -m trading_bot run-daemon`).
 
 1. Create a Railway project from your fork of this repo.
-2. Attach a **Volume** mounted at `/data` so state and logs survive deploys (`Service → Volumes → Add`).
+2. Attach a **Volume** mounted at `/data` and set `BOT_STORAGE_DIR=/data` so state and logs survive deploys (`Service → Volumes → Add`). Without it the bot forgets its positions and daily counters on every redeploy.
 3. Add your secrets in the **Variables** panel (see below). They are intentionally not in `railway.toml`.
 4. Deploy. The bot starts in paper mode.
 
@@ -117,7 +121,8 @@ Everything is configured through **environment variables**. [`.env.example`](.en
 | `ANTHROPIC_API_KEY` | Plain-text chat, slip screenshots, optional AI analysis |
 | `FMP_API_KEY` | Stock fundamentals |
 | `COINBASE_API_KEY`, `COINBASE_API_SECRET` | Coinbase prices (and trading, if enabled) |
-| `POLYMARKET_*` | Polymarket trading (optional) |
+| `POLYMARKET_*` | Polymarket (optional; the strategy is simulated only) |
+| `ROBINHOOD_USERNAME`, `ROBINHOOD_PASSWORD`, `ROBINHOOD_MFA_SECRET` | Options trading (optional) |
 
 ### The settings you will actually touch
 
@@ -145,15 +150,60 @@ Persistent state lives in `BOT_STORAGE_DIR` (`state.json`, the trade audit log, 
 
 ## Telegram commands
 
-You can also type plain English instead of any of these.
+Only the chat in `TELEGRAM_CHAT_ID` is answered. You can also type plain English instead of most of these. `/start` is an alias for `/help`.
 
-| Group | Commands |
+**Monitor**
+
+| Command | What it does |
 | --- | --- |
-| **Monitor** | `/status` `/positions` `/risk` `/history` `/audit [N]` `/decisions [N]` `/latency` `/leads` |
-| **Run a strategy now** | `/sports` `/crypto` `/stocks` `/rotation` `/predict` `/perps` `/polymarket` `/btc5min` `/markov` `/options` `/backtest [range]` |
-| **Your own sports bets** | `/games` `/bet` `/props` `/parlay` `/stack` `/confirm` `/cancel` (screenshots work too) |
-| **Control** | `/pause` `/resume` `/kill` and `/resume force` |
-| **Settings** | `/config` `/ai` `/help` |
+| `/status` | Portfolio, equity, cash and open positions |
+| `/positions` | Open positions in detail |
+| `/risk` | Risk metrics: drawdown, daily halt, kill switch and cooldown state |
+| `/history` | Recent trades |
+| `/audit [N]` | Tail of the trade audit log |
+| `/decisions [N]` | Recent strategy decisions, including why something was skipped |
+| `/latency` | Timings of each module |
+| `/leads` | Watchlist: skipped buys and top targets per strategy |
+
+**Run a strategy now** (the same code the scheduler runs; it trades for real if `PAPER_MODE=false`)
+
+| Command | What it does |
+| --- | --- |
+| `/sports` | Run the Kalshi sports strategy and show the mode (LIVE or PAPER), build, balance by shard, cash, what was bought and why nothing was |
+| `/predict` | Kalshi prediction markets (crypto, economics, politics, weather) |
+| `/perps` | Kalshi crypto perpetuals |
+| `/crypto` | BTC and ETH on Fear & Greed |
+| `/rotation` | Altcoin rotation |
+| `/stocks` | Value screen on stocks (simulated) |
+| `/polymarket` | Polymarket strategy (simulated) |
+| `/btc5min` | BTC 5-minute spread strategy |
+| `/markov` | Markov regime strategy (simulated) |
+| `/options` | Options strategy |
+| `/backtest [range]` | Freqtrade backtest, e.g. `/backtest 20250101-20250601` |
+
+**Your own sports bets** (details in the next section)
+
+| Command | What it does |
+| --- | --- |
+| `/games [league or team]` | Upcoming games with Kalshi prices and the model's win probability |
+| `/bet <team> [$amount] [now]` | Preview a single bet |
+| `/props <player, team or stat>` | Football player-stat markets |
+| `/parlay <leg> + <leg> [$amount] [max <cents>]` | Preview a Kalshi combo |
+| `/stack <game> [legs N] [p %] [$stake] [max c]` | Auto-build a same-game player-stat parlay |
+| `/confirm` / `/cancel` | Place or drop the previewed bet |
+
+Sending a screenshot of a bet slip, or typing a list of legs, works too.
+
+**Control and settings**
+
+| Command | What it does |
+| --- | --- |
+| `/pause` / `/resume` | Stop or restart all trading. `/resume` also clears the kill switch (new entries then stay blocked for the post-kill cooldown); it may refuse if equity is still below the drawdown limit |
+| `/resume force` | Clear the kill switch and reset the peak equity to current equity |
+| `/kill` | Engage the kill switch: closes the positions it can and pauses the bot |
+| `/config` | Show the active settings |
+| `/ai` | AI analysis status, budget and circuit breaker |
+| `/help` | The command list |
 
 Routine alerts (cycle summaries, risk banners, leads, heartbeats) arrive as **one digest every 6 hours**. Replies to your commands and a kill-switch trigger are always immediate. Pause, resume and kill are slash-only: plain text can never trigger them.
 
@@ -257,7 +307,7 @@ Market open, game not started, price within 2¢ of the preview (single bets), on
 ## Safety and risk controls
 
 - **Paper by default, real money when you switch it.** `PAPER_MODE=true` unless you change it; nothing reaches a broker until you set `PAPER_MODE=false` and Kalshi credentials. In live mode the bot spends real money without asking, within the caps below. Parlays refuse to run in paper mode.
-- **Coinbase is data-only** unless `COINBASE_TRADING_ENABLED=true`. All live trading is on Kalshi.
+- **Coinbase is data-only** unless `COINBASE_TRADING_ENABLED=true` (with it off and `PAPER_MODE=false`, the crypto and rotation strategies do not run at all). Live orders go to Kalshi, plus Coinbase and Robinhood only when you enable them. Stocks and Polymarket are simulated only.
 - **Orders are checked, not assumed.** A failed or unfilled order is never booked. Live Kalshi balance and positions are synced, settled positions are pruned, and the drawdown peak uses the same equity as the risk check.
 - **One lock for state.** Service cycles are serialised so two runs can't place the same bet.
 - **Risk manager** (non-sports strategies): position caps, a daily halt at `DAILY_HALT_DRAWDOWN`, a kill switch at `KILL_SWITCH_DRAWDOWN` that liquidates, trailing stops, cooldown after consecutive losses, optional volatility targeting.
@@ -281,7 +331,7 @@ Be realistic: sportsbooks, Polymarket and Kalshi usually agree within a point or
 
 ```
 trading_bot/
-  strategies/     sports, predictions, latency arb, BTC 5-min, Polymarket, stocks, crypto, rotation, options
+  strategies/     sports, predictions, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
   integrations/   AI analysis, analyst personas, Freqtrade, slip reader, plain-text router
   service.py      core orchestrator
   scheduler.py    daemon loop
@@ -292,6 +342,7 @@ trading_bot/
   sports_model.py fee-aware probability fusion and Kelly sizing
   telegram_bot.py commands, betting flows, digest
   config.py       all settings (frozen dataclasses read from environment variables)
+scripts/          security checks, release tooling, git hooks
 tests/            unit tests (all network calls mocked)
 ```
 

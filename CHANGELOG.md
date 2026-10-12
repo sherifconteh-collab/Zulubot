@@ -4,6 +4,12 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### README audit for the public release
+- Strategy table now says, per strategy, whether it is on by default and what happens with `PAPER_MODE=false`: sports, predictions, latency arbitrage, perpetuals and the BTC 5-minute Kalshi leg place real Kalshi orders; crypto and rotation run only with `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only with credentials; stocks, Polymarket and Markov are simulated only.
+- Corrected "all live trading happens on Kalshi" and the Coinbase data-only wording, and noted that Railway's Variables panel, not `railway.toml`, decides what is actually enabled.
+- Full Telegram command reference with a description for every command (added `/start`, `/ai`, `/config`, `/perps`, `/markov`, `/options`, `/backtest [range]`, `/resume force`, `/kill`).
+- Documented the `/data` volume requirement and the Robinhood variables. No secrets or personal tokens in the README or `.env.example`.
+
 ### README describes live trading accurately
 - The README no longer calls Zulubot a "paper-trading bot that trades simulated money". It starts in paper mode, but with `PAPER_MODE=false` and Kalshi credentials it places real orders (sports bets, automatic parlays, predictions). Added how to confirm live mode with `/sports` and how Kalshi's per-shard funding affects which markets can be traded.
 
