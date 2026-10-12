@@ -58,13 +58,32 @@ Only the latest commit on `main` receives security fixes.
 
 ## Repository settings (maintainers)
 
-These live in GitHub settings, not in files. Once the repository is public, the maintainers' OpenClaw agent owns them and keeps `main` at this target state:
+These live in GitHub settings, not in files, and they match the settings used for [ai-grc-platform](https://github.com/sherifconteh-collab/ai-grc-platform/blob/main/SECURITY.md). Once the repository is public, the maintainers' OpenClaw agent owns them and keeps `main` at this target state.
 
-- **Branch protection / ruleset:** require a pull request, require review from Code Owners, require the status checks (`test`, `secrets`, and the `security.yml` jobs), dismiss stale approvals on new commits, block force pushes and deletion, apply to administrators.
-- **Signed commits** required (a plain signature check; set up GPG or SSH signing).
-- **Security features (Settings → Code security):** enable the dependency graph, Dependabot alerts and security updates, **secret scanning with push protection**, and **private vulnerability reporting**.
-- **Actions (Settings → Actions):** default workflow token to read-only; require approval for workflows from first-time contributors.
-- Enable two-factor authentication for every maintainer.
+**Branch protection or ruleset for `main`** (Settings → Branches)
+- Require a pull request before merging, with approving reviews. ai-grc-platform asks for 2; GitHub does not let an author approve their own pull request, so use 1 while there is a single maintainer and raise it to 2 when a second one joins.
+- Dismiss stale approvals when new commits are pushed.
+- Require review from Code Owners (see `.github/CODEOWNERS`).
+- Require status checks to pass, and require the branch to be up to date before merging: `test`, `secrets`, and the `security.yml` jobs (Static Security Controls, Dependency Security Audit, Check Dependency Licenses, Scan Full History for Secrets).
+- Require signed commits (squash merges made in GitHub's web UI are signed by GitHub).
+- Do not allow bypassing these settings, and include administrators.
+- Restrict who can push to `main` to the maintainers, and block force pushes and deletion.
+- Require linear history (this repository merges by squash).
+- The weekly release workflow commits to `main`. Give the Actions bot a bypass for that one workflow, or have it open a pull request, otherwise the Monday release fails against these rules.
+
+**Security features** (Settings → Code security)
+- Dependency graph and dependency review.
+- Dependabot alerts and security updates.
+- Code scanning (CodeQL, already configured in `.github/workflows/codeql.yml`; it runs once the repository is public).
+- **Secret scanning with push protection.**
+- **Private vulnerability reporting**, and a security contact (see the top of this file).
+
+**Actions** (Settings → Actions)
+- Default workflow token set to read-only.
+- Require approval for workflows from first-time contributors, including forks.
+
+**Accounts**
+- Two-factor authentication for every maintainer.
 
 ## Rules for contributors
 
