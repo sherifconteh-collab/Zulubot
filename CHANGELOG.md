@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### `python -m trading_bot doctor`
+- New command that checks the setup without starting the bot or touching the network: mode (paper or live), Kalshi, Telegram, Anthropic and Coinbase keys, Railway storage, keys left over from older versions, and `.env.example` placeholder text still in place. It prints "set" or "missing", never a value, and exits non-zero only for real problems (half-configured Telegram, a malformed Kalshi key, Coinbase trading without keys, Railway without `BOT_STORAGE_DIR`).
+
 ### README audit for the public release
 - Strategy table now says, per strategy, whether it is on by default and what happens with `PAPER_MODE=false`: sports, predictions, latency arbitrage, perpetuals and the BTC 5-minute Kalshi leg place real Kalshi orders; crypto and rotation run only with `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only with credentials; stocks, Polymarket and Markov are simulated only.
 - Corrected "all live trading happens on Kalshi" and the Coinbase data-only wording, and noted that Railway's Variables panel, not `railway.toml`, decides what is actually enabled.
