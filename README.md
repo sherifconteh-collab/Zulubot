@@ -1,6 +1,6 @@
 # Zulubot
 
-A multi-strategy paper-trading bot with a **Kalshi sports-betting engine**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)) and trades simulated money by default.
+A multi-strategy trading bot with a **Kalshi sports-betting engine**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Stocks and Polymarket are always paper-only.
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
@@ -89,7 +89,9 @@ python -m trading_bot run-daemon    # start the scheduler
 
 ### Going live on Kalshi
 
-Create an API key in Kalshi, set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY`, then set `PAPER_MODE=false`. Start with a very small balance. Sports bets, parlays and the other Kalshi strategies will then place real orders.
+Create an API key in Kalshi, set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY`, then set `PAPER_MODE=false`. Start with a very small balance. Sports bets, parlays and the other Kalshi strategies will then place real orders. Send `/sports` to confirm: it prints `Mode: LIVE` (or `PAPER`, with the reason) and the running build.
+
+**Funds live on exchange shards.** Kalshi holds your balance per exchange shard and routes each order to the shard its market lives on, so your total can be more than what is spendable on a given market. `/sports` prints `Kalshi balance by shard: #0 $X, #1 $Y, ...`. An order on a market whose shard has no funds is refused (`insufficient_shard_balance`, `Exchange user not found` or `insufficient_balance`); the bot then skips that market series for 6 hours and keeps trading the markets that work. It never moves money between shards for you: to trade the other markets, move funds in Kalshi (see Kalshi's transfer documentation).
 
 ## Deploy on Railway
 
@@ -254,7 +256,7 @@ Market open, game not started, price within 2¢ of the preview (single bets), on
 
 ## Safety and risk controls
 
-- **Paper by default.** `PAPER_MODE=true` unless you change it. Parlays refuse to run in paper mode.
+- **Paper by default, real money when you switch it.** `PAPER_MODE=true` unless you change it; nothing reaches a broker until you set `PAPER_MODE=false` and Kalshi credentials. In live mode the bot spends real money without asking, within the caps below. Parlays refuse to run in paper mode.
 - **Coinbase is data-only** unless `COINBASE_TRADING_ENABLED=true`. All live trading is on Kalshi.
 - **Orders are checked, not assumed.** A failed or unfilled order is never booked. Live Kalshi balance and positions are synced, settled positions are pruned, and the drawdown peak uses the same equity as the risk check.
 - **One lock for state.** Service cycles are serialised so two runs can't place the same bet.
