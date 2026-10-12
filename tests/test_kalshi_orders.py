@@ -218,23 +218,65 @@ class SportsLiveBookingTests(unittest.TestCase):
         self.assertIn("insufficient_balance", strat._order_issues[0]["error"])
         kalshi.place_order.side_effect = None
         kalshi.place_order.return_value = {"order": {"fill_count": 0}}
-        strat._place_bet(state, broker, _cand(), 20.0, _NOW, "kalshi")
+        other = _cand()
+        other["market"] = {"ticker": "KXNHLGAME-26OCT04ABAB-A", "event_ticker": "KXNHLGAME-26OCT04ABAB"}
+        strat._place_bet(state, broker, other, 20.0, _NOW, "kalshi")
         self.assertEqual(strat._order_issues[1]["reason"], "order_not_filled")
 
-    def test_failures_carry_the_order_s_own_numbers_and_stop_after_three(self):
-        err = requests.HTTPError("400", response=SimpleNamespace(status_code=400, text="insufficient_balance"))
+    def _cand_for(self, ticker):
+        cand = _cand()
+        cand["market"] = {"ticker": ticker, "event_ticker": ticker.rsplit("-", 1)[0]}
+        return cand
+
+    def test_other_failures_carry_the_orders_numbers_and_stop_after_three(self):
+        err = requests.HTTPError("500", response=SimpleNamespace(status_code=500, text="boom"))
         kalshi = MagicMock()
         kalshi.place_order.side_effect = err
         strat = _sports(kalshi)
         state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
         broker = PaperBroker(False, logging.getLogger("t"))
         for n in range(5):
-            cand = _cand()
-            cand["market"] = {"ticker": f"KXNFLGAME-26OCT04ABAB-{n}", "event_ticker": "KXNFLGAME-26OCT04ABAB"}
-            strat._place_bet(state, broker, cand, 20.0, _NOW, "kalshi")
+            strat._place_bet(state, broker, self._cand_for(f"KXA{n}-26OCT04ABAB-X"), 20.0, _NOW, "kalshi")
         self.assertEqual(kalshi.place_order.call_count, 3)          # no more attempts once Kalshi keeps refusing
         first = strat._order_issues[0]["error"]
-        self.assertTrue(first.startswith("yes x40 @ 0.50: HTTP 400"), first)
+        self.assertTrue(first.startswith("KXA0-26OCT04ABAB-X yes x40 @ 0.50: HTTP 500"), first)
+
+    def test_shard_errors_skip_that_series_but_keep_trying_others(self):
+        err = requests.HTTPError("404", response=SimpleNamespace(
+            status_code=404, text='{"error":{"code":"insufficient_shard_balance","details":"Exchange user not found"}}'))
+        kalshi = MagicMock()
+        kalshi.place_order.side_effect = [err, {"order": {"order_id": "ok", "fill_count": 38}}]
+        strat = _sports(kalshi)
+        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+        broker = PaperBroker(False, logging.getLogger("t"))
+        results = [
+            strat._place_bet(state, broker, self._cand_for("KXSOCCER-26OCT04AAA-X"), 20.0, _NOW, "kalshi"),   # refused
+            strat._place_bet(state, broker, self._cand_for("KXSOCCER-26OCT04BBB-X"), 20.0, _NOW, "kalshi"),   # same series: skipped
+            strat._place_bet(state, broker, self._cand_for("KXNFLGAME-26OCT04CCC-X"), 20.0, _NOW, "kalshi"),  # other series: placed
+        ]
+        self.assertIsNone(results[0])
+        self.assertIsNone(results[1])
+        self.assertIsNotNone(results[2])
+        self.assertEqual(kalshi.place_order.call_count, 2)           # the skipped series was never asked again
+        self.assertTrue(strat._order_issues[0]["shard"])
+        self.assertIn("insufficient_shard_balance", strat._order_issues[0]["error"])
+        # a hand-picked bet is never silently skipped
+        kalshi.place_order.side_effect = None
+        kalshi.place_order.return_value = {"order": {"order_id": "m", "fill_count": 38}}
+        manual = self._cand_for("KXSOCCER-26OCT04DDD-X")
+        manual["user_bet"] = True
+        self.assertIsNotNone(strat._place_bet(state, broker, manual, 20.0, _NOW, "kalshi"))
+
+    def test_shard_balances_are_read_from_the_balance_breakdown(self):
+        from unittest.mock import PropertyMock, patch
+        c = _client()
+        with patch.object(KalshiClient, "can_trade", new_callable=PropertyMock, return_value=True):
+            c._get = MagicMock(return_value={"balance": 5861, "balance_breakdown": [
+                {"exchange_index": 1, "balance": "0.0000"}, {"exchange_index": 0, "balance": "58.6100"}, {"bad": 1}]})
+            self.assertEqual(c.get_balance_breakdown(), [(0, 58.61), (1, 0.0)])
+            c._get = MagicMock(return_value={"balance": 5861})
+            self.assertEqual(c.get_balance_breakdown(), [])
+        self.assertEqual(c.get_balance_breakdown(), [])          # no credentials: nothing to ask
 
     def test_unknown_response_shape_trusts_the_request_for_the_sync_backstop(self):
         _, _, pos = self._run({"order": {"order_id": "o", "status": "executed"}})
