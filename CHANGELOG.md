@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### SECURITY.md repository settings match ai-grc-platform
+- The settings list now mirrors ai-grc-platform's: branch protection (reviews, stale-approval dismissal, Code Owners, required and up-to-date checks, signed commits, no bypass, restricted pushes, linear history, administrators included), the code-security features, the read-only Actions token and approval for first-time contributors. It notes two things to settle before enforcing it: one approving review while there is one maintainer, and a bypass for the weekly release bot.
+
 ### `.env.example` lists the missing rotation, prediction and stock settings
 - Added `ROTATION_ENABLED`, `ROTATION_FEE_PCT`, `ROTATION_MIN_TRADE_USD`, `ROTATION_EXCLUDED_COINS`, `ROTATION_MAX_COINS_TO_TRACK`, `PREDICTION_TAKE_PROFIT`, `PREDICTION_STOP_LOSS_PCT`, `PREDICTION_MIN_TRADE_USD` and `STOCK_MIN_POSITIVE_FCF_SIGNAL`, with the code defaults. They were read by the bot but undocumented (recovered from an old unmerged branch).
 
