@@ -530,6 +530,20 @@ class KalshiSportsStrategy:
             self.calibration.save()
         return result
 
+    def _account_held_events(self) -> set[str] | None:
+        """Events the Kalshi account holds any position in (live only); None if it can't be read.
+
+        Local records can be lost or late, and a second bet on a game already held is exactly what the
+        one-bet-per-game rule forbids, so the account itself is the source of truth.
+        """
+        if not self.live_trading_enabled:
+            return set()
+        try:
+            return {t.rsplit("-", 1)[0] if "-" in t else t for t in self.kalshi.get_held_tickers()}
+        except Exception as exc:
+            self.logger.warning("Could not read the account's positions: %s", exc)
+            return None
+
     def _shard_balances(self) -> list[dict[str, Any]]:
         """Kalshi balance per exchange shard, for /sports (best effort)."""
         try:
@@ -931,6 +945,12 @@ class KalshiSportsStrategy:
             "shards": self._shard_balances() if bucket else [],
         }
 
+        account_events = self._account_held_events()
+        if account_events is None:
+            self._log_skip(result, "account", "positions_unavailable")
+            return  # can't tell what the account already holds: place nothing rather than risk a duplicate
+        held_events |= account_events
+
         # Size every candidate first, then fit them into the exposure budget together
         # (simultaneous Kelly): when opportunities pile up, each stake is trimmed
         # proportionally instead of the first ones eating the whole budget.
@@ -1305,7 +1325,7 @@ class KalshiSportsStrategy:
         mult = float(entry["fee_multiplier"])
 
         bucket = _CASH_BUCKET if self.live_trading_enabled else None
-        held = self._held_events(self._open_positions(state))
+        held = self._held_events(self._open_positions(state)) | (self._account_held_events() or set())
         if entry["event_ticker"] and entry["event_ticker"] in held:
             return {"ok": False, "reason": "You already have a bet on this game."}
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
@@ -1712,7 +1732,7 @@ class KalshiSportsStrategy:
         if not 2 <= len(legs) <= cfg.user_parlay_max_legs:
             return {"ok": False, "reason": f"A parlay needs 2 to {cfg.user_parlay_max_legs} legs."}
 
-        held = self._held_events(self._open_positions(state))
+        held = self._held_events(self._open_positions(state)) | (self._account_held_events() or set())
         rows: list[dict[str, Any]] = []
         for leg in legs:
             ticker, side = leg["ticker"], str(leg["side"]).lower()

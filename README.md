@@ -311,6 +311,7 @@ Market open, game not started, price within 2¢ of the preview (single bets), on
 
 - **Paper by default, real money when you switch it.** `PAPER_MODE=true` unless you change it; nothing reaches a broker until you set `PAPER_MODE=false` and Kalshi credentials. In live mode the bot spends real money without asking, within the caps below. Parlays refuse to run in paper mode.
 - **Coinbase is data-only** unless `COINBASE_TRADING_ENABLED=true` (with it off and `PAPER_MODE=false`, the crypto and rotation strategies do not run at all). Live orders go to Kalshi, plus Coinbase and Robinhood only when you enable them. Stocks and Polymarket are simulated only.
+- **No doubling up.** Before it buys, the bot reads your Kalshi positions and skips any market, or any other market in the same event, that your account already holds, even if the bot's own record was lost. If it cannot read your positions in live mode, it places no new bets that cycle.
 - **Orders are checked, not assumed.** A failed or unfilled order is never booked. Live Kalshi balance and positions are synced, settled positions are pruned, and the drawdown peak uses the same equity as the risk check.
 - **One lock for state.** Service cycles are serialised so two runs can't place the same bet.
 - **Risk manager** (non-sports strategies): position caps, a daily halt at `DAILY_HALT_DRAWDOWN`, a kill switch at `KILL_SWITCH_DRAWDOWN` that liquidates, trailing stops, cooldown after consecutive losses, optional volatility targeting.
