@@ -3,7 +3,7 @@
 Routes notifications to configured channels (Telegram, console log, future webhooks).
 
 Telegram digest: routine alerts are collected and sent as one message every
-``digest_hours`` (default 6) instead of one message per event. Urgent alerts (the kill
+``digest_hours`` (default 24, i.e. once a day) instead of one message per event. Urgent alerts (the kill
 switch firing) and replies to Telegram commands are never delayed.
 """
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from trading_bot.telegram_bot import TradingTelegramBot
 
 _CHUNK_CHARS = 3600          # stay well under Telegram's 4096-character message limit
-_MAX_BUFFERED = 40           # keep only the most recent messages if a digest window is very busy
+_MAX_BUFFERED = 120          # keep only the most recent messages if a digest window is very busy (a day's worth)
 _SEPARATOR = "\n\n\u2014 \u2014 \u2014\n\n"
 
 

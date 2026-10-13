@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Telegram digest is once a day
+- `TELEGRAM_DIGEST_HOURS` now defaults to 24 (was 6): routine alerts (cycle summaries, bet and parlay alerts, risk banners, leads, heartbeats) arrive as one digest a day, headed "24-hour update". The buffer holds 120 messages (was 40) so a full day is not cut off. Replies to your commands and the kill switch firing are still immediate, a redeploy still sends what is held right away, and `/sports` shows the current picture any time. Set `TELEGRAM_DIGEST_HOURS=6` (or `0` for immediate) to change it; a value set in Railway's Variables panel overrides the default.
+
 ## [2026.10.0] — 2026-10-12
 
 ### SECURITY.md repository settings match ai-grc-platform

@@ -52,7 +52,7 @@ Around the strategies:
 - **Risk manager:** position caps, daily halt, drawdown kill switch, trailing stops, cooldown after losing streaks, volatility targeting.
 - **AI analysis (optional):** Claude or a local Ollama model can confirm or veto trades (`boost`, `require` or `log_only` mode) under a hard monthly budget with a circuit breaker.
 - **Backtesting:** Freqtrade integration for backtests and hyperopt.
-- **Telegram:** two-way control, a 6-hourly digest, and the betting tools below.
+- **Telegram:** two-way control, a once-a-day digest, and the betting tools below.
 
 Live trading happens on **Kalshi** (sports, predictions, latency arbitrage, perpetuals, BTC 5-minute). Coinbase is a data source only, unless you set `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only if you add credentials; stocks and Polymarket never send real orders.
 
@@ -150,7 +150,7 @@ Set these yourself and never commit them. `FMP_API_KEY` from older versions is n
 | `KALSHI_SPORTS_USER_BET_MAX_PCT` | `0.25` | Cap for a single bet you place from Telegram |
 | `KALSHI_SPORTS_USER_PARLAY_MAX_PCT` | `0.25` | Cap for a parlay you place from Telegram |
 | `KALSHI_SPORTS_USER_PARLAY_MAX_LEGS` | `10` | Most legs in a parlay |
-| `TELEGRAM_DIGEST_HOURS` | `6` | Batch routine alerts into one message (`0` = immediate) |
+| `TELEGRAM_DIGEST_HOURS` | `24` | Batch routine alerts into one message (`0` = immediate) |
 | `TELEGRAM_NATURAL_LANGUAGE` | `true` | Understand plain-text messages |
 | `COINBASE_TRADING_ENABLED` | `false` | Coinbase stays data-only unless this is `true` |
 | `DAILY_HALT_DRAWDOWN` / `KILL_SWITCH_DRAWDOWN` | `0.05` / `0.15` | Risk halts for the non-sports strategies |
@@ -215,7 +215,7 @@ Sending a screenshot of a bet slip, or typing a list of legs, works too.
 | `/ai` | AI analysis status, budget and circuit breaker |
 | `/help` | The command list |
 
-Routine alerts (cycle summaries, risk banners, leads, heartbeats) arrive as **one digest every 6 hours**. Replies to your commands and a kill-switch trigger are always immediate. Pause, resume and kill are slash-only: plain text can never trigger them.
+Routine alerts (cycle summaries, risk banners, leads, heartbeats) arrive as **one digest a day** (`TELEGRAM_DIGEST_HOURS`, default 24; a redeploy sends what is held right away). Replies to your commands and a kill-switch trigger are always immediate. Pause, resume and kill are slash-only: plain text can never trigger them.
 
 ## Betting from Telegram in detail
 
