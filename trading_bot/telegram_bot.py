@@ -415,7 +415,7 @@ _GDP_REASONS = {
     "too_close_to_close": "market about to close",
     "past_release": "release already out",
     "unreadable_event": "could not read this market's quarter or release time",
-    "edge_too_small": "edge too small after fee",
+    "edge_too_small": "edge too small",
     "wide_spread": "bid-ask spread too wide",
     "model_market_gap": "model and market too far apart (treated as bad data)",
     "no_two_sided_book": "no two-sided book",
@@ -424,6 +424,15 @@ _GDP_REASONS = {
     "event_position_cap": "already holding the maximum for this quarter",
     "already_held": "already held",
 }
+
+
+def _gdp_edge_note(row: dict[str, Any], min_edge: Any) -> str:
+    """For a thin edge: what it is after the fee against what the strategy requires."""
+    if row.get("reason") != "edge_too_small" or row.get("edge") is None:
+        return ""
+    edge = f"{float(row['edge']) * 100:+.1f}c after fee"
+    need = f", needs {float(min_edge) * 100:.0f}c" if min_edge is not None else ""
+    return f" ({edge}{need})"
 
 
 def _format_gdp(result: dict[str, Any]) -> str:
@@ -463,7 +472,7 @@ def _format_gdp(result: dict[str, Any]) -> str:
                 f"BUY {str(row['side']).upper()} at {float(row['price']) * 100:.0f}c (edge {float(row['edge']) * 100:+.1f}c)"
                 if not row.get("reason")
                 else html.escape(_GDP_REASONS.get(row["reason"], row["reason"]))
-                + (f" ({float(row['edge']) * 100:+.1f}c)" if row.get("edge") is not None and row["reason"] == "edge_too_small" else "")
+                + _gdp_edge_note(row, result.get("min_edge"))
             )
             lines.append(
                 f"{strike}  {book} | model {float(row['p_model']) * 100:.0f}% | blend {float(row['p_blend']) * 100:.0f}% | {verdict}"

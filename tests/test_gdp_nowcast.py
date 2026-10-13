@@ -379,6 +379,14 @@ class FormatTests(unittest.TestCase):
         self.assertIn("bid-ask spread too wide", text)
         self.assertIn("Trading: OFF", _format_gdp({**strat.preview(_NOW), "enabled": False}))
 
+    def test_thin_edge_shows_the_edge_against_the_requirement(self):
+        result = {"nowcast": {"value": 3.59, "quarter": "2026Q3", "age_hours": 0.0}, "min_edge": 0.07,
+                  "events": [{"quarter": "2026Q3", "rows": [{
+                      "strike": 3.5, "yes_bid": 0.35, "yes_ask": 0.36, "p_model": 0.53, "p_blend": 0.44,
+                      "reason": "edge_too_small", "edge": 0.06}]}]}
+        text = _format_gdp(result)
+        self.assertIn("edge too small (+6.0c after fee, needs 7c)", text)
+
     def test_no_nowcast_says_so(self):
         text = _format_gdp({"nowcast": None, "error": "HTTP 500"})
         self.assertIn("No nowcast available (HTTP 500)", text)

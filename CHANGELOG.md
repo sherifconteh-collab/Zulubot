@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### `/gdp` says what a thin edge is up against
+- A strike skipped for a small edge now reads "edge too small (+6.0c after fee, needs 7c)" instead of "edge too small after fee (+6.0c)", which looked like a positive edge being refused. The requirement comes from `GDP_NOWCAST_MIN_EDGE`.
+
 ### GDP nowcast strategy (replaces the long-shot rule for GDP markets)
 - New `gdp_nowcast` strategy for Kalshi's GDP markets, off by default (`GDP_NOWCAST_ENABLED`). It reads the Atlanta Fed's GDPNow estimate (public FRED CSV, no key), converts it into a probability for each "GDP above X%" strike using the nowcast's forecast error (wider further from the release), averages it with the market's own price, and buys YES or NO only when that probability beats the ask price plus Kalshi's fee by 7 cents. Sizing is a quarter of the Kelly stake, capped at 5% of the Kalshi bankroll per bet and 15% for all GDP bets, at most 2 strikes per quarter, hold to settlement unless the bid beats its own value by a margin.
 - Fails closed: no nowcast (or older than 48 hours), a nowcast for another quarter, more than 21 days to the release, a spread over 6 cents, tail prices, a model that disagrees with the market by over 35 points, an unreadable account, a halt or the kill switch all mean no bet. GDP exposure already on the account counts toward the cap.

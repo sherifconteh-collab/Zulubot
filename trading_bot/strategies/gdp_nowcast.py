@@ -197,7 +197,7 @@ class GdpNowcastStrategy:
     def preview(self, now: datetime) -> dict[str, Any]:
         """Read-only view of model versus market for every open strike. Places no orders."""
         out: dict[str, Any] = {
-            "status": "ok", "enabled": self.config.enabled, "events": [], "nowcast": None,
+            "status": "ok", "enabled": self.config.enabled, "min_edge": self.config.min_edge, "events": [], "nowcast": None,
             "buys": [], "sells": [], "decisions": [],
         }
         try:
