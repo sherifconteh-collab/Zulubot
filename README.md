@@ -1,6 +1,6 @@
 # Zulubot
 
-A multi-strategy trading bot with a **Kalshi sports-betting engine**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Stocks and Polymarket are always paper-only.
+A multi-strategy trading bot with a **Kalshi sports-betting engine** and **crypto trading on Coinbase**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
@@ -20,6 +20,7 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine**, controlled
 - [Configuration](#configuration)
 - [Telegram commands](#telegram-commands)
 - [Betting from Telegram in detail](#betting-from-telegram-in-detail)
+- [Crypto trading](#crypto-trading)
 - [Safety and risk controls](#safety-and-risk-controls)
 - [How the sports model works](#how-the-sports-model-works)
 - [Project layout](#project-layout)
@@ -44,6 +45,8 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | **Altcoin rotation** | Rotates into coins that lead the market | Yes (`ROTATION_ENABLED`) | Runs only if `COINBASE_TRADING_ENABLED=true`, then real Coinbase orders |
 | **Markov regime** | Bull / bear / sideways regime model on daily prices; opens and closes long positions on the signal | Yes (`MARKOV_ENABLED`) | Simulated only: it trades the paper book, never a venue |
 | **Options** | Deep in-the-money calls and puts on extreme fear or greed | No (`OPTIONS_ENABLED`) | Real Robinhood orders if `ROBINHOOD_*` credentials are set |
+
+How the crypto rows work, and how to turn them on, is in [Crypto trading](#crypto-trading).
 
 In paper mode (the default) every row is simulated. The "on by default" column is the code default; Railway's Variables panel is what the running bot actually uses, so check it (the `railway.toml` values are only defaults). Send `/status` or `/help` to see what is running.
 
@@ -313,6 +316,50 @@ A bare surname is fine when it is unambiguous. If the legs point at one game, th
 ### Limits that always apply
 
 Market open, game not started, price within 2¢ of the preview (single bets), one bet per game for game-winner legs, at least `KALSHI_SPORTS_MIN_TRADE_USD`, at most `KALSHI_SPORTS_USER_BET_MAX_PCT` of your bankroll for a single bet and `KALSHI_SPORTS_USER_PARLAY_MAX_PCT` for a parlay, and no more than the cash available. Sports is exempt from the global kill switch (`KALSHI_SPORTS_IGNORE_GLOBAL_HALT`). Hand-picked bets settle and are counted like any other sports bet.
+
+## Crypto trading
+
+Zulubot also trades crypto on **Coinbase**. It is **off for real money by default**: in paper mode (the default) the crypto strategies trade simulated cash, and the live Coinbase path needs three things at once: `PAPER_MODE=false`, `COINBASE_TRADING_ENABLED=true` and Coinbase API keys. With `PAPER_MODE=false` and Coinbase trading left off, the crypto and rotation strategies do not run at all (Coinbase then stays a free price source only).
+
+### What trades
+
+| Strategy | Idea | Runs |
+| --- | --- | --- |
+| **Crypto sentiment** (`/crypto`) | Buys the coins you list when the market is fearful, sells when it is greedy. Signal: the [Fear & Greed index](https://alternative.me/crypto/fear-and-greed-index/). | every 10 minutes |
+| **Altcoin rotation** (`/rotation`) | Holds one coin at a time and swaps into another only when the price ratio has moved enough to pay for the fees. | every 30 minutes |
+
+**Crypto sentiment** in detail:
+- **Buy** a coin when Fear & Greed is below `CRYPTO_BUY_FEAR_THRESHOLD` (35), **sell** when it is above `CRYPTO_SELL_FEAR_THRESHOLD` (75).
+- **Trend filter:** it will not buy a coin whose own price is more than 5% below its 20-day average, so it does not buy a falling knife just because the whole market is scared (`CRYPTO_TREND_FILTER_ENABLED`, `CRYPTO_TREND_SMA_DAYS`, `CRYPTO_TREND_TOLERANCE_PCT`).
+- **Funding rate** (from Hyperliquid, free and US-accessible) is recorded as a signal. Set `CRYPTO_REQUIRE_NEGATIVE_FUNDING=true` to buy only when it is negative; by default it does not block a buy.
+- **Exits that do not wait for greed:** take profit at +15% and stop loss at -10% from entry, checked every cycle (`CRYPTO_TAKE_PROFIT_PCT`, `CRYPTO_STOP_LOSS_PCT`), with per-coin overrides (`CRYPTO_TAKE_PROFIT_OVERRIDES=XRPUSDT:0.20`).
+- **Size:** each buy is about 2% of your equity (`MAX_POSITION_FRACTION`), never more than the cash available, scaled per coin by `CRYPTO_SYMBOL_WEIGHTS`. Optional volatility targeting (`VOL_TARGETING_ENABLED`) scales the size with how wild a coin has been.
+- **Coins:** `CRYPTO_SYMBOLS`, default `BTCUSDT,ETHUSDT`. Coins the bot can price and trade on Coinbase: BTC, ETH, SOL, XRP, ADA, DOT, LINK, AVAX, MATIC.
+- **Optional AI check:** with `TRADING_AGENTS_ENABLED` an AI model can confirm or veto a buy (`boost`, `require` or `log_only`), under the monthly budget in [Configuration](#configuration).
+
+**Altcoin rotation** in detail:
+- It looks at the top 50 coins by volume (`ROTATION_MAX_COINS_TO_TRACK`) and uses up to 60% of your capital (`ROTATION_CAPITAL_PCT`).
+- Every swap goes coin -> USD -> new coin, and costs about 0.6% a leg (`ROTATION_FEE_PCT`). It only swaps when the price ratio beats the fees by `ROTATION_SCOUT_MULTIPLIER` (3x), so most cycles do nothing.
+- A "never go backwards" rule skips a swap that would leave you with less of the new coin than you held of it before, and that memory expires after about a week (`ROTATION_QTY_MEMORY_CYCLES`) so a crash cannot lock it out forever. Coins you never want: `ROTATION_EXCLUDED_COINS`.
+
+**Related crypto strategies that live on Kalshi, not Coinbase** (all off by default except the BTC 5-minute one): the predictions strategy (it covers crypto markets), latency arbitrage (Kalshi crypto contracts that lag the Coinbase price), Kalshi perpetuals and the BTC 5-minute spread. They place real orders on Kalshi when `PAPER_MODE=false`, whatever the Coinbase setting is. The **Markov regime** model (bull, bear or sideways from daily prices) is simulated only, but its signal can hold back new prediction and Polymarket entries (`PREDICTION_MARKOV_GATE`, `POLYMARKET_MARKOV_GATE`).
+
+### Turning on real Coinbase trading
+
+1. Create an API key for **Coinbase Advanced Trade** (the "Cloud" key format whose name starts with `organizations/`). It needs permission to view and to trade, and it should not be able to withdraw.
+2. Fund the account with **USD or USDC**. In live mode the bot treats your Coinbase USD plus USDC balance as the cash it can spend, and it reads that balance from Coinbase on every cycle.
+3. Set these in Railway's Variables (or `.env`), never in a file you commit:
+   - `COINBASE_API_KEY` (the key name) and `COINBASE_API_SECRET` (the EC private key, with `\n` for line breaks)
+   - `COINBASE_TRADING_ENABLED=true`
+   - `PAPER_MODE=false` (this one switch also makes the Kalshi strategies live, so check [Going live on Kalshi](#going-live-on-kalshi) too)
+4. Start with a small balance. Orders are **market orders**, so you pay the spread and Coinbase's fee on each one.
+5. Run `python -m trading_bot doctor` to confirm the keys are present, then watch `/status`, `/positions` and `/crypto`.
+
+### Controls and honest expectations
+
+- **Risk limits apply:** the position cap, the daily halt (`DAILY_HALT_DRAWDOWN`, 5%), the kill switch (`KILL_SWITCH_DRAWDOWN`, 15%), trailing stops and the loss cooldown all cover crypto. `/kill` (or the kill switch firing) sells your crypto positions at market and pauses the bot.
+- **Commands:** `/crypto` and `/rotation` run a strategy now, `/status` and `/positions` show holdings, `/pause` stops all trading, and `/config` shows the active crypto settings.
+- **It is not an edge.** Fear & Greed is a slow sentiment reading, not a forecast; buying fear can mean buying a long decline. Rotation pays fees on every swap. Crypto can fall a lot in a day, and the stop loss may fill below its level in a fast market. Treat it as an experiment, size it small, and only use money you can afford to lose.
 
 ## Safety and risk controls
 

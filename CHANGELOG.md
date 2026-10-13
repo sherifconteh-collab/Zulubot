@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### README: a Crypto trading section
+- New "Crypto trading" section: what the crypto sentiment and altcoin rotation strategies do (Fear & Greed thresholds, trend filter, funding rate, take profit and stop loss, sizing, rotation fees and the "never go backwards" rule), the three switches needed for real Coinbase trading (`PAPER_MODE=false`, `COINBASE_TRADING_ENABLED=true`, Coinbase keys), step-by-step setup, which risk controls cover crypto, and honest expectations. The intro, contents and strategy table link to it, and it notes the Kalshi-side crypto strategies and the Markov gate.
+
 ## [2026.10.0] — 2026-10-12
 
 ### SECURITY.md repository settings match ai-grc-platform
