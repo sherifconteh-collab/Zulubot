@@ -132,6 +132,8 @@ POLYMARKET_USE_TRADING_AGENTS = "false"
 
 # Kalshi: forecast-based GDP bets
 GDP_NOWCAST_ENABLED = "true"
+# Kalshi: BTC/ETH hourly price markets vs a Coinbase-based price model
+CRYPTO_MARKETS_ENABLED = "true"
 
 # Latency arb
 LATENCY_ARB_ENABLED = "false"

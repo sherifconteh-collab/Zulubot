@@ -135,6 +135,9 @@ def diagnose(env: Mapping[str, str]) -> list[Finding]:
     if _flag(env, "GDP_NOWCAST_ENABLED", True) and not kalshi and not paper:
         out.append(Finding(WARN, "GDP forecast bets are on (the default) but there is no Kalshi key, so they cannot trade."))
 
+    if _flag(env, "CRYPTO_MARKETS_ENABLED", True) and not kalshi and not paper:
+        out.append(Finding(WARN, "Crypto price markets are on (the default) but there is no Kalshi key, so they cannot trade."))
+
     # Leftover keys nothing reads.
     if _has(env, "FMP_API_KEY"):
         out.append(Finding(INFO, "FMP_API_KEY is set but no longer used (stock data comes from yfinance). Safe to remove."))

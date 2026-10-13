@@ -614,6 +614,34 @@ class GdpNowcastConfig:
 
 
 @dataclass(frozen=True)
+class CryptoMarketsConfig:
+    """Kalshi crypto price ladders (BTC, ETH), bet only where a log-normal price model beats the quote."""
+
+    enabled: bool = True                    # still trades only with PAPER_MODE=false and Kalshi keys
+    check_interval_minutes: int = 10
+    series: tuple[str, ...] = ("KXBTCD", "KXETHD")
+    max_hours_to_close: float = 6.0         # only markets settling soon: the price model is best short-term
+    min_minutes_to_close: float = 20.0
+    max_candle_age_minutes: float = 20.0    # reject volatility estimates built on stale candles
+    vol_multiplier: float = 1.15            # crypto has fat tails: widen the realized spread
+    min_sigma_5m: float = 0.0007            # floor on the 5-minute log-return spread (0.07%)
+    basis_sd: float = 0.0006                # Coinbase versus the CF Benchmarks settlement index
+    max_offset_sds: float = 1.0             # our price versus the ladder's center, in model spreads
+    model_weight: float = 0.5
+    min_edge: float = 0.08                  # required edge per $1 contract after Kalshi's fee
+    max_spread: float = 0.05
+    min_price: float = 0.08
+    max_price: float = 0.92
+    max_model_market_gap: float = 0.25
+    kelly_fraction: float = 0.20
+    max_position_pct: float = 0.02          # one bet, as a share of the Kalshi bankroll
+    capital_allocation_pct: float = 0.06    # all crypto-market exposure together
+    max_positions_per_event: int = 2
+    min_trade_usd: float = 1.0
+    exit_margin: float = 0.03
+
+
+@dataclass(frozen=True)
 class AppConfig:
     paper_mode: bool
     initial_cash: float
@@ -639,6 +667,7 @@ class AppConfig:
     trading_agents: TradingAgentsConfig
     altcoin_rotation: AltcoinRotationConfig
     kalshi: KalshiConfig
+    crypto_markets: CryptoMarketsConfig
     freqtrade: FreqtradeConfig
     latency_arb: LatencyArbConfig
     volatility: VolatilityConfig
@@ -1005,6 +1034,21 @@ class AppConfig:
                 max_positions_per_event=_env_int("GDP_NOWCAST_MAX_POSITIONS_PER_EVENT", 2),
                 min_trade_usd=_env_float("GDP_NOWCAST_MIN_TRADE_USD", 1.0),
                 exit_margin=_env_float("GDP_NOWCAST_EXIT_MARGIN", 0.03),
+            ),
+            crypto_markets=CryptoMarketsConfig(
+                enabled=_env_bool("CRYPTO_MARKETS_ENABLED", True),
+                check_interval_minutes=_env_int("CRYPTO_MARKETS_INTERVAL_MINUTES", 10),
+                series=tuple(_env_list("CRYPTO_MARKETS_SERIES", ["KXBTCD", "KXETHD"])),
+                max_hours_to_close=_env_float("CRYPTO_MARKETS_MAX_HOURS_TO_CLOSE", 6.0),
+                min_minutes_to_close=_env_float("CRYPTO_MARKETS_MIN_MINUTES_TO_CLOSE", 20.0),
+                vol_multiplier=_env_float("CRYPTO_MARKETS_VOL_MULTIPLIER", 1.15),
+                min_edge=_env_float("CRYPTO_MARKETS_MIN_EDGE", 0.08),
+                max_spread=_env_float("CRYPTO_MARKETS_MAX_SPREAD", 0.05),
+                kelly_fraction=_env_float("CRYPTO_MARKETS_KELLY_FRACTION", 0.20),
+                max_position_pct=_env_float("CRYPTO_MARKETS_MAX_POSITION_PCT", 0.02),
+                capital_allocation_pct=_env_float("CRYPTO_MARKETS_CAPITAL_PCT", 0.06),
+                max_positions_per_event=_env_int("CRYPTO_MARKETS_MAX_POSITIONS_PER_EVENT", 2),
+                min_trade_usd=_env_float("CRYPTO_MARKETS_MIN_TRADE_USD", 1.0),
             ),
             protected_symbols=frozenset(
                 s.strip().upper()

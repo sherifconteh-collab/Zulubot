@@ -4,6 +4,12 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Crypto price markets: automatic BTC and ETH bets from a price model
+- New `crypto_markets` strategy for Kalshi's hourly Bitcoin and Ethereum price ladders (`KXBTCD`, `KXETHD`), on by default (`CRYPTO_MARKETS_ENABLED`; it still trades only with `PAPER_MODE=false` and Kalshi keys). The live Coinbase price is the center, recent realized volatility sets the spread (larger of the last 3 hours and the last day, widened 15%, plus a basis allowance for the settlement index), the price at settlement is log-normal, and it buys YES or NO only when the probability, averaged 50/50 with the market's own price, beats the ask plus Kalshi's fee by 8 cents. Sizing is a fifth of the Kelly stake, at most 2% of the Kalshi bankroll per bet and 6% in total, 2 strikes per event.
+- Built-in check against bad data: it fits the market's own ladder to find the price and spread the quotes imply, and bets only if its volatility is within a factor of two of the market's and its price within one model spread of the ladder's center; the spot price must also agree with the last Coinbase candle. It also needs 4 or more strikes priced between 10 and 90 cents. Missing or stale (over 20 minutes) Coinbase data, settling in under 20 minutes or over 6 hours, wide books, extreme prices, an unreadable account, a halt or the kill switch all mean no bet.
+- `/cryptomarkets` shows the prices, model-versus-market spread and each near-the-money strike (read-only, no orders). `CRYPTO_MARKETS_*` settings are in `.env.example`.
+- GDP and crypto share one `forecast_engine`: the checks, Kelly sizing, caps, IOC orders, fill booking and early-exit logic live in one place, and a new market type needs only a model. GDP behaviour is unchanged (its 36 tests pass untouched).
+
 ### GDP forecast bets are on by default
 - `GDP_NOWCAST_ENABLED` now defaults to `true` (as for sports), so nothing needs adding to Railway's Variables. It still places real orders only with `PAPER_MODE=false` and Kalshi keys, and the retired `PREDICTION_*` variables can simply be deleted. Set `GDP_NOWCAST_ENABLED=false` to stop it.
 
