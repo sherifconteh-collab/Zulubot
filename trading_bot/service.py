@@ -30,6 +30,7 @@ from trading_bot.state import StateStore
 from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.strategies.altcoin_rotation import AltcoinRotationStrategy
 from trading_bot.strategies.btc_5min import BTC5MinSpreadStrategy
+from trading_bot.strategies.crypto_markets import CryptoMarketsStrategy
 from trading_bot.strategies.gdp_nowcast import GdpNowcastStrategy
 from trading_bot.clients_nowcast import GdpNowClient
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
@@ -256,6 +257,13 @@ class TradingBotService:
             logger=logger,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
         )
+        self.crypto_markets_strategy = CryptoMarketsStrategy(
+            config=config.crypto_markets,
+            kalshi_client=self.kalshi_client,
+            coinbase_client=self.coinbase_client,
+            logger=logger,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+        )
         self.kalshi_sports_strategy = KalshiSportsStrategy(
             config=config.kalshi_sports,
             kalshi_client=self.kalshi_client,
@@ -450,6 +458,16 @@ class TradingBotService:
                     now=now,
                 ),
             )
+        if command == "crypto_markets" or (command == "all" and self.config.crypto_markets.enabled):
+            module_results["crypto_markets"] = self._run_module(
+                "crypto_markets",
+                lambda: self.crypto_markets_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
         if command == "kalshi_sports" or (command == "all" and self.config.kalshi_sports.enabled):
             module_results["kalshi_sports"] = self._run_module(
                 "kalshi_sports",
@@ -530,6 +548,10 @@ class TradingBotService:
         Touches no portfolio state, so it deliberately does not take the state lock.
         """
         return self.gdp_nowcast_strategy.preview(datetime.now(self.config.timezone))
+
+    def crypto_markets_preview(self) -> dict[str, Any]:
+        """Price model versus Kalshi for the open BTC and ETH ladders, read-only (the /cryptomarkets command)."""
+        return self.crypto_markets_strategy.preview(datetime.now(self.config.timezone))
 
     @_locked
     def status(self) -> dict[str, Any]:

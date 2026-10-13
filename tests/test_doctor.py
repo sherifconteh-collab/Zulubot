@@ -44,6 +44,11 @@ class DoctorTests(unittest.TestCase):
         env = {"PAPER_MODE": "false", "GDP_NOWCAST_ENABLED": "true"}
         self.assertIn("GDP forecast bets are on (the default) but there is no Kalshi key", texts(env, WARN))
 
+    def test_crypto_markets_without_a_key_in_live_mode_warns(self):
+        env = {"PAPER_MODE": "false"}
+        self.assertIn("Crypto price markets are on (the default) but there is no Kalshi key", texts(env, WARN))
+        self.assertNotIn("Crypto price markets are on", texts({**env, "CRYPTO_MARKETS_ENABLED": "false"}, WARN))
+
     def test_half_configured_telegram_is_a_failure(self):
         self.assertIn("TELEGRAM_CHAT_ID is missing", texts({"TELEGRAM_BOT_TOKEN": "123:abc"}, FAIL))
         self.assertIn("TELEGRAM_BOT_TOKEN is missing", texts({"TELEGRAM_CHAT_ID": "42"}, FAIL))

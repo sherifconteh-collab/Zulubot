@@ -307,6 +307,7 @@ class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
                 check_interval_minutes=30, qty_memory_cycles=336,
             ),
             gdp_nowcast=SimpleNamespace(enabled=True, min_edge=0.07),
+            crypto_markets=SimpleNamespace(enabled=True, min_edge=0.08),
             polymarket_strategy=SimpleNamespace(enabled=False),
             scheduler=SimpleNamespace(
                 crypto_interval_minutes=30, stock_check_hour=15,

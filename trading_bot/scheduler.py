@@ -48,6 +48,7 @@ class SchedulerService:
         self._last_kalshi_perps_run: datetime | None = None
         self._last_kalshi_sports_run: datetime | None = None
         self._last_gdp_run: datetime | None = None
+        self._last_crypto_markets_run: datetime | None = None
         self._paused_by_kill_switch = False
 
         # When latency arb is active, tighten the poll loop to its scan interval
@@ -237,6 +238,18 @@ class SchedulerService:
             if result is not None:
                 module_results.append(result)
             self._last_gdp_run = now
+            if result is not None and result.get("risk", {}).get("kill_switch_active"):
+                await self._finalize_trade_notifications(module_results)
+                trade_notification_sent = bool(module_results)
+                await self._handle_kill_switch(result)
+                return
+
+        # Crypto price-market cycle (Kalshi BTC and ETH ladders vs a Coinbase-based price model)
+        if self._should_run_crypto_markets(now):
+            result = await self._run_module("crypto_markets", now)
+            if result is not None:
+                module_results.append(result)
+            self._last_crypto_markets_run = now
             if result is not None and result.get("risk", {}).get("kill_switch_active"):
                 await self._finalize_trade_notifications(module_results)
                 trade_notification_sent = bool(module_results)
@@ -435,6 +448,14 @@ class SchedulerService:
             return True
         elapsed = (now - self._last_gdp_run).total_seconds()
         return elapsed >= self.config.gdp_nowcast.check_interval_minutes * 60
+
+    def _should_run_crypto_markets(self, now: datetime) -> bool:
+        if not self.config.crypto_markets.enabled:
+            return False
+        if self._last_crypto_markets_run is None:
+            return True
+        elapsed = (now - self._last_crypto_markets_run).total_seconds()
+        return elapsed >= self.config.crypto_markets.check_interval_minutes * 60
 
     def _should_run_kalshi_sports(self, now: datetime) -> bool:
         if not self.config.kalshi_sports.enabled:

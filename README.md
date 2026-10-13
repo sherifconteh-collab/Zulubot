@@ -1,6 +1,6 @@
 # Zulubot
 
-A multi-strategy trading bot with a **Kalshi sports-betting engine**, **crypto trading on Coinbase** and **forecast-driven Kalshi bets on markets that have a real forecast (GDP today)**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, GDP) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
+A multi-strategy trading bot with a **Kalshi sports-betting engine**, **crypto trading on Coinbase** and **forecast-driven Kalshi bets on markets that have a real forecast (GDP, and BTC and ETH prices)**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, GDP) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
@@ -23,6 +23,7 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine**, **crypto t
 - [Crypto trading](#crypto-trading)
 - [Other Kalshi markets: no forecast, no bet](#other-kalshi-markets-no-forecast-no-bet)
 - [GDP markets](#gdp-markets-a-forecast-not-a-rule)
+- [Crypto price markets](#crypto-price-markets-a-price-model-with-a-sanity-check)
 - [Safety and risk controls](#safety-and-risk-controls)
 - [How the sports model works](#how-the-sports-model-works)
 - [Project layout](#project-layout)
@@ -38,6 +39,7 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | --- | --- | --- | --- |
 | **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues, plus automatic same-game parlays. Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. | Yes | Real Kalshi orders |
 | **GDP nowcast** | Kalshi GDP markets ("GDP above 3.5%"), bet only when the Atlanta Fed's GDPNow estimate, turned into a probability, beats the price after fees (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) | Yes (`GDP_NOWCAST_ENABLED`) | Real Kalshi orders |
+| **Crypto price markets** | Kalshi BTC and ETH hourly price ladders ("Bitcoin above $92,300 at 3pm?"), bet only when a Coinbase-based price model beats the quote after fees (see [Crypto price markets](#crypto-price-markets-a-price-model-with-a-sanity-check)) | Yes (`CRYPTO_MARKETS_ENABLED`) | Real Kalshi orders |
 | **Latency arbitrage** | Short-dated Kalshi crypto contracts when the Coinbase price feed moves before Kalshi does | No (`LATENCY_ARB_ENABLED`) | Real Kalshi orders |
 | **Kalshi perpetuals** | Kalshi crypto perpetuals (BTC, ETH, SOL, XRP) on momentum, leverage capped | No (`KALSHI_PERP_ENABLED`) | Real Kalshi orders |
 | **BTC 5-minute spread** | Kalshi and Polymarket implied BTC price vs Coinbase spot | Yes (`BTC5MIN_ENABLED`) | Kalshi leg is real; the Polymarket leg is skipped; spot leg needs Coinbase trading |
@@ -59,7 +61,7 @@ Around the strategies:
 - **Backtesting:** Freqtrade integration for backtests and hyperopt.
 - **Telegram:** two-way control, a once-a-day digest, and the betting tools below.
 
-Live trading happens on **Kalshi** (sports, GDP, latency arbitrage, perpetuals, BTC 5-minute). Coinbase is a data source only, unless you set `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only if you add credentials; stocks and Polymarket never send real orders.
+Live trading happens on **Kalshi** (sports, GDP, crypto price markets, latency arbitrage, perpetuals, BTC 5-minute). Coinbase is a data source only, unless you set `COINBASE_TRADING_ENABLED=true`; options go through Robinhood only if you add credentials; stocks and Polymarket never send real orders.
 
 ## Sports betting from Telegram
 
@@ -147,6 +149,7 @@ Set these yourself and never commit them. `FMP_API_KEY` from older versions is n
 | `INITIAL_CASH` | `100000` | Starting balance in paper mode |
 | `KALSHI_SPORTS_ENABLED` | `true` | Turn the sports strategy on or off |
 | `GDP_NOWCAST_ENABLED` | `true` | Turn the GDP nowcast strategy off with `false` (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) |
+| `CRYPTO_MARKETS_ENABLED` | `true` | Turn the BTC/ETH price-market strategy off with `false` (see [Crypto price markets](#crypto-price-markets-a-price-model-with-a-sanity-check)) |
 | `KALSHI_SPORTS_LEAGUES` | all major leagues | Which leagues to scan |
 | `KALSHI_SPORTS_KELLY_FRACTION` | `0.25` | Fraction of Kelly to stake |
 | `KALSHI_SPORTS_MAX_POSITION_PCT` | `0.10` | Largest single automatic bet, as a share of bankroll |
@@ -187,6 +190,7 @@ Only the chat in `TELEGRAM_CHAT_ID` is answered. You can also type plain English
 | --- | --- |
 | `/sports` | Run the Kalshi sports strategy and show the mode (LIVE or PAPER), build, balance by shard, cash, what was bought and why nothing was |
 | `/gdp` | GDP nowcast against Kalshi's prices, read-only: shows what the model would bet and why not (no orders) |
+| `/cryptomarkets` | BTC and ETH price model against Kalshi's ladders, read-only: shows the check against the market and what it would bet (no orders) |
 | `/perps` | Kalshi crypto perpetuals |
 | `/crypto` | BTC and ETH on Fear & Greed |
 | `/rotation` | Altcoin rotation |
@@ -366,7 +370,7 @@ Zulubot also trades crypto on **Coinbase**. It is **off for real money by defaul
 
 ## Other Kalshi markets: no forecast, no bet
 
-Kalshi lists far more than sports and GDP: inflation, the Fed, jobs, stock indexes, crypto prices, weather, politics. The bot has **one rule for all of them: it only bets where it has a probability model** that beats the price after Kalshi's fee. Sports has one (the [sports model](#how-the-sports-model-works)). GDP has one ([below](#gdp-markets-a-forecast-not-a-rule)). Nothing else does yet, so nothing else is bet on automatically.
+Kalshi lists far more than sports and GDP: inflation, the Fed, jobs, stock indexes, crypto prices, weather, politics. The bot has **one rule for all of them: it only bets where it has a probability model** that beats the price after Kalshi's fee. Sports has one (the [sports model](#how-the-sports-model-works)). GDP has one ([below](#gdp-markets-a-forecast-not-a-rule)). BTC and ETH hourly prices have one ([below](#crypto-price-markets-a-price-model-with-a-sanity-check)). Nothing else does yet, so nothing else is bet on automatically.
 
 **Why the old rule was retired.** The first prediction strategy bought whichever side of a market was cheap (a "long shot"), with no idea what the true odds were. That has a built-in cost. Studies of hundreds of thousands of Kalshi contracts (for example Bürgi, Deng and Whelan) find contracts priced under 10 cents lose over 60% of the money put in, and Kalshi's fee is a large share of the price on contracts that cheap. Buying the cheap side every time therefore loses on average, and a few lucky wins do not change that. Its code has been deleted. Positions it opened earlier stay open until they settle, unless you sell them in the Kalshi app; your balance and holdings are still read from Kalshi.
 
@@ -377,7 +381,8 @@ Kalshi lists far more than sports and GDP: inflation, the Fed, jobs, stock index
 | Sports | Yes, [sports model](#how-the-sports-model-works) | already built |
 | GDP | Yes, [GDP nowcast](#gdp-markets-a-forecast-not-a-rule) | already built |
 | Inflation (CPI), jobs, Fed rate | No | a public forecast feed the bot can read and check, plus a model of its error |
-| Stock indexes, crypto prices | No | real-time prices fast enough to beat the market makers; delayed free data has no edge. Crypto speed trades live in the separate [latency arbitrage](#crypto-trading) strategy (off by default). |
+| BTC and ETH prices (hourly ladders) | Yes, [crypto price markets](#crypto-price-markets-a-price-model-with-a-sanity-check) | already built |
+| Other crypto, stock indexes | No | real-time prices fast enough to beat the market makers; delayed free data has no edge. Crypto speed trades live in the separate [latency arbitrage](#crypto-trading) strategy (off by default). |
 | Weather | No | a forecast matched to the exact station and rules each contract settles on |
 | Politics, entertainment | No | there is no forecast to compare the price against |
 
@@ -402,6 +407,24 @@ The retired long-shot rule had no view of the number it was betting on. For GDP 
 Send `/gdp` to see, read-only, the nowcast and every open strike with Kalshi's price, the model's probability and what it would do and why not. If `/gdp` says no nowcast is available, the strategy places no bets (the bot needs to reach `fred.stlouisfed.org`; the last good reading is reused for up to 48 hours if it is down).
 
 **Honest expectations.** This is a real forecast with real costs accounted for, but it is **not proven to make money**. GDPNow is not clearly better than professional forecasters, Kalshi's traders see it too, and Kalshi's GDP markets only go back a few years, so there is too little history to prove an edge. The settings are conservative on purpose, and most days it will place no bet. Expect small stakes and an uncertain result.
+
+## Crypto price markets: a price model with a sanity check
+
+Kalshi lists hourly Bitcoin and Ethereum price ladders ("Bitcoin above $92,300 at 3pm EDT?", one market per strike, settled on a CF Benchmarks index). The **crypto price markets strategy** (`CRYPTO_MARKETS_ENABLED`, on by default like sports) prices every strike itself and bets only where its price beats the quote. It places real Kalshi orders only with `PAPER_MODE=false` and your Kalshi keys, and needs no extra key: prices come from Coinbase's public data.
+
+**How it decides**
+1. **Center:** the live Coinbase price. **Spread:** recent volatility, the larger of the last 3 hours and the last day of 5-minute moves, widened 15% because crypto has fat tails, plus a small allowance because Coinbase is not the settlement index.
+2. **Probability:** the price at the settlement time is log-normal around that center, which gives P(above), P(below) and P(between) for every strike.
+3. **Humility and edge:** averaged 50/50 with the market's own price, then bought (YES or NO) only if it beats the ask **plus Kalshi's fee** by at least 8 cents (`CRYPTO_MARKETS_MIN_EDGE`).
+4. **Size:** a fifth of the Kelly stake, at most 2% of your Kalshi bankroll per bet, 6% for all crypto-market bets together, at most 2 strikes per hourly event. It sells early only when the bid beats its own value by a margin.
+
+**The sanity check.** Nobody can test this against live settlement from the outside, so the bot checks itself against the market on every event. It fits the market's own ladder to find the price and spread the quotes imply. It bets only if its volatility is within a factor of two of the market's and its price is within 2.5 model spreads of the ladder's center. A disagreement bigger than that is more likely a bad data feed than an opportunity, so it bets nothing. The check also needs at least four strikes priced between 10 and 90 cents, so a ladder that is almost settled is skipped.
+
+**When it stays out** (every guard fails closed): no Coinbase price or candles (or candles older than 20 minutes), settling in under 20 minutes or over 6 hours, a book spread over 5 cents, a price under 8 or over 92 cents, the model and the market more than 25 points apart, unreadable account positions, a daily halt or the kill switch.
+
+Send `/cryptomarkets` to see, read-only, the Coinbase prices, the model's spread against the market's, and every strike near the money with the model's probability and what it would do and why not. Check that it shows sensible numbers before trusting it with more than small stakes.
+
+**Honest expectations.** The market makers behind these quotes see the same prices faster than a 10-minute poll, so the bot mostly finds nothing. When it does bet, it is acting on a quote that lagged a price move, which is real but small, and it is **not proven to make money**. The settings are conservative on purpose. If you do not want it, set `CRYPTO_MARKETS_ENABLED=false`.
 
 ## Safety and risk controls
 
@@ -431,7 +454,7 @@ Be realistic: sportsbooks, Polymarket and Kalshi usually agree within a point or
 
 ```
 trading_bot/
-  strategies/     sports, GDP nowcast, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
+  strategies/     sports, GDP nowcast, crypto price markets, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
   integrations/   AI analysis, analyst personas, Freqtrade, slip reader, plain-text router
   service.py      core orchestrator
   scheduler.py    daemon loop
