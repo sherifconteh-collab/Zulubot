@@ -423,16 +423,65 @@ _GDP_REASONS = {
     "unsupported_market": "not an 'above X%' market",
     "event_position_cap": "already holding the maximum for this quarter",
     "already_held": "already held",
+    "too_far_from_close": "settles too far away for the price model",
+    "no_price": "no Coinbase price or price history",
+    "cannot_check_volatility": "too few mid-range prices to check the volatility against the market",
+    "volatility_mismatch": "model volatility and the market's disagree (treated as bad data)",
 }
+
+
+def _format_crypto_markets(result: dict[str, Any]) -> str:
+    """Read-only table of the price model against Kalshi's BTC and ETH ladders."""
+    lines = ["<b>Crypto price markets vs Kalshi</b>"]
+    spot = result.get("spot")
+    if not spot:
+        error = html.escape(str(result.get("error") or "unavailable"))
+        return "\n".join(lines + [f"No Coinbase prices available ({error}). The strategy places no bets without them."])
+    for product, info in (spot.get("coins") or {}).items():
+        lines.append(f"{html.escape(str(product))}: ${float(info['price']):,.2f} "
+                     f"(5-min moves about \u00b1{float(info['sigma_5m_pct']):.2f}%)")
+    enabled = result.get("enabled")
+    if enabled is not None:
+        lines.append("Trading: ON" if enabled else "Trading: OFF (CRYPTO_MARKETS_ENABLED=false)")
+    min_edge = result.get("min_edge")
+    for event in result.get("events") or []:
+        rows = event.get("rows") or []
+        if not rows or event.get("hours") is None:
+            continue
+        head = f"{html.escape(str(event.get('event')))}: settles in {float(event['hours']):.1f}h"
+        if event.get("sd") is not None:
+            head += f", model spread \u00b1{float(event['sd']) * 100:.2f}%"
+        if event.get("implied_sd") is not None:
+            head += f", market implies \u00b1{float(event['implied_sd']) * 100:.2f}%"
+        lines += ["", f"<b>{head}</b>"]
+        if event.get("reason"):
+            lines.append("Not betting: " + html.escape(_GDP_REASONS.get(event["reason"], event["reason"])))
+            continue
+        shown = [r for r in rows if r.get("p_model") is not None and r.get("reason") not in ("price_out_of_range", "no_two_sided_book")]
+        buys = [r for r in shown if not r.get("reason")]
+        near = sorted((r for r in shown if r.get("reason")), key=lambda r: abs(float(r["p_model"]) - 0.5))[:6]
+        if not shown:
+            lines.append("No strike is priced between 5 and 95 cents.")
+        for row in buys + near:
+            book = f"Kalshi {float(row['yes_bid']) * 100:.0f}-{float(row['yes_ask']) * 100:.0f}c"
+            if not row.get("reason"):
+                verdict = f"BUY {str(row['side']).upper()} at {float(row['price']) * 100:.0f}c (edge {float(row['edge']) * 100:+.1f}c)"
+            else:
+                verdict = html.escape(_GDP_REASONS.get(row["reason"], row["reason"]))
+                if row["reason"] == "edge_too_small" and row.get("edge") is not None:
+                    need = f", needs {float(min_edge) * 100:.0f}c" if min_edge is not None else ""
+                    verdict += f" ({float(row['edge']) * 100:+.1f}c after fee{need})"
+            lines.append(f"{html.escape(str(row.get('label') or row.get('strike')))}  {book} | model "
+                         f"{float(row['p_model']) * 100:.0f}% | blend {float(row['p_blend']) * 100:.0f}% | {verdict}")
+    return "\n".join(lines)
 
 
 def _gdp_edge_note(row: dict[str, Any], min_edge: Any) -> str:
     """For a thin edge: what it is after the fee against what the strategy requires."""
     if row.get("reason") != "edge_too_small" or row.get("edge") is None:
         return ""
-    edge = f"{float(row['edge']) * 100:+.1f}c after fee"
     need = f", needs {float(min_edge) * 100:.0f}c" if min_edge is not None else ""
-    return f" ({edge}{need})"
+    return f" ({float(row['edge']) * 100:+.1f}c after fee{need})"
 
 
 def _format_gdp(result: dict[str, Any]) -> str:
@@ -448,7 +497,7 @@ def _format_gdp(result: dict[str, Any]) -> str:
     )
     enabled = result.get("enabled")
     if enabled is not None:
-        lines.append("Trading: ON" if enabled else "Trading: OFF (set GDP_NOWCAST_ENABLED=true to bet)")
+        lines.append("Trading: ON" if enabled else "Trading: OFF (GDP_NOWCAST_ENABLED=false)")
     for event in result.get("events") or []:
         rows = event.get("rows") or []
         if not rows:
@@ -787,12 +836,12 @@ class TradingTelegramBot:
             "stocks": "\U0001f4c8",
             "polymarket": "\U0001f52e",
             "rotation": "\U0001f504",
-            "predictions": "\U0001f3b2",
             "latency_arb": "\u26a1",
             "markov": "\U0001f9ed",
             "options": "\U0001f4ca",
             "kalshi_sports": "\U0001f3c8",
             "gdp_nowcast": "\U0001f4ca",
+            "crypto_markets": "\U0001fa99",
         }
         return icons.get(module_name, "\u2699\ufe0f")
 
@@ -905,25 +954,6 @@ class TradingTelegramBot:
                     f"<code>{html.escape(str(module_data.get('to', '?')))}</code>"
                 )
             self._append_generic_ai_context(lines, module_data)
-            return
-
-        if module_name == "predictions":
-            discovered = int(module_data.get("markets_discovered", module_data.get("markets_found", 0)) or 0)
-            scanned = int(module_data.get("markets_scanned", discovered) or 0)
-            resolved = module_data.get("resolved_closed", [])
-            can_trade = bool(module_data.get("can_trade"))
-            lines.append(f"   \U0001f3b2 Markets: {scanned}/{discovered} scanned")
-            categories = module_data.get("categories") or []
-            if categories:
-                lines.append(
-                    "   \U0001f5c2 Categories: "
-                    + ", ".join(html.escape(str(c)) for c in categories)
-                )
-            execution_text = "live-enabled" if can_trade else "scan-only / paper"
-            lines.append(f"   \U0001f4cc Execution: {execution_text}")
-            if resolved:
-                resolved_preview = ", ".join(html.escape(str(symbol)) for symbol in resolved[:3])
-                lines.append(f"   \U0001f3c1 Resolved: {resolved_preview}")
             return
 
         if module_name == "kalshi_sports":
@@ -1243,8 +1273,8 @@ class TradingTelegramBot:
             "config": self._cmd_config,
             "polymarket": self._cmd_polymarket,
             "rotation": self._cmd_rotation,
-            "predict": self._cmd_predictions,
             "gdp": self._cmd_gdp,
+            "cryptomarkets": self._cmd_crypto_markets,
             "perps": self._cmd_kalshi_perps,
             "sports": self._cmd_kalshi_sports,
             "games": self._cmd_games,
@@ -1292,8 +1322,9 @@ class TradingTelegramBot:
             "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
-            "/crypto /stocks /rotation /predict /perps /sports /polymarket /btc5min /markov /options\n"
+            "/crypto /stocks /rotation /gdp /perps /sports /polymarket /btc5min /markov /options\n"
             "/gdp — GDP nowcast vs Kalshi prices (read-only, no orders)\n"
+            "/cryptomarkets — BTC/ETH price model vs Kalshi (read-only, no orders)\n"
             "/backtest [range]\n"
             "\n"
             "<b>Your own sports bets</b>\n"
@@ -1559,16 +1590,16 @@ class TradingTelegramBot:
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
-    async def _cmd_predictions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_crypto_markets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the BTC/ETH price model against Kalshi's ladders. Read-only: the scheduler does the betting."""
         if not self._check_auth(update):
             return
         if self._service is None:
             await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
             return
         try:
-            result = self._service.run("predictions")
-            result["force_send"] = True
-            await self.send_trade_alert(result)
+            result = await asyncio.to_thread(self._service.crypto_markets_preview)
+            await update.message.reply_text(_format_crypto_markets(result), parse_mode="HTML")  # type: ignore[union-attr]
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 
@@ -2511,11 +2542,8 @@ class TradingTelegramBot:
             f"Rotation    {'on' if cfg.altcoin_rotation.enabled else 'off'}  "
             f"fee {cfg.altcoin_rotation.fee_pct*100:.1f}% x{cfg.altcoin_rotation.scout_multiplier}  "
             f"{rotation_mem}",
-            f"Kalshi      {'on' if cfg.predictions.enabled else 'off'}  "
-            f"YES<{cfg.predictions.buy_yes_threshold} NO>{cfg.predictions.buy_no_threshold}"
-            + ("  fng-gate" if cfg.predictions.require_crypto_fear_greed else "")
-            + f"  pages≤{cfg.predictions.max_pages_per_series}"
-            + ("  auto-series" if cfg.predictions.discover_series else ""),
+            f"GDP         {'on' if cfg.gdp_nowcast.enabled else 'off'}  edge>={cfg.gdp_nowcast.min_edge * 100:.0f}c",
+            f"Crypto mkts {'on' if cfg.crypto_markets.enabled else 'off'}  edge>={cfg.crypto_markets.min_edge * 100:.0f}c",
             f"Polymarket  {'on' if cfg.polymarket_strategy.enabled else 'off'}",
             "",
             "<b>Schedule</b>",

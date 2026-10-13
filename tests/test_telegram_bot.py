@@ -269,19 +269,6 @@ class ModuleContextTests(unittest.TestCase):
         self.assertIn("XRPUSDT ×2", joined)
         self.assertIn("20d SMA", joined)
 
-    def test_predictions_context_lists_categories(self) -> None:
-        lines: list[str] = []
-        self.bot._append_module_context(
-            lines, "predictions",
-            {
-                "markets_discovered": 40,
-                "markets_scanned": 40,
-                "can_trade": False,
-                "categories": ["crypto", "economics", "weather"],
-            },
-        )
-        self.assertIn("crypto, economics, weather", "\n".join(lines))
-
 
 class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -319,11 +306,8 @@ class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
                 enabled=True, fee_pct=0.006, scout_multiplier=3,
                 check_interval_minutes=30, qty_memory_cycles=336,
             ),
-            predictions=SimpleNamespace(
-                enabled=True, buy_yes_threshold=0.45, buy_no_threshold=0.55,
-                require_crypto_fear_greed=False,
-                max_pages_per_series=3, discover_series=False,
-            ),
+            gdp_nowcast=SimpleNamespace(enabled=True, min_edge=0.07),
+            crypto_markets=SimpleNamespace(enabled=True, min_edge=0.08),
             polymarket_strategy=SimpleNamespace(enabled=False),
             scheduler=SimpleNamespace(
                 crypto_interval_minutes=30, stock_check_hour=15,
@@ -345,7 +329,7 @@ class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("XRPUSDT 25%", message)
         self.assertIn("sma20-gate", message)
         self.assertIn("mem 336cy", message)
-        self.assertIn("pages≤3", message)
+        self.assertIn("GDP         on", message)
         self.assertIn("breaker on", message)
 
     async def test_cmd_ai_shows_circuit_breaker_state(self) -> None:

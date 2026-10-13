@@ -417,33 +417,11 @@ class AltcoinRotationConfig:
 
 
 @dataclass(frozen=True)
-class PredictionConfig:
-    enabled: bool = False                # OFF by default
-    kalshi_key_id: str = ""              # Kalshi API key ID
-    kalshi_private_key: str = ""         # Kalshi RSA private key PEM
-    buy_yes_threshold: float = 0.45      # Buy YES below this price (wider = more aggressive)
-    buy_no_threshold: float = 0.55       # Buy NO above this price (wider = more aggressive)
-    take_profit_threshold: float = 0.50  # Take profit at 0.50
-    stop_loss_pct: float = 0.15          # Stop loss at 15% move against
-    max_positions: int = 8
-    check_interval_minutes: int = 30
-    min_trade_usd: float = 1.0
-    min_volume_usd: float = 3_000        # Minimum 24h volume to consider a market tradeable
-    max_spread_usd: float = 0.20         # Maximum bid/ask spread allowed per side
-    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather", "sports", "entertainment"])
-    capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
-    # Opt-in extra gate for crypto-category markets: require an extreme Fear &
-    # Greed reading to align with the price threshold. Default False so crypto
-    # predictions trade on price thresholds alone — previously this gate kept
-    # the Kalshi strategy idle outside of extreme sentiment regimes.
-    require_crypto_fear_greed: bool = False
-    use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
-    # Market discovery breadth: pages of 50 markets fetched per series (the
-    # API cursor used to be discarded, capping coverage at 20 markets/series).
-    max_pages_per_series: int = 3
-    # Opt-in: augment the hardcoded series lists with series discovered from
-    # the Kalshi events API so new market series are picked up automatically.
-    discover_series: bool = False
+class KalshiConfig:
+    """Kalshi API credentials, shared by every Kalshi strategy."""
+
+    key_id: str = ""                     # Kalshi API key ID
+    private_key: str = ""                # Kalshi RSA private key PEM
 
 
 @dataclass(frozen=True)
@@ -603,9 +581,9 @@ class OptionsStrategyConfig:
 
 @dataclass(frozen=True)
 class GdpNowcastConfig:
-    """Kalshi GDP markets, bet only where a nowcast-based probability beats the price (opt-in)."""
+    """Kalshi GDP markets, bet only where a nowcast-based probability beats the price."""
 
-    enabled: bool = False
+    enabled: bool = True                    # still trades only with PAPER_MODE=false and Kalshi keys
     check_interval_minutes: int = 30
     series: str = "KXGDP"
     # Atlanta Fed GDPNow as published by FRED (public CSV, no key). Latest row = quarter being tracked.
@@ -636,6 +614,34 @@ class GdpNowcastConfig:
 
 
 @dataclass(frozen=True)
+class CryptoMarketsConfig:
+    """Kalshi crypto price ladders (BTC, ETH), bet only where a log-normal price model beats the quote."""
+
+    enabled: bool = True                    # still trades only with PAPER_MODE=false and Kalshi keys
+    check_interval_minutes: int = 10
+    series: tuple[str, ...] = ("KXBTCD", "KXETHD")
+    max_hours_to_close: float = 6.0         # only markets settling soon: the price model is best short-term
+    min_minutes_to_close: float = 20.0
+    max_candle_age_minutes: float = 20.0    # reject volatility estimates built on stale candles
+    vol_multiplier: float = 1.15            # crypto has fat tails: widen the realized spread
+    min_sigma_5m: float = 0.0007            # floor on the 5-minute log-return spread (0.07%)
+    basis_sd: float = 0.0006                # Coinbase versus the CF Benchmarks settlement index
+    max_offset_sds: float = 1.0             # our price versus the ladder's center, in model spreads
+    model_weight: float = 0.5
+    min_edge: float = 0.08                  # required edge per $1 contract after Kalshi's fee
+    max_spread: float = 0.05
+    min_price: float = 0.08
+    max_price: float = 0.92
+    max_model_market_gap: float = 0.25
+    kelly_fraction: float = 0.20
+    max_position_pct: float = 0.02          # one bet, as a share of the Kalshi bankroll
+    capital_allocation_pct: float = 0.06    # all crypto-market exposure together
+    max_positions_per_event: int = 2
+    min_trade_usd: float = 1.0
+    exit_margin: float = 0.03
+
+
+@dataclass(frozen=True)
 class AppConfig:
     paper_mode: bool
     initial_cash: float
@@ -660,7 +666,8 @@ class AppConfig:
     polymarket_strategy: PolymarketStrategyConfig
     trading_agents: TradingAgentsConfig
     altcoin_rotation: AltcoinRotationConfig
-    predictions: PredictionConfig
+    kalshi: KalshiConfig
+    crypto_markets: CryptoMarketsConfig
     freqtrade: FreqtradeConfig
     latency_arb: LatencyArbConfig
     volatility: VolatilityConfig
@@ -844,25 +851,9 @@ class AppConfig:
                 capital_allocation_pct=_env_float("ROTATION_CAPITAL_PCT", 0.60),
                 qty_memory_cycles=_env_int("ROTATION_QTY_MEMORY_CYCLES", 336),
             ),
-            predictions=PredictionConfig(
-                enabled=_env_bool("PREDICTION_ENABLED", False),
-                kalshi_key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
-                kalshi_private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
-                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.45),
-                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.55),
-                take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
-                stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
-                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 8),
-                check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 30),
-                min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
-                min_volume_usd=_env_float("PREDICTION_MIN_VOLUME_USD", 3_000),
-                max_spread_usd=_env_float("PREDICTION_MAX_SPREAD_USD", 0.20),
-                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather", "sports", "entertainment"]),
-                capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
-                require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
-                use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),
-                max_pages_per_series=_env_int("PREDICTION_MAX_PAGES_PER_SERIES", 3),
-                discover_series=_env_bool("PREDICTION_DISCOVER_SERIES", False),
+            kalshi=KalshiConfig(
+                key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
+                private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),
@@ -1019,7 +1010,7 @@ class AppConfig:
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
             ),
             gdp_nowcast=GdpNowcastConfig(
-                enabled=_env_bool("GDP_NOWCAST_ENABLED", False),
+                enabled=_env_bool("GDP_NOWCAST_ENABLED", True),
                 check_interval_minutes=_env_int("GDP_NOWCAST_INTERVAL_MINUTES", 30),
                 series=os.getenv("GDP_NOWCAST_SERIES", "KXGDP").strip() or "KXGDP",
                 source_url=os.getenv(
@@ -1043,6 +1034,21 @@ class AppConfig:
                 max_positions_per_event=_env_int("GDP_NOWCAST_MAX_POSITIONS_PER_EVENT", 2),
                 min_trade_usd=_env_float("GDP_NOWCAST_MIN_TRADE_USD", 1.0),
                 exit_margin=_env_float("GDP_NOWCAST_EXIT_MARGIN", 0.03),
+            ),
+            crypto_markets=CryptoMarketsConfig(
+                enabled=_env_bool("CRYPTO_MARKETS_ENABLED", True),
+                check_interval_minutes=_env_int("CRYPTO_MARKETS_INTERVAL_MINUTES", 10),
+                series=tuple(_env_list("CRYPTO_MARKETS_SERIES", ["KXBTCD", "KXETHD"])),
+                max_hours_to_close=_env_float("CRYPTO_MARKETS_MAX_HOURS_TO_CLOSE", 6.0),
+                min_minutes_to_close=_env_float("CRYPTO_MARKETS_MIN_MINUTES_TO_CLOSE", 20.0),
+                vol_multiplier=_env_float("CRYPTO_MARKETS_VOL_MULTIPLIER", 1.15),
+                min_edge=_env_float("CRYPTO_MARKETS_MIN_EDGE", 0.08),
+                max_spread=_env_float("CRYPTO_MARKETS_MAX_SPREAD", 0.05),
+                kelly_fraction=_env_float("CRYPTO_MARKETS_KELLY_FRACTION", 0.20),
+                max_position_pct=_env_float("CRYPTO_MARKETS_MAX_POSITION_PCT", 0.02),
+                capital_allocation_pct=_env_float("CRYPTO_MARKETS_CAPITAL_PCT", 0.06),
+                max_positions_per_event=_env_int("CRYPTO_MARKETS_MAX_POSITIONS_PER_EVENT", 2),
+                min_trade_usd=_env_float("CRYPTO_MARKETS_MIN_TRADE_USD", 1.0),
             ),
             protected_symbols=frozenset(
                 s.strip().upper()
