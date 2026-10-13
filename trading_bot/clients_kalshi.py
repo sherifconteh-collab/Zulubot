@@ -553,8 +553,22 @@ class KalshiClient:
         """Get current portfolio positions."""
         if not self.can_trade:
             return []
-        result = self._get("/portfolio/positions", auth=True)
-        return result.get("market_positions", [])
+        # Page through everything: a guard that only saw the first page would miss holdings. A reply without
+        # the expected key raises instead of reading as "no positions", so callers fail closed.
+        positions: list[dict[str, Any]] = []
+        cursor = ""
+        for _ in range(20):
+            params: dict[str, Any] = {"limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            result = self._get("/portfolio/positions", params=params, auth=True)
+            if not isinstance(result, dict) or "market_positions" not in result:
+                raise RuntimeError("Unexpected Kalshi positions response (no market_positions)")
+            positions.extend(result.get("market_positions") or [])
+            cursor = str(result.get("cursor") or "")
+            if not cursor:
+                return positions
+        raise RuntimeError("Kalshi positions list did not end after 20 pages")
 
     def get_held_tickers(self) -> set[str]:
         """Market tickers the account holds a non-zero position in right now (YES or NO), from Kalshi itself.

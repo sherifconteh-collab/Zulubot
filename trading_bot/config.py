@@ -626,7 +626,7 @@ class CryptoMarketsConfig:
     vol_multiplier: float = 1.15            # crypto has fat tails: widen the realized spread
     min_sigma_5m: float = 0.0007            # floor on the 5-minute log-return spread (0.07%)
     basis_sd: float = 0.0006                # Coinbase versus the CF Benchmarks settlement index
-    max_offset_sds: float = 2.5             # our price versus the ladder's center, in model spreads
+    max_offset_sds: float = 1.0             # our price versus the ladder's center, in model spreads
     model_weight: float = 0.5
     min_edge: float = 0.08                  # required edge per $1 contract after Kalshi's fee
     max_spread: float = 0.05

@@ -34,13 +34,16 @@ def _candles(sigma: float = _SIGMA_5M, last_age_s: int = 300, n: int = 288, pric
         closes.append(closes[-1] * math.exp(rng.gauss(0.0, sigma)))
     end = int(_NOW.timestamp()) - last_age_s
     rows = [{"start": str(end - 300 * (n - 1 - i)), "close": f"{c:.2f}"} for i, c in enumerate(closes)]
-    return list(reversed(rows)), closes[-1]
+    scale = price / closes[-1]                 # end exactly at the requested price
+    rows = [{"start": r["start"], "close": f"{float(r['close']) * scale:.2f}"} for r in rows]
+    return list(reversed(rows)), price
 
 
 class FakeCoinbase:
-    def __init__(self, spot: float = 92_300.0, sigma: float = _SIGMA_5M, last_age_s: int = 300) -> None:
+    def __init__(self, spot: float = 92_300.0, sigma: float = _SIGMA_5M, last_age_s: int = 300,
+                 candle_price: float = 92_300.0) -> None:
         self.spot = spot
-        self.candles, _ = _candles(sigma, last_age_s)
+        self.candles, _ = _candles(sigma, last_age_s, price=candle_price)
         self.fail = False
 
     def get_spot_price_by_product_id(self, product: str) -> float:
@@ -175,8 +178,14 @@ class EventGuardTests(unittest.TestCase):
         self.assertEqual(reasons, ["cannot_check_volatility"])
 
     def test_a_price_far_outside_the_ladder_is_treated_as_a_bad_feed(self):
-        strat, _, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=96_000))
+        strat, _, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=96_000, candle_price=96_000))
         self.assertEqual([e["reason"] for e in strat.preview(_NOW)["events"]], ["price_far_from_market"])
+
+    def test_a_price_that_disagrees_with_its_own_candles_is_not_used(self):
+        strat, _, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=95_000, candle_price=92_300))
+        out = strat.preview(_NOW)
+        self.assertEqual(out["status"], "no_spot")
+        self.assertIn("disagrees with the last candle", out["error"])
 
     def test_no_price_history_or_stale_candles_means_no_bets_at_all(self):
         for coinbase in (FakeCoinbase(last_age_s=3600), ):
@@ -197,26 +206,26 @@ class BettingTests(unittest.TestCase):
         self.assertEqual((result["buys"], state.positions, kalshi.orders), ([], {}, []))
 
     def test_a_stale_ladder_after_a_price_move_gets_bet_the_right_way(self):
-        # The market still centers on 92,300 while Coinbase has moved up to 92,900: YES on strikes
+        # The market still centers on 92,300 while Coinbase has moved up to 92,700: YES on strikes
         # around the move is underpriced.
-        coinbase = FakeCoinbase(spot=92_900)
+        coinbase = FakeCoinbase(spot=92_700)
         strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=coinbase)
         state, result = _run(strat)
         self.assertTrue(result["buys"], result["decisions"])
         position = state.positions[result["buys"][0]]
         self.assertEqual((position.strategy, position.asset_type, position.meta["side"]), ("crypto_markets", "prediction", "yes"))
-        self.assertEqual(position.meta["spot"], 92_900)
+        self.assertEqual(position.meta["spot"], 92_700)
         self.assertLessEqual(len(result["buys"]), 2)                      # per-event cap
 
     def test_the_mirror_case_buys_no(self):
-        coinbase = FakeCoinbase(spot=91_700)
+        coinbase = FakeCoinbase(spot=91_900)
         strat, _, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=coinbase)
         state, result = _run(strat)
         self.assertTrue(result["buys"])
         self.assertEqual(state.positions[result["buys"][0]].meta["side"], "no")
 
     def test_live_orders_are_immediate_or_cancel_at_the_ask_and_capped(self):
-        coinbase = FakeCoinbase(spot=92_900)
+        coinbase = FakeCoinbase(spot=92_700)
         strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=coinbase, live=True)
         state, result = _run(strat, live=True)
         self.assertTrue(kalshi.orders)
@@ -228,15 +237,15 @@ class BettingTests(unittest.TestCase):
             self.assertLessEqual(position.quantity * position.entry_price, 1000.0 * 0.02 + 1.0)
 
     def test_nothing_is_bet_when_disabled_or_halted(self):
-        strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_900), enabled=False)
+        strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_700), enabled=False)
         self.assertEqual(_run(strat)[1]["status"], "disabled")
-        strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_900))
+        strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_700))
         state = PortfolioState(cash=1000.0, halt_new_trades_for_day=True)
         result = strat.run(state, broker=PaperBroker(True, _LOG), risk_manager=RiskManager(RiskConfig()), now=_NOW)
         self.assertEqual((result["buys"], state.positions), ([], {}))
 
     def test_a_held_strike_is_not_bought_again(self):
-        coinbase = FakeCoinbase(spot=92_900)
+        coinbase = FakeCoinbase(spot=92_700)
         markets = _ladder(92_300, _model_sd())
         strat, kalshi, _ = _strategy(markets, coinbase=coinbase, live=True)
         _, first = _run(strat, live=True)
@@ -247,11 +256,90 @@ class BettingTests(unittest.TestCase):
             self.assertNotIn(order["ticker"], kalshi.held)
 
 
+class EngineSafetyTests(unittest.TestCase):
+    def _live(self, **kwargs):
+        strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_700),
+                                     live=True, **kwargs)
+        return strat, kalshi
+
+    def test_an_unreadable_account_exposure_means_no_bets(self):
+        strat, kalshi = self._live()
+        kalshi.get_exposure_by_ticker = lambda: (_ for _ in ()).throw(RuntimeError("503"))
+        state, result = _run(strat, live=True)
+        self.assertEqual((result["buys"], kalshi.orders), ([], []))
+        self.assertIn("exposure_unavailable", [d["reason"] for d in result["decisions"]])
+
+    def test_a_strike_already_in_the_local_books_is_never_ordered_again(self):
+        strat, kalshi = self._live()
+        state, first = _run(strat, live=True)
+        self.assertTrue(first["buys"])
+        kalshi.orders.clear()
+        broker = PaperBroker(False, _LOG)
+        again = strat.run(state, broker=broker, risk_manager=RiskManager(RiskConfig()), now=_NOW)
+        ordered = {o["ticker"] for o in kalshi.orders}
+        booked = {p.meta["ticker"] for p in state.positions.values()}
+        self.assertFalse(ordered & {p for p in booked if p in {b.split(':')[1] for b in first["buys"]}})
+        self.assertEqual(len(booked), len(state.positions))
+
+    def test_a_duplicate_market_in_the_listing_is_read_once(self):
+        markets = _ladder(92_300, _model_sd())
+        strat, kalshi, _ = _strategy(markets + markets[:5], coinbase=FakeCoinbase(spot=92_700))
+        self.assertEqual(len(strat._discover()), len(markets))
+
+    def test_a_series_too_big_to_read_whole_is_skipped(self):
+        strat, kalshi, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_700))
+        kalshi.get_markets = lambda **kw: ([dict(_ladder(92_300, 0.006)[0], ticker=f"KXBTCD-X-{kw.get('cursor')}")], "more")
+        self.assertEqual(strat._discover(), [])
+
+    def test_an_exit_sells_the_whole_position_even_when_the_stored_quantity_sits_a_hair_low(self):
+        strat, kalshi = self._live()
+        state, first = _run(strat, live=True)
+        symbol = first["buys"][0]
+        position = state.positions[symbol]
+        position.quantity = 28.9999
+        sells = []
+        kalshi.sell_to_close = lambda **kw: sells.append(kw) or {"order": {"fill_count": kw["count"]}}
+        market = kalshi.get_market(position.meta["ticker"])
+        side = position.meta["side"]
+        self.assertEqual(side, "yes")
+        market.update(yes_bid_dollars="0.6000", yes_ask_dollars="0.6200")     # a bid well above our value: sell
+        strat._maybe_exit(state, PaperBroker(False, _LOG), symbol, position, market, _NOW, "kalshi", {"sells": [], "decisions": []})
+        self.assertEqual(sells[0]["count"], 29)
+
+
+class PositionsReadTests(unittest.TestCase):
+    def _client(self, pages):
+        from trading_bot.clients_kalshi import KalshiClient
+        from unittest.mock import PropertyMock, patch
+        client = KalshiClient(logger=_LOG)
+        patcher = patch.object(KalshiClient, "can_trade", new_callable=PropertyMock, return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        calls = []
+
+        def fake_get(path, params=None, auth=False):
+            calls.append(dict(params or {}))
+            return pages[len(calls) - 1]
+        client._get = fake_get
+        return client, calls
+
+    def test_every_page_is_read(self):
+        client, calls = self._client([{"market_positions": [{"ticker": "A", "position": 1}], "cursor": "c1"},
+                                      {"market_positions": [{"ticker": "B", "position": 2}], "cursor": ""}])
+        self.assertEqual([p["ticker"] for p in client.get_positions()], ["A", "B"])
+        self.assertEqual(calls[1]["cursor"], "c1")
+
+    def test_a_reply_without_the_expected_key_fails_instead_of_reading_as_empty(self):
+        client, _ = self._client([{"positions": []}])
+        with self.assertRaises(RuntimeError):
+            client.get_positions()
+
+
 class FormatTests(unittest.TestCase):
     def test_table_shows_prices_the_check_and_the_verdicts(self):
-        strat, _, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_900))
+        strat, _, _ = _strategy(_ladder(92_300, _model_sd()), coinbase=FakeCoinbase(spot=92_700))
         text = _format_crypto_markets(strat.preview(_NOW))
-        self.assertIn("BTC-USD: $92,900.00", text)
+        self.assertIn("BTC-USD: $92,700.00", text)
         self.assertIn("market implies", text)
         self.assertIn("BUY", text)
 

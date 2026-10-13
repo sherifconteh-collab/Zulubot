@@ -9,7 +9,7 @@ Two checks guard against the model being wrong in ways nobody can see from here:
 * the realized-volatility spread must agree, within a factor of two, with the spread the market's own
   price ladder implies; if the two disagree the data or the model is wrong and nothing is bet,
 * the ladder must hold enough mid-range prices to measure that implied spread at all, and our price
-  may not sit more than a couple of model spreads away from the ladder's own center (a bigger gap is
+  may not sit more than one model spread away from the ladder's own center (a bigger gap is
   more likely a bad price feed than a real opportunity).
 
 The shared ``forecast_engine`` does the rest: average with the market's price, require an edge after
@@ -121,14 +121,21 @@ class CryptoPriceModel:
         for product in self._products():
             try:
                 price = float(self.coinbase.get_spot_price_by_product_id(product))
-                sigma = self._sigma_for(product, now)
+                history = self._history_for(product, now)
             except Exception as exc:                       # network, HTTP or format problem: no bets on this coin
                 problems.append(f"{product}: {type(exc).__name__}: {exc}"[:120])
                 continue
-            if price > 0 and sigma is not None:
-                self._spot[product], self._sigma[product] = price, sigma
-            else:
+            if price <= 0 or history is None:
                 problems.append(f"{product}: no usable price history")
+                continue
+            sigma, last_close, age_minutes = history
+            # The price endpoint and the candles are independent reads: if they disagree by far more than
+            # the market could have moved since the last candle, one of them is wrong, so bet on neither.
+            allowed = 6.0 * sigma * math.sqrt(age_minutes / 5.0 + 1.0)
+            if abs(math.log(price / last_close)) > allowed:
+                problems.append(f"{product}: spot {price:g} disagrees with the last candle {last_close:g}")
+                continue
+            self._spot[product], self._sigma[product] = price, sigma
         if not self._spot:
             self.error = "; ".join(problems) or "no crypto prices available"
             return None
@@ -137,8 +144,10 @@ class CryptoPriceModel:
             "source": "Coinbase", "age_hours": 0.0, "problems": problems,
         }
 
-    def _sigma_for(self, product: str, now: datetime) -> float | None:
-        """Conservative 5-minute volatility: the larger of the last 3 hours and the last day, scaled up."""
+    def _history_for(self, product: str, now: datetime) -> tuple[float, float, float] | None:
+        """(5-minute volatility, last close, its age in minutes), or None if the history is unusable.
+
+        Volatility is conservative: the larger of the last 3 hours and the last day, scaled up."""
         symbol = _BINANCE_BY_PRODUCT.get(product)
         if symbol is None:
             return None
@@ -150,13 +159,15 @@ class CryptoPriceModel:
         )
         if len(rows) < 60:
             return None
-        if now.timestamp() - rows[-1][0] > self.config.max_candle_age_minutes * 60:
+        age_minutes = (now.timestamp() - rows[-1][0]) / 60.0
+        if age_minutes > self.config.max_candle_age_minutes:
             return None                                     # stale history: do not trust it
         closes = [close for _, close in rows]
         day, recent = realized_sigma(closes), realized_sigma(closes[-37:])
         if day is None or recent is None:
             return None
-        return max(day, recent, self.config.min_sigma_5m) * self.config.vol_multiplier
+        sigma = max(day, recent, self.config.min_sigma_5m) * self.config.vol_multiplier
+        return sigma, closes[-1], max(0.0, age_minutes)
 
     # ---------------------------------------------------------------- events
 

@@ -31,6 +31,7 @@ CASH_BUCKET = "kalshi"
 RESOLVED = {"settled", "finalized", "determined"}
 FEE_RATE = 0.07
 MAX_ORDER_FAILURES = 3
+_MAX_PAGES = 8
 
 
 def num(value: Any) -> float:
@@ -219,13 +220,25 @@ class ForecastEngine:
 
     def _discover(self) -> list[dict[str, Any]]:
         markets: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for series in self.model.series:
+            found: list[dict[str, Any]] = []
             cursor: str | None = None
-            for _ in range(3):
+            for _ in range(_MAX_PAGES):
                 page, cursor = self.kalshi.get_markets(series_ticker=series, status="open", limit=100, cursor=cursor)
-                markets.extend(page)
+                found.extend(page)
                 if not cursor:
                     break
+            else:
+                # More markets than we are willing to read: a ladder cut off mid-way would be priced from a
+                # partial picture, so use none of this series rather than part of it.
+                self.logger.warning("%s has more than %d open markets; skipping it this cycle.", series, _MAX_PAGES * 100)
+                continue
+            for market in found:
+                ticker = str(market.get("ticker", ""))
+                if ticker and ticker not in seen:
+                    seen.add(ticker)
+                    markets.append(market)
         return [m for m in markets if str(m.get("status", "active")).lower() in ("active", "open")]
 
     def _fee_mult(self, series: str) -> float:
@@ -294,10 +307,15 @@ class ForecastEngine:
                 self._skip(result, "*", "positions_unavailable")
                 return
         mine = self._my_positions(state)
+        held_locally = {str(p.meta.get("ticker", "")) for p in state.positions.values() if p.meta.get("ticker")}
 
         equity = broker.portfolio_equity_for_bucket(state, cash_bucket=bucket)
         cash = broker.get_cash_balance(state, cash_bucket=bucket)
-        exposure = max(sum(p.market_value for p in mine.values()), self._account_exposure())
+        account_exposure = self._account_exposure()
+        if account_exposure is None:
+            self._skip(result, "*", "exposure_unavailable")
+            return
+        exposure = max(sum(p.market_value for p in mine.values()), account_exposure)
         budget = max(0.0, equity * cfg.capital_allocation_pct - exposure)
 
         candidates: list[tuple[float, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
@@ -309,7 +327,7 @@ class ForecastEngine:
             for row in event["rows"]:
                 if row["reason"]:
                     continue
-                if row["ticker"] in account_tickers:
+                if row["ticker"] in account_tickers or row["ticker"] in held_locally:
                     row["reason"] = "already_held"
                     continue
                 if len(held_here) >= cfg.max_positions_per_event:
@@ -346,8 +364,12 @@ class ForecastEngine:
             budget = max(0.0, budget - spent)
             cash = max(0.0, cash - spent)
 
-    def _account_exposure(self) -> float:
-        """Dollars at risk in this strategy's series on the account (covers bets placed elsewhere)."""
+    def _account_exposure(self) -> float | None:
+        """Dollars at risk in this strategy's series on the account (covers bets placed elsewhere).
+
+        None means the account could not be read: the caller places no bets then, because a budget built
+        on a missing exposure figure could stack new bets on top of old ones.
+        """
         if not self.live_trading_enabled:
             return 0.0
         reader = getattr(self.kalshi, "get_exposure_by_ticker", None)
@@ -358,7 +380,7 @@ class ForecastEngine:
             return sum(cost for ticker, cost in reader().items() if ticker.startswith(prefixes))
         except Exception as exc:
             self.logger.warning("Could not read the account's %s exposure: %s", self.model.label, exc)
-            return 0.0
+            return None
 
     def _buy(
         self, state: PortfolioState, broker: PaperBroker, market: dict[str, Any], row: dict[str, Any],
@@ -394,6 +416,12 @@ class ForecastEngine:
             },
         )
         if position is None:
+            if self.live_trading_enabled:
+                # The order filled but the books refused it. Count the money as spent so the caps hold, and
+                # say so loudly: the next account sync is what will bring the position into the books.
+                self.logger.error("Filled %s x%d but could not book %s locally.", ticker, quantity, symbol)
+                self._skip(result, ticker, "filled_but_not_booked", side=side, count=quantity)
+                return quantity
             return None
         result["buys"].append(symbol)
         result["decisions"].append({
@@ -428,7 +456,7 @@ class ForecastEngine:
                 continue
             status = str(market.get("status", "")).lower()
             outcome = str(market.get("result", "")).lower()
-            if status in RESOLVED and outcome:
+            if status in RESOLVED and outcome in ("yes", "no"):
                 closed = broker.close_position(
                     state, symbol=symbol, price=1.0 if outcome == side else 0.0,
                     reason=f"resolved:{outcome}", cash_bucket=bucket,
@@ -462,7 +490,7 @@ class ForecastEngine:
         proceeds = bid - kalshi_fee(bid, FEE_RATE, self._fee_mult(series_of(market)))
         if proceeds < value + self.config.exit_margin:
             return
-        held = int(position.quantity)
+        held = int(round(position.quantity))      # stored quantity can sit a hair under a whole number
         if self.live_trading_enabled:
             try:
                 order = self.kalshi.sell_to_close(ticker=str(position.meta.get("ticker", "")), side=side, count=held)
