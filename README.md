@@ -183,7 +183,7 @@ Only the chat in `TELEGRAM_CHAT_ID` is answered. You can also type plain English
 | `/latency` | Timings of each module |
 | `/leads` | Watchlist: skipped buys and top targets per strategy |
 
-**Run a strategy now** (the same code the scheduler runs; it trades for real if `PAPER_MODE=false`)
+**Run a strategy now** (the same code the scheduler runs; it trades for real if `PAPER_MODE=false`, except `/gdp`, which only reads)
 
 | Command | What it does |
 | --- | --- |
@@ -399,7 +399,7 @@ It is a **price-threshold rule, not a forecast**, and it always buys the **unlik
 
 ### Honest expectations
 
-Prediction markets are efficient. This rule has **no view of the true probability** of an inflation print, a GDP number or an index level; it buys cheap long shots and hopes the price moves. That is a lottery-ticket profile: most of these contracts expire worthless, and the occasional winner pays $1 per contract (a 3-cent contract that wins pays about 33 times its cost). After Kalshi's fees (about 7% of price times one minus price, per contract) the expected result is a small loss, not an edge, so expect many small losses and a few wins. Treat it as a way to put small amounts to work, not a money machine. If you only want the sports engine, leave it off, or take "sports" out of `PREDICTION_MARKET_CATEGORIES` so this simple rule does not also bet on games the sports model already covers.
+Prediction markets are efficient. This rule has **no view of the true probability** of an inflation print, a jobs number or an index level; it buys cheap long shots and hopes the price moves. That is a lottery-ticket profile: most of these contracts expire worthless, and the occasional winner pays $1 per contract (a 3-cent contract that wins pays about 33 times its cost). After Kalshi's fees (about 7% of price times one minus price, per contract) the expected result is a small loss, not an edge, so expect many small losses and a few wins. Treat it as a way to put small amounts to work, not a money machine. If you only want the sports engine, leave it off, or take "sports" out of `PREDICTION_MARKET_CATEGORIES` so this simple rule does not also bet on games the sports model already covers.
 
 To use it: set `PREDICTION_ENABLED=true` (in Railway's Variables panel), make sure `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY` are set, and send `/predict` to run it once and see what it found. Your positions show in `/status` and `/positions`.
 
@@ -417,7 +417,7 @@ The predictions rule above has no view of the number it is betting on. For GDP t
 
 **When it stays out** (every guard fails closed): the nowcast is missing or older than 48 hours, it tracks a different quarter than the market, the release is more than 21 days away, the market closes within 2 hours, the bid-ask spread is wider than 6 cents, the price is under 5 or over 95 cents, the model and the market disagree by more than 35 points (more likely bad data than an edge), your account's positions cannot be read, or a daily halt or the kill switch is on. Only the current quarter has a nowcast, so far-dated quarters are never traded.
 
-Send `/gdp` to see, read-only, the nowcast and every open strike with Kalshi's price, the model's probability and what it would do and why not. If `/gdp` says no nowcast is available, the strategy places no bets.
+Send `/gdp` to see, read-only, the nowcast and every open strike with Kalshi's price, the model's probability and what it would do and why not. If `/gdp` says no nowcast is available, the strategy places no bets (the bot needs to reach `fred.stlouisfed.org`; the last good reading is reused for up to 48 hours if it is down).
 
 **Honest expectations.** This is a real forecast with real costs accounted for, but it is **not proven to make money**. GDPNow is not clearly better than professional forecasters, Kalshi's traders see it too, and Kalshi's GDP markets only go back a few years, so there is too little history to prove an edge. The settings are conservative on purpose, and most days it will place no bet. Expect small stakes and an uncertain result.
 
@@ -449,7 +449,7 @@ Be realistic: sportsbooks, Polymarket and Kalshi usually agree within a point or
 
 ```
 trading_bot/
-  strategies/     sports, predictions, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
+  strategies/     sports, predictions, GDP nowcast, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
   integrations/   AI analysis, analyst personas, Freqtrade, slip reader, plain-text router
   service.py      core orchestrator
   scheduler.py    daemon loop
