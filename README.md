@@ -1,6 +1,6 @@
 # Zulubot
 
-A multi-strategy trading bot with a **Kalshi sports-betting engine** and **crypto trading on Coinbase**, controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
+A multi-strategy trading bot with a **Kalshi sports-betting engine** **crypto trading on Coinbase** and **Kalshi prediction markets** (the stock market, the economy, politics, weather and more), controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
@@ -21,6 +21,7 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine** and **crypt
 - [Telegram commands](#telegram-commands)
 - [Betting from Telegram in detail](#betting-from-telegram-in-detail)
 - [Crypto trading](#crypto-trading)
+- [Prediction markets](#prediction-markets-stocks-economy-politics-weather)
 - [Safety and risk controls](#safety-and-risk-controls)
 - [How the sports model works](#how-the-sports-model-works)
 - [Project layout](#project-layout)
@@ -46,7 +47,7 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | **Markov regime** | Bull / bear / sideways regime model on daily prices; opens and closes long positions on the signal | Yes (`MARKOV_ENABLED`) | Simulated only: it trades the paper book, never a venue |
 | **Options** | Deep in-the-money calls and puts on extreme fear or greed | No (`OPTIONS_ENABLED`) | Real Robinhood orders if `ROBINHOOD_*` credentials are set |
 
-How the crypto rows work, and how to turn them on, is in [Crypto trading](#crypto-trading).
+How the crypto rows work, and how to turn them on, is in [Crypto trading](#crypto-trading). The Kalshi predictions row is explained in [Prediction markets](#prediction-markets-stocks-economy-politics-weather).
 
 In paper mode (the default) every row is simulated. The "on by default" column is the code default; Railway's Variables panel is what the running bot actually uses, so check it (the `railway.toml` values are only defaults). Send `/status` or `/help` to see what is running.
 
@@ -360,6 +361,42 @@ Zulubot also trades crypto on **Coinbase**. It is **off for real money by defaul
 - **Risk limits apply:** the position cap, the daily halt (`DAILY_HALT_DRAWDOWN`, 5%), the kill switch (`KILL_SWITCH_DRAWDOWN`, 15%), trailing stops and the loss cooldown all cover crypto. `/kill` (or the kill switch firing) sells your crypto positions at market and pauses the bot.
 - **Commands:** `/crypto` and `/rotation` run a strategy now, `/status` and `/positions` show holdings, `/pause` stops all trading, and `/config` shows the active crypto settings.
 - **It is not an edge.** Fear & Greed is a slow sentiment reading, not a forecast; buying fear can mean buying a long decline. Rotation pays fees on every swap. Crypto can fall a lot in a day, and the stop loss may fill below its level in a fast market. Treat it as an experiment, size it small, and only use money you can afford to lose.
+
+## Prediction markets (stocks, economy, politics, weather)
+
+Kalshi lists far more than sports. The **predictions strategy** (`/predict`) scans Kalshi's other markets, the ones you also see in the Kalshi and Coinbase apps, and places real orders on Kalshi when you are live. It is **off by default** (`PREDICTION_ENABLED=false`) and needs `PAPER_MODE=false` plus your Kalshi keys to spend real money; in paper mode it trades simulated cash.
+
+### What it scans
+
+| Category | Markets (Kalshi series) |
+| --- | --- |
+| **economics** | inflation (CPI, year over year), GDP, the Fed rate and FOMC meetings, the jobs report, recession, tariffs |
+| **finance** | stock indexes (S&P 500, Nasdaq-100, Russell 2000), gold, oil |
+| **crypto** | Bitcoin, Ethereum, Solana, Dogecoin and XRP price markets |
+| **politics** | Trump, presidential, Senate and House markets |
+| **weather** | temperature and hurricane markets |
+| **entertainment** | Rotten Tomatoes, Spotify and Netflix ranking markets |
+| **sports** | game winners and series (also covered, far better, by the [sports engine](#how-the-sports-model-works)) |
+| **other** | the next pope |
+
+Pick the categories with `PREDICTION_MARKET_CATEGORIES` (default: all except "other"). Set `PREDICTION_DISCOVER_SERIES=true` to also pick up new Kalshi series automatically. Markets need at least $3,000 of volume (`PREDICTION_MIN_VOLUME_USD`) and a bid-ask spread under 20 cents (`PREDICTION_MAX_SPREAD_USD`), and the scan rotates through the categories so one busy category (CPI) cannot fill every slot.
+
+### The rule it follows
+
+It is a **price-threshold rule, not a forecast**, and it always buys the **unlikely side**, the cheap long shot:
+- **Buy YES** when a market's YES price is below `PREDICTION_BUY_YES_THRESHOLD` (code default 0.45; `railway.toml` ships 0.35). YES is cheap, so the market thinks it is unlikely.
+- **Buy NO** when the YES price is above `PREDICTION_BUY_NO_THRESHOLD` (code default 0.55; `railway.toml` ships 0.65). The market thinks YES is likely, so NO is the cheap long shot. For example, "inflation stays under 3.3%" priced at 97 cents makes NO cost 3 cents.
+- **Take profit:** a contract is sold when its price reaches 50 cents (`PREDICTION_TAKE_PROFIT`).
+- **Stop loss:** sell if the price falls 15 cents below your entry (`PREDICTION_STOP_LOSS_PCT`, applied as 0.15 dollars, not 15 percent). A contract bought for less than 15 cents can never trigger it, so those are held until they reach 50 cents or settle.
+- **Size and limits:** at most 8 positions (`PREDICTION_MAX_POSITIONS`), using up to 40% of your equity in total (`PREDICTION_CAPITAL_PCT`) split across the free slots, never more than 95% of the cash available, at least $1 a trade (`PREDICTION_MIN_TRADE_USD`). One position per event, and it will not buy a market, or any market in the same event, that your Kalshi account already holds. It shares your Kalshi cash with the sports engine.
+- **Checks every 15 to 30 minutes** (`PREDICTION_CHECK_INTERVAL_MINUTES`). Resolved markets are closed at their settlement value.
+- **Guards:** the daily halt and kill switch stop new entries; a "learn as it goes" memory benches a market after repeated losses; the Markov regime gate (`PREDICTION_MARKOV_GATE`, on by default) pauses crypto, economics and finance entries in a bear regime (weather, politics, sports and entertainment are exempt); an optional AI check (`TRADING_AGENTS_ENABLED`) can adjust the size; and `PREDICTION_REQUIRE_CRYPTO_FNG=true` makes crypto markets also wait for an extreme Fear & Greed reading.
+
+### Honest expectations
+
+Prediction markets are efficient. This rule has **no view of the true probability** of an inflation print, a GDP number or an index level; it buys cheap long shots and hopes the price moves. That is a lottery-ticket profile: most of these contracts expire worthless, and the occasional winner pays $1 per contract (a 3-cent contract that wins pays about 33 times its cost). After Kalshi's fees (about 7% of price times one minus price, per contract) the expected result is a small loss, not an edge, so expect many small losses and a few wins. Treat it as a way to put small amounts to work, not a money machine. If you only want the sports engine, leave it off, or take "sports" out of `PREDICTION_MARKET_CATEGORIES` so this simple rule does not also bet on games the sports model already covers.
+
+To use it: set `PREDICTION_ENABLED=true` (in Railway's Variables panel), make sure `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY` are set, and send `/predict` to run it once and see what it found. Your positions show in `/status` and `/positions`.
 
 ## Safety and risk controls
 

@@ -4,8 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
-### README: a Crypto trading section
+### README: Crypto trading and Prediction markets sections
 - New "Crypto trading" section: what the crypto sentiment and altcoin rotation strategies do (Fear & Greed thresholds, trend filter, funding rate, take profit and stop loss, sizing, rotation fees and the "never go backwards" rule), the three switches needed for real Coinbase trading (`PAPER_MODE=false`, `COINBASE_TRADING_ENABLED=true`, Coinbase keys), step-by-step setup, which risk controls cover crypto, and honest expectations. The intro, contents and strategy table link to it, and it notes the Kalshi-side crypto strategies and the Markov gate.
+- New "Prediction markets" section for the Kalshi predictions strategy: the categories and series it scans (economics, finance and stock indexes, crypto, politics, weather, entertainment), the long-shot threshold rule (buys the cheap, unlikely side of a market), take profit and stop loss (the stop is 15 cents, not 15 percent), sizing and limits, the guards, and an honest note that the rule has no probability model and loses a little after fees.
 
 ## [2026.10.0] — 2026-10-12
 
