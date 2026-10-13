@@ -233,9 +233,7 @@ class TradingBotService:
             config=config.predictions,
             kalshi_client=self.kalshi_client,
             logger=logger,
-            ai_service=self.ai_service,
             live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
-            learning_config=config.learning,
         )
 
         # Kalshi Crypto Perpetuals strategy

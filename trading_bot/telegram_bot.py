@@ -899,22 +899,13 @@ class TradingTelegramBot:
             return
 
         if module_name == "predictions":
-            discovered = int(module_data.get("markets_discovered", module_data.get("markets_found", 0)) or 0)
-            scanned = int(module_data.get("markets_scanned", discovered) or 0)
             resolved = module_data.get("resolved_closed", [])
-            can_trade = bool(module_data.get("can_trade"))
-            lines.append(f"   \U0001f3b2 Markets: {scanned}/{discovered} scanned")
-            categories = module_data.get("categories") or []
-            if categories:
-                lines.append(
-                    "   \U0001f5c2 Categories: "
-                    + ", ".join(html.escape(str(c)) for c in categories)
-                )
-            execution_text = "live-enabled" if can_trade else "scan-only / paper"
-            lines.append(f"   \U0001f4cc Execution: {execution_text}")
+            sells = module_data.get("sells", [])
+            lines.append("   \U0001f3b2 Legacy positions only: the long-shot rule is retired. GDP bets: /gdp")
+            if sells:
+                lines.append("   \U0001f4b8 Closed: " + ", ".join(html.escape(str(x)) for x in sells[:3]))
             if resolved:
-                resolved_preview = ", ".join(html.escape(str(symbol)) for symbol in resolved[:3])
-                lines.append(f"   \U0001f3c1 Resolved: {resolved_preview}")
+                lines.append("   \U0001f3c1 Resolved: " + ", ".join(html.escape(str(x)) for x in resolved[:3]))
             return
 
         if module_name == "kalshi_sports":
@@ -2502,11 +2493,8 @@ class TradingTelegramBot:
             f"Rotation    {'on' if cfg.altcoin_rotation.enabled else 'off'}  "
             f"fee {cfg.altcoin_rotation.fee_pct*100:.1f}% x{cfg.altcoin_rotation.scout_multiplier}  "
             f"{rotation_mem}",
-            f"Kalshi      {'on' if cfg.predictions.enabled else 'off'}  "
-            f"YES<{cfg.predictions.buy_yes_threshold} NO>{cfg.predictions.buy_no_threshold}"
-            + ("  fng-gate" if cfg.predictions.require_crypto_fear_greed else "")
-            + f"  pages≤{cfg.predictions.max_pages_per_series}"
-            + ("  auto-series" if cfg.predictions.discover_series else ""),
+            f"Kalshi      long-shot rule retired; legacy exits {'on' if cfg.predictions.enabled else 'off'}",
+            f"GDP         {'on' if cfg.gdp_nowcast.enabled else 'off'}  edge>={cfg.gdp_nowcast.min_edge * 100:.0f}c",
             f"Polymarket  {'on' if cfg.polymarket_strategy.enabled else 'off'}",
             "",
             "<b>Schedule</b>",

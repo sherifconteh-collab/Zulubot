@@ -418,32 +418,14 @@ class AltcoinRotationConfig:
 
 @dataclass(frozen=True)
 class PredictionConfig:
-    enabled: bool = False                # OFF by default
+    """Legacy Kalshi prediction positions: exits only. The strategy opens no new bets."""
+
+    enabled: bool = False                # when on, manage and settle positions already held
     kalshi_key_id: str = ""              # Kalshi API key ID
     kalshi_private_key: str = ""         # Kalshi RSA private key PEM
-    buy_yes_threshold: float = 0.45      # Buy YES below this price (wider = more aggressive)
-    buy_no_threshold: float = 0.55       # Buy NO above this price (wider = more aggressive)
-    take_profit_threshold: float = 0.50  # Take profit at 0.50
-    stop_loss_pct: float = 0.15          # Stop loss at 15% move against
-    max_positions: int = 8
+    take_profit_threshold: float = 0.50  # sell a held contract once its price reaches this
+    stop_loss_pct: float = 0.15          # sell if the price falls this many dollars below entry
     check_interval_minutes: int = 30
-    min_trade_usd: float = 1.0
-    min_volume_usd: float = 3_000        # Minimum 24h volume to consider a market tradeable
-    max_spread_usd: float = 0.20         # Maximum bid/ask spread allowed per side
-    market_categories: list[str] = field(default_factory=lambda: ["crypto", "economics", "finance", "politics", "weather", "sports", "entertainment"])
-    capital_allocation_pct: float = 0.40 # use 40% of total capital for predictions
-    # Opt-in extra gate for crypto-category markets: require an extreme Fear &
-    # Greed reading to align with the price threshold. Default False so crypto
-    # predictions trade on price thresholds alone — previously this gate kept
-    # the Kalshi strategy idle outside of extreme sentiment regimes.
-    require_crypto_fear_greed: bool = False
-    use_markov_regime_gate: bool = True  # block new entries when Markov is in bear regime
-    # Market discovery breadth: pages of 50 markets fetched per series (the
-    # API cursor used to be discarded, capping coverage at 20 markets/series).
-    max_pages_per_series: int = 3
-    # Opt-in: augment the hardcoded series lists with series discovered from
-    # the Kalshi events API so new market series are picked up automatically.
-    discover_series: bool = False
 
 
 @dataclass(frozen=True)
@@ -848,21 +830,9 @@ class AppConfig:
                 enabled=_env_bool("PREDICTION_ENABLED", False),
                 kalshi_key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
                 kalshi_private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
-                buy_yes_threshold=_env_float("PREDICTION_BUY_YES_THRESHOLD", 0.45),
-                buy_no_threshold=_env_float("PREDICTION_BUY_NO_THRESHOLD", 0.55),
                 take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
                 stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
-                max_positions=_env_int("PREDICTION_MAX_POSITIONS", 8),
                 check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 30),
-                min_trade_usd=_env_float("PREDICTION_MIN_TRADE_USD", 1.0),
-                min_volume_usd=_env_float("PREDICTION_MIN_VOLUME_USD", 3_000),
-                max_spread_usd=_env_float("PREDICTION_MAX_SPREAD_USD", 0.20),
-                market_categories=_env_list_lower("PREDICTION_MARKET_CATEGORIES", ["crypto", "economics", "finance", "politics", "weather", "sports", "entertainment"]),
-                capital_allocation_pct=_env_float("PREDICTION_CAPITAL_PCT", 0.40),
-                require_crypto_fear_greed=_env_bool("PREDICTION_REQUIRE_CRYPTO_FNG", False),
-                use_markov_regime_gate=_env_bool("PREDICTION_MARKOV_GATE", True),
-                max_pages_per_series=_env_int("PREDICTION_MAX_PAGES_PER_SERIES", 3),
-                discover_series=_env_bool("PREDICTION_DISCOVER_SERIES", False),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),

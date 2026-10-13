@@ -130,20 +130,10 @@ POLYMARKET_STOP_LOSS = "0.15"
 POLYMARKET_MAX_POSITIONS = "5"
 POLYMARKET_USE_TRADING_AGENTS = "false"
 
-# Kalshi / Predictions
+# Kalshi: forecast-based GDP bets (the old cheap-side prediction rule was retired)
+GDP_NOWCAST_ENABLED = "false"
+# Legacy exits for positions the retired rule opened earlier (opens nothing new)
 PREDICTION_ENABLED = "false"
-PREDICTION_MAX_POSITIONS = "8"
-PREDICTION_MARKET_CATEGORIES = "crypto,economics,finance,politics,weather,sports,entertainment"
-PREDICTION_CHECK_INTERVAL_MINUTES = "15"
-PREDICTION_BUY_YES_THRESHOLD = "0.35"
-PREDICTION_BUY_NO_THRESHOLD = "0.65"
-PREDICTION_TAKE_PROFIT = "0.50"
-PREDICTION_STOP_LOSS_PCT = "0.15"
-PREDICTION_MIN_TRADE_USD = "1.0"
-PREDICTION_MIN_VOLUME_USD = "3000"
-PREDICTION_MAX_SPREAD_USD = "0.20"
-PREDICTION_CAPITAL_PCT = "0.40"
-PREDICTION_REQUIRE_CRYPTO_FNG = "false"
 
 # Latency arb
 LATENCY_ARB_ENABLED = "false"

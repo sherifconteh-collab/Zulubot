@@ -269,18 +269,13 @@ class ModuleContextTests(unittest.TestCase):
         self.assertIn("XRPUSDT ×2", joined)
         self.assertIn("20d SMA", joined)
 
-    def test_predictions_context_lists_categories(self) -> None:
+    def test_predictions_context_says_the_long_shot_rule_is_retired(self) -> None:
         lines: list[str] = []
-        self.bot._append_module_context(
-            lines, "predictions",
-            {
-                "markets_discovered": 40,
-                "markets_scanned": 40,
-                "can_trade": False,
-                "categories": ["crypto", "economics", "weather"],
-            },
-        )
-        self.assertIn("crypto, economics, weather", "\n".join(lines))
+        self.bot._append_module_context(lines, "predictions", {"sells": ["KX:T:yes"], "resolved_closed": []})
+        text = "\n".join(lines)
+        self.assertIn("long-shot rule is retired", text)
+        self.assertIn("/gdp", text)
+        self.assertIn("KX:T:yes", text)
 
 
 class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
@@ -319,11 +314,8 @@ class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
                 enabled=True, fee_pct=0.006, scout_multiplier=3,
                 check_interval_minutes=30, qty_memory_cycles=336,
             ),
-            predictions=SimpleNamespace(
-                enabled=True, buy_yes_threshold=0.45, buy_no_threshold=0.55,
-                require_crypto_fear_greed=False,
-                max_pages_per_series=3, discover_series=False,
-            ),
+            predictions=SimpleNamespace(enabled=True),
+            gdp_nowcast=SimpleNamespace(enabled=True, min_edge=0.07),
             polymarket_strategy=SimpleNamespace(enabled=False),
             scheduler=SimpleNamespace(
                 crypto_interval_minutes=30, stock_check_hour=15,
@@ -345,7 +337,7 @@ class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("XRPUSDT 25%", message)
         self.assertIn("sma20-gate", message)
         self.assertIn("mem 336cy", message)
-        self.assertIn("pages≤3", message)
+        self.assertIn("long-shot rule retired", message)
         self.assertIn("breaker on", message)
 
     async def test_cmd_ai_shows_circuit_breaker_state(self) -> None:
