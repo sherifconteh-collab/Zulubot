@@ -4,6 +4,12 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### GDP nowcast strategy (replaces the long-shot rule for GDP markets)
+- New `gdp_nowcast` strategy for Kalshi's GDP markets, off by default (`GDP_NOWCAST_ENABLED`). It reads the Atlanta Fed's GDPNow estimate (public FRED CSV, no key), converts it into a probability for each "GDP above X%" strike using the nowcast's forecast error (wider further from the release), averages it with the market's own price, and buys YES or NO only when that probability beats the ask price plus Kalshi's fee by 7 cents. Sizing is a quarter of the Kelly stake, capped at 5% of the Kalshi bankroll per bet and 15% for all GDP bets, at most 2 strikes per quarter, hold to settlement unless the bid beats its own value by a margin.
+- Fails closed: no nowcast (or older than 48 hours), a nowcast for another quarter, more than 21 days to the release, a spread over 6 cents, tail prices, a model that disagrees with the market by over 35 points, an unreadable account, a halt or the kill switch all mean no bet. GDP exposure already on the account counts toward the cap.
+- `/gdp` shows the nowcast against every open strike (read-only, no orders). `GDP_NOWCAST_*` settings are in `.env.example`.
+- The predictions strategy no longer scans `KXGDP`; its cheap-long-shot rule had no view of GDP and lost to fees and the favorite-longshot bias.
+
 ### README: Crypto trading and Prediction markets sections
 - New "Crypto trading" section: what the crypto sentiment and altcoin rotation strategies do (Fear & Greed thresholds, trend filter, funding rate, take profit and stop loss, sizing, rotation fees and the "never go backwards" rule), the three switches needed for real Coinbase trading (`PAPER_MODE=false`, `COINBASE_TRADING_ENABLED=true`, Coinbase keys), step-by-step setup, which risk controls cover crypto, and honest expectations. The intro, contents and strategy table link to it, and it notes the Kalshi-side crypto strategies and the Markov gate.
 - New "Prediction markets" section for the Kalshi predictions strategy: the categories and series it scans (economics, finance and stock indexes, crypto, politics, weather, entertainment), the long-shot threshold rule (buys the cheap, unlikely side of a market), take profit and stop loss (the stop is 15 cents, not 15 percent), sizing and limits, the guards, and an honest note that the rule has no probability model and loses a little after fees.

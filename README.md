@@ -22,6 +22,7 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine**, **crypto t
 - [Betting from Telegram in detail](#betting-from-telegram-in-detail)
 - [Crypto trading](#crypto-trading)
 - [Prediction markets](#prediction-markets-stocks-economy-politics-weather)
+- [GDP markets](#gdp-markets-a-forecast-not-a-rule)
 - [Safety and risk controls](#safety-and-risk-controls)
 - [How the sports model works](#how-the-sports-model-works)
 - [Project layout](#project-layout)
@@ -37,6 +38,7 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | --- | --- | --- | --- |
 | **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues, plus automatic same-game parlays. Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. | Yes | Real Kalshi orders |
 | **Kalshi predictions** | Economics, stock indexes, crypto, politics, weather and other Kalshi markets: small bets on cheap long shots, spread across categories (see [Prediction markets](#prediction-markets-stocks-economy-politics-weather)) | No (`PREDICTION_ENABLED`) | Real Kalshi orders |
+| **GDP nowcast** | Kalshi GDP markets ("GDP above 3.5%"), bet only when the Atlanta Fed's GDPNow estimate, turned into a probability, beats the price after fees (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) | No (`GDP_NOWCAST_ENABLED`) | Real Kalshi orders |
 | **Latency arbitrage** | Short-dated Kalshi crypto contracts when the Coinbase price feed moves before Kalshi does | No (`LATENCY_ARB_ENABLED`) | Real Kalshi orders |
 | **Kalshi perpetuals** | Kalshi crypto perpetuals (BTC, ETH, SOL, XRP) on momentum, leverage capped | No (`KALSHI_PERP_ENABLED`) | Real Kalshi orders |
 | **BTC 5-minute spread** | Kalshi and Polymarket implied BTC price vs Coinbase spot | Yes (`BTC5MIN_ENABLED`) | Kalshi leg is real; the Polymarket leg is skipped; spot leg needs Coinbase trading |
@@ -146,6 +148,7 @@ Set these yourself and never commit them. `FMP_API_KEY` from older versions is n
 | `INITIAL_CASH` | `100000` | Starting balance in paper mode |
 | `KALSHI_SPORTS_ENABLED` | `true` | Turn the sports strategy on or off |
 | `PREDICTION_ENABLED` | `false` | Turn the Kalshi predictions strategy (stocks, economy, politics, weather) on |
+| `GDP_NOWCAST_ENABLED` | `false` | Turn the GDP nowcast strategy on (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) |
 | `KALSHI_SPORTS_LEAGUES` | all major leagues | Which leagues to scan |
 | `KALSHI_SPORTS_KELLY_FRACTION` | `0.25` | Fraction of Kelly to stake |
 | `KALSHI_SPORTS_MAX_POSITION_PCT` | `0.10` | Largest single automatic bet, as a share of bankroll |
@@ -180,12 +183,13 @@ Only the chat in `TELEGRAM_CHAT_ID` is answered. You can also type plain English
 | `/latency` | Timings of each module |
 | `/leads` | Watchlist: skipped buys and top targets per strategy |
 
-**Run a strategy now** (the same code the scheduler runs; it trades for real if `PAPER_MODE=false`)
+**Run a strategy now** (the same code the scheduler runs; it trades for real if `PAPER_MODE=false`, except `/gdp`, which only reads)
 
 | Command | What it does |
 | --- | --- |
 | `/sports` | Run the Kalshi sports strategy and show the mode (LIVE or PAPER), build, balance by shard, cash, what was bought and why nothing was |
 | `/predict` | Kalshi prediction markets (economics, stock indexes, crypto, politics, weather, and more) |
+| `/gdp` | GDP nowcast against Kalshi's prices, read-only: shows what the model would bet and why not (no orders) |
 | `/perps` | Kalshi crypto perpetuals |
 | `/crypto` | BTC and ETH on Fear & Greed |
 | `/rotation` | Altcoin rotation |
@@ -371,7 +375,7 @@ Kalshi lists far more than sports. The **predictions strategy** (`/predict`) sca
 
 | Category | Markets (Kalshi series) |
 | --- | --- |
-| **economics** | inflation (CPI, year over year), GDP, the Fed rate and FOMC meetings, the jobs report, recession, tariffs |
+| **economics** | inflation (CPI, year over year), the Fed rate and FOMC meetings, the jobs report, recession, tariffs (GDP has its own strategy, below) |
 | **finance** | stock indexes (S&P 500, Nasdaq-100, Russell 2000), gold, oil |
 | **crypto** | Bitcoin, Ethereum, Solana, Dogecoin and XRP price markets |
 | **politics** | Trump, presidential, Senate and House markets |
@@ -395,9 +399,27 @@ It is a **price-threshold rule, not a forecast**, and it always buys the **unlik
 
 ### Honest expectations
 
-Prediction markets are efficient. This rule has **no view of the true probability** of an inflation print, a GDP number or an index level; it buys cheap long shots and hopes the price moves. That is a lottery-ticket profile: most of these contracts expire worthless, and the occasional winner pays $1 per contract (a 3-cent contract that wins pays about 33 times its cost). After Kalshi's fees (about 7% of price times one minus price, per contract) the expected result is a small loss, not an edge, so expect many small losses and a few wins. Treat it as a way to put small amounts to work, not a money machine. If you only want the sports engine, leave it off, or take "sports" out of `PREDICTION_MARKET_CATEGORIES` so this simple rule does not also bet on games the sports model already covers.
+Prediction markets are efficient. This rule has **no view of the true probability** of an inflation print, a jobs number or an index level; it buys cheap long shots and hopes the price moves. That is a lottery-ticket profile: most of these contracts expire worthless, and the occasional winner pays $1 per contract (a 3-cent contract that wins pays about 33 times its cost). After Kalshi's fees (about 7% of price times one minus price, per contract) the expected result is a small loss, not an edge, so expect many small losses and a few wins. Treat it as a way to put small amounts to work, not a money machine. If you only want the sports engine, leave it off, or take "sports" out of `PREDICTION_MARKET_CATEGORIES` so this simple rule does not also bet on games the sports model already covers.
 
 To use it: set `PREDICTION_ENABLED=true` (in Railway's Variables panel), make sure `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY` are set, and send `/predict` to run it once and see what it found. Your positions show in `/status` and `/positions`.
+
+## GDP markets: a forecast, not a rule
+
+The predictions rule above has no view of the number it is betting on. For GDP there is a public forecast, so the **GDP nowcast strategy** uses it. It is **off by default** (`GDP_NOWCAST_ENABLED=false`), needs no extra key, and places real Kalshi orders only with `PAPER_MODE=false` and your Kalshi keys. The old predictions rule no longer touches GDP markets.
+
+**How it decides**
+1. **Forecast:** it reads the Atlanta Fed's GDPNow estimate for the quarter being tracked from FRED's public CSV (`GDPNOW`).
+2. **Probability:** for each Kalshi strike ("real GDP above 3.5%") it converts the nowcast into a probability using the nowcast's typical error (about 1.2 percentage points near the release, wider earlier: `GDP_NOWCAST_BASE_SD`, `GDP_NOWCAST_SD_PER_DAY`).
+3. **Humility:** it averages that with the market's own price (`GDP_NOWCAST_MODEL_WEIGHT=0.5`), because the market also sees GDPNow and other forecasts. A bet therefore needs the model to disagree with the price by roughly twice the required edge.
+4. **Edge after costs:** it buys YES or NO only if its probability beats the ask price **plus Kalshi's fee** by at least `GDP_NOWCAST_MIN_EDGE` (7 cents per $1 contract).
+5. **Size:** a quarter of the Kelly stake, at most 5% of your Kalshi bankroll per bet and 15% for all GDP bets together, at most 2 strikes per quarter (the strikes of one quarter are the same bet repeated).
+6. **Exit:** it holds to settlement, and sells early only when the bid pays more than the contract is worth by its own estimate plus a margin.
+
+**When it stays out** (every guard fails closed): the nowcast is missing or older than 48 hours, it tracks a different quarter than the market, the release is more than 21 days away, the market closes within 2 hours, the bid-ask spread is wider than 6 cents, the price is under 5 or over 95 cents, the model and the market disagree by more than 35 points (more likely bad data than an edge), your account's positions cannot be read, or a daily halt or the kill switch is on. Only the current quarter has a nowcast, so far-dated quarters are never traded.
+
+Send `/gdp` to see, read-only, the nowcast and every open strike with Kalshi's price, the model's probability and what it would do and why not. If `/gdp` says no nowcast is available, the strategy places no bets (the bot needs to reach `fred.stlouisfed.org`; the last good reading is reused for up to 48 hours if it is down).
+
+**Honest expectations.** This is a real forecast with real costs accounted for, but it is **not proven to make money**. GDPNow is not clearly better than professional forecasters, Kalshi's traders see it too, and Kalshi's GDP markets only go back a few years, so there is too little history to prove an edge. The settings are conservative on purpose, and most days it will place no bet. Expect small stakes and an uncertain result.
 
 ## Safety and risk controls
 
@@ -427,7 +449,7 @@ Be realistic: sportsbooks, Polymarket and Kalshi usually agree within a point or
 
 ```
 trading_bot/
-  strategies/     sports, predictions, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
+  strategies/     sports, predictions, GDP nowcast, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
   integrations/   AI analysis, analyst personas, Freqtrade, slip reader, plain-text router
   service.py      core orchestrator
   scheduler.py    daemon loop

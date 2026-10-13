@@ -409,6 +409,69 @@ def _format_slip_summary(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_GDP_REASONS = {
+    "nowcast_is_for_another_quarter": "the nowcast tracks a different quarter",
+    "too_far_from_release": "too far from the release (the nowcast is least reliable early)",
+    "too_close_to_close": "market about to close",
+    "past_release": "release already out",
+    "unreadable_event": "could not read this market's quarter or release time",
+    "edge_too_small": "edge too small after fee",
+    "wide_spread": "bid-ask spread too wide",
+    "model_market_gap": "model and market too far apart (treated as bad data)",
+    "no_two_sided_book": "no two-sided book",
+    "price_out_of_range": "price too extreme",
+    "unsupported_market": "not an 'above X%' market",
+    "event_position_cap": "already holding the maximum for this quarter",
+    "already_held": "already held",
+}
+
+
+def _format_gdp(result: dict[str, Any]) -> str:
+    """Read-only table of nowcast probability against Kalshi's price for each open GDP strike."""
+    lines = ["<b>GDP nowcast vs Kalshi</b>"]
+    now = result.get("nowcast")
+    if not now:
+        error = html.escape(str(result.get("error") or "unavailable"))
+        return "\n".join(lines + [f"No nowcast available ({error}). The strategy places no bets without one."])
+    lines.append(
+        f"GDPNow: {float(now['value']):.2f}% for {html.escape(str(now['quarter']))} "
+        f"({html.escape(str(now.get('source', '')))}, read {float(now.get('age_hours', 0)):.1f}h ago)"
+    )
+    enabled = result.get("enabled")
+    if enabled is not None:
+        lines.append("Trading: ON" if enabled else "Trading: OFF (set GDP_NOWCAST_ENABLED=true to bet)")
+    for event in result.get("events") or []:
+        rows = event.get("rows") or []
+        if not rows:
+            continue
+        days, sd = event.get("days"), event.get("sd")
+        head = html.escape(str(event.get("quarter") or event.get("event")))
+        if days is not None:
+            head += f": release in {float(days):.1f} days, nowcast error about \u00b1{float(sd or 0):.1f} pts"
+        lines.append("")
+        lines.append(f"<b>{head}</b>")
+        if event.get("reason"):
+            lines.append("Not betting: " + html.escape(_GDP_REASONS.get(event["reason"], event["reason"])))
+        for row in rows:
+            strike = f">{float(row.get('strike') or 0):g}%"
+            bid, ask = float(row.get("yes_bid") or 0), float(row.get("yes_ask") or 0)
+            book = f"Kalshi {bid * 100:.0f}-{ask * 100:.0f}c"
+            if row.get("p_model") is None or event.get("reason"):
+                lines.append(f"{strike}  {book}")
+                continue
+            verdict = (
+                f"BUY {str(row['side']).upper()} at {float(row['price']) * 100:.0f}c (edge {float(row['edge']) * 100:+.1f}c)"
+                if not row.get("reason")
+                else html.escape(_GDP_REASONS.get(row["reason"], row["reason"]))
+                + (f" ({float(row['edge']) * 100:+.1f}c)" if row.get("edge") is not None and row["reason"] == "edge_too_small" else "")
+            )
+            lines.append(
+                f"{strike}  {book} | model {float(row['p_model']) * 100:.0f}% | blend {float(row['p_blend']) * 100:.0f}% | {verdict}"
+            )
+    text = "\n".join(lines)
+    return text if len(text) <= 3900 else text[:3880] + "\n..."
+
+
 def _build_line() -> str:
     """Which deploy is running, from Railway's own variables, so "is the new code live?" has an answer."""
     sha = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
@@ -720,6 +783,7 @@ class TradingTelegramBot:
             "markov": "\U0001f9ed",
             "options": "\U0001f4ca",
             "kalshi_sports": "\U0001f3c8",
+            "gdp_nowcast": "\U0001f4ca",
         }
         return icons.get(module_name, "\u2699\ufe0f")
 
@@ -1171,6 +1235,7 @@ class TradingTelegramBot:
             "polymarket": self._cmd_polymarket,
             "rotation": self._cmd_rotation,
             "predict": self._cmd_predictions,
+            "gdp": self._cmd_gdp,
             "perps": self._cmd_kalshi_perps,
             "sports": self._cmd_kalshi_sports,
             "games": self._cmd_games,
@@ -1219,6 +1284,7 @@ class TradingTelegramBot:
             "\n"
             "<b>Run</b>\n"
             "/crypto /stocks /rotation /predict /perps /sports /polymarket /btc5min /markov /options\n"
+            "/gdp — GDP nowcast vs Kalshi prices (read-only, no orders)\n"
             "/backtest [range]\n"
             "\n"
             "<b>Your own sports bets</b>\n"
@@ -1494,6 +1560,19 @@ class TradingTelegramBot:
             result = self._service.run("predictions")
             result["force_send"] = True
             await self.send_trade_alert(result)
+        except Exception as exc:
+            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
+
+    async def _cmd_gdp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the GDP nowcast against Kalshi's prices. Read-only: the scheduler does the betting."""
+        if not self._check_auth(update):
+            return
+        if self._service is None:
+            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
+            return
+        try:
+            result = await asyncio.to_thread(self._service.gdp_preview)
+            await update.message.reply_text(_format_gdp(result), parse_mode="HTML")  # type: ignore[union-attr]
         except Exception as exc:
             await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
 

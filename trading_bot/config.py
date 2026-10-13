@@ -602,6 +602,40 @@ class OptionsStrategyConfig:
 
 
 @dataclass(frozen=True)
+class GdpNowcastConfig:
+    """Kalshi GDP markets, bet only where a nowcast-based probability beats the price (opt-in)."""
+
+    enabled: bool = False
+    check_interval_minutes: int = 30
+    series: str = "KXGDP"
+    # Atlanta Fed GDPNow as published by FRED (public CSV, no key). Latest row = quarter being tracked.
+    source_url: str = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GDPNOW"
+    max_nowcast_age_hours: float = 48.0     # reuse the last good reading this long if the source is down
+    # Only act in the weeks before the release, when the nowcast is most informative.
+    max_days_to_release: float = 21.0
+    min_hours_to_close: float = 2.0
+    # Forecast error of the nowcast against the BEA advance estimate, in percentage points. GDPNow's
+    # published RMSE is about 1.2 even just before the release; it is wider earlier in the quarter.
+    base_sd: float = 1.2
+    sd_per_day: float = 0.015               # extra sd per day of lead beyond ``sd_free_days``
+    sd_free_days: float = 7.0
+    # Treat the market as an equally good forecaster: 0.5 averages model and market, so a bet needs the
+    # model to disagree with the price by about twice ``min_edge``.
+    model_weight: float = 0.5
+    min_edge: float = 0.07                  # required edge per $1 contract after Kalshi's fee
+    max_spread: float = 0.06                # skip books wider than this (a wide spread eats any edge)
+    min_price: float = 0.05                 # skip extreme tails where a normal model is unreliable
+    max_price: float = 0.95
+    max_model_market_gap: float = 0.35      # a bigger disagreement is more likely bad data than an edge
+    kelly_fraction: float = 0.25
+    max_position_pct: float = 0.05          # one bet, as a share of the Kalshi bankroll
+    capital_allocation_pct: float = 0.15    # all GDP exposure together
+    max_positions_per_event: int = 2        # the strikes of one quarter are the same bet repeated
+    min_trade_usd: float = 1.0
+    exit_margin: float = 0.03               # sell early only when the bid beats our value by this much
+
+
+@dataclass(frozen=True)
 class AppConfig:
     paper_mode: bool
     initial_cash: float
@@ -638,6 +672,7 @@ class AppConfig:
     options: OptionsStrategyConfig
     kalshi_perps: KalshiPerpetualsConfig
     kalshi_sports: KalshiSportsConfig
+    gdp_nowcast: GdpNowcastConfig
     protected_symbols: frozenset[str]
 
     @classmethod
@@ -982,6 +1017,32 @@ class AppConfig:
                 hold_to_settlement=_env_bool("KALSHI_SPORTS_HOLD_TO_SETTLEMENT", True),
                 stop_loss_pct=_env_float("KALSHI_SPORTS_STOP_LOSS", 0.0),
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
+            ),
+            gdp_nowcast=GdpNowcastConfig(
+                enabled=_env_bool("GDP_NOWCAST_ENABLED", False),
+                check_interval_minutes=_env_int("GDP_NOWCAST_INTERVAL_MINUTES", 30),
+                series=os.getenv("GDP_NOWCAST_SERIES", "KXGDP").strip() or "KXGDP",
+                source_url=os.getenv(
+                    "GDP_NOWCAST_URL", "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GDPNOW"
+                ).strip(),
+                max_nowcast_age_hours=_env_float("GDP_NOWCAST_MAX_AGE_HOURS", 48.0),
+                max_days_to_release=_env_float("GDP_NOWCAST_MAX_DAYS_TO_RELEASE", 21.0),
+                min_hours_to_close=_env_float("GDP_NOWCAST_MIN_HOURS_TO_CLOSE", 2.0),
+                base_sd=_env_float("GDP_NOWCAST_BASE_SD", 1.2),
+                sd_per_day=_env_float("GDP_NOWCAST_SD_PER_DAY", 0.015),
+                sd_free_days=_env_float("GDP_NOWCAST_SD_FREE_DAYS", 7.0),
+                model_weight=_env_float("GDP_NOWCAST_MODEL_WEIGHT", 0.5),
+                min_edge=_env_float("GDP_NOWCAST_MIN_EDGE", 0.07),
+                max_spread=_env_float("GDP_NOWCAST_MAX_SPREAD", 0.06),
+                min_price=_env_float("GDP_NOWCAST_MIN_PRICE", 0.05),
+                max_price=_env_float("GDP_NOWCAST_MAX_PRICE", 0.95),
+                max_model_market_gap=_env_float("GDP_NOWCAST_MAX_MODEL_MARKET_GAP", 0.35),
+                kelly_fraction=_env_float("GDP_NOWCAST_KELLY_FRACTION", 0.25),
+                max_position_pct=_env_float("GDP_NOWCAST_MAX_POSITION_PCT", 0.05),
+                capital_allocation_pct=_env_float("GDP_NOWCAST_CAPITAL_PCT", 0.15),
+                max_positions_per_event=_env_int("GDP_NOWCAST_MAX_POSITIONS_PER_EVENT", 2),
+                min_trade_usd=_env_float("GDP_NOWCAST_MIN_TRADE_USD", 1.0),
+                exit_margin=_env_float("GDP_NOWCAST_EXIT_MARGIN", 0.03),
             ),
             protected_symbols=frozenset(
                 s.strip().upper()
