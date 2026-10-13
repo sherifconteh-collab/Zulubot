@@ -31,6 +31,8 @@ from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.strategies.altcoin_rotation import AltcoinRotationStrategy
 from trading_bot.strategies.btc_5min import BTC5MinSpreadStrategy
 from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
+from trading_bot.strategies.gdp_nowcast import GdpNowcastStrategy
+from trading_bot.clients_nowcast import GdpNowClient
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
 from trading_bot.strategies.latency_arb import LatencyArbStrategy
 from trading_bot.strategies.markov_regime import MarkovRegimeStrategy
@@ -251,6 +253,18 @@ class TradingBotService:
             logger=logger,
             retry_config=config.http_retry,
         )
+        self.gdp_nowcast_strategy = GdpNowcastStrategy(
+            config=config.gdp_nowcast,
+            kalshi_client=self.kalshi_client,
+            nowcast_client=GdpNowClient(
+                url=config.gdp_nowcast.source_url,
+                timeout_seconds=config.request_timeout_seconds,
+                max_age_hours=config.gdp_nowcast.max_nowcast_age_hours,
+                logger=logger,
+            ),
+            logger=logger,
+            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
+        )
         self.kalshi_sports_strategy = KalshiSportsStrategy(
             config=config.kalshi_sports,
             kalshi_client=self.kalshi_client,
@@ -445,6 +459,16 @@ class TradingBotService:
                     now=now,
                 ),
             )
+        if command == "gdp_nowcast" or (command == "all" and self.config.gdp_nowcast.enabled):
+            module_results["gdp_nowcast"] = self._run_module(
+                "gdp_nowcast",
+                lambda: self.gdp_nowcast_strategy.run(
+                    state,
+                    broker=self.broker,
+                    risk_manager=self.risk_manager,
+                    now=now,
+                ),
+            )
         if command == "kalshi_sports" or (command == "all" and self.config.kalshi_sports.enabled):
             module_results["kalshi_sports"] = self._run_module(
                 "kalshi_sports",
@@ -518,6 +542,13 @@ class TradingBotService:
         summary = self._build_summary(state, pre_risk=pre_risk, post_risk=post_risk, modules=module_results)
         self.logger.info("Run summary: %s", summary)
         return summary
+
+    def gdp_preview(self) -> dict[str, Any]:
+        """Model versus market for the open GDP strikes, read-only (the /gdp command).
+
+        Touches no portfolio state, so it deliberately does not take the state lock.
+        """
+        return self.gdp_nowcast_strategy.preview(datetime.now(self.config.timezone))
 
     @_locked
     def status(self) -> dict[str, Any]:
