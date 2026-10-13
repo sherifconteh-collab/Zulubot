@@ -4,6 +4,10 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### README: Crypto trading and Prediction markets sections
+- New "Crypto trading" section: what the crypto sentiment and altcoin rotation strategies do (Fear & Greed thresholds, trend filter, funding rate, take profit and stop loss, sizing, rotation fees and the "never go backwards" rule), the three switches needed for real Coinbase trading (`PAPER_MODE=false`, `COINBASE_TRADING_ENABLED=true`, Coinbase keys), step-by-step setup, which risk controls cover crypto, and honest expectations. The intro, contents and strategy table link to it, and it notes the Kalshi-side crypto strategies and the Markov gate.
+- New "Prediction markets" section for the Kalshi predictions strategy: the categories and series it scans (economics, finance and stock indexes, crypto, politics, weather, entertainment), the long-shot threshold rule (buys the cheap, unlikely side of a market), take profit and stop loss (the stop is 15 cents, not 15 percent), sizing and limits, the guards, and an honest note that the rule has no probability model and loses a little after fees.
+
 ### Telegram digest is once a day
 - `TELEGRAM_DIGEST_HOURS` now defaults to 24 (was 6): routine alerts (cycle summaries, bet and parlay alerts, risk banners, leads, heartbeats) arrive as one digest a day, headed "24-hour update". The buffer holds 120 messages (was 40) so a full day is not cut off. Replies to your commands and the kill switch firing are still immediate, a redeploy still sends what is held right away, and `/sports` shows the current picture any time. Set `TELEGRAM_DIGEST_HOURS=6` (or `0` for immediate) to change it; a value set in Railway's Variables panel overrides the default.
 
