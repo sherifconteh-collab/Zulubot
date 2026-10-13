@@ -417,15 +417,11 @@ class AltcoinRotationConfig:
 
 
 @dataclass(frozen=True)
-class PredictionConfig:
-    """Legacy Kalshi prediction positions: exits only. The strategy opens no new bets."""
+class KalshiConfig:
+    """Kalshi API credentials, shared by every Kalshi strategy."""
 
-    enabled: bool = False                # when on, manage and settle positions already held
-    kalshi_key_id: str = ""              # Kalshi API key ID
-    kalshi_private_key: str = ""         # Kalshi RSA private key PEM
-    take_profit_threshold: float = 0.50  # sell a held contract once its price reaches this
-    stop_loss_pct: float = 0.15          # sell if the price falls this many dollars below entry
-    check_interval_minutes: int = 30
+    key_id: str = ""                     # Kalshi API key ID
+    private_key: str = ""                # Kalshi RSA private key PEM
 
 
 @dataclass(frozen=True)
@@ -642,7 +638,7 @@ class AppConfig:
     polymarket_strategy: PolymarketStrategyConfig
     trading_agents: TradingAgentsConfig
     altcoin_rotation: AltcoinRotationConfig
-    predictions: PredictionConfig
+    kalshi: KalshiConfig
     freqtrade: FreqtradeConfig
     latency_arb: LatencyArbConfig
     volatility: VolatilityConfig
@@ -826,13 +822,9 @@ class AppConfig:
                 capital_allocation_pct=_env_float("ROTATION_CAPITAL_PCT", 0.60),
                 qty_memory_cycles=_env_int("ROTATION_QTY_MEMORY_CYCLES", 336),
             ),
-            predictions=PredictionConfig(
-                enabled=_env_bool("PREDICTION_ENABLED", False),
-                kalshi_key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
-                kalshi_private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
-                take_profit_threshold=_env_float("PREDICTION_TAKE_PROFIT", 0.50),
-                stop_loss_pct=_env_float("PREDICTION_STOP_LOSS_PCT", 0.15),
-                check_interval_minutes=_env_int("PREDICTION_CHECK_INTERVAL_MINUTES", 30),
+            kalshi=KalshiConfig(
+                key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
+                private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),

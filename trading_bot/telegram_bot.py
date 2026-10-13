@@ -778,7 +778,6 @@ class TradingTelegramBot:
             "stocks": "\U0001f4c8",
             "polymarket": "\U0001f52e",
             "rotation": "\U0001f504",
-            "predictions": "\U0001f3b2",
             "latency_arb": "\u26a1",
             "markov": "\U0001f9ed",
             "options": "\U0001f4ca",
@@ -896,16 +895,6 @@ class TradingTelegramBot:
                     f"<code>{html.escape(str(module_data.get('to', '?')))}</code>"
                 )
             self._append_generic_ai_context(lines, module_data)
-            return
-
-        if module_name == "predictions":
-            resolved = module_data.get("resolved_closed", [])
-            sells = module_data.get("sells", [])
-            lines.append("   \U0001f3b2 Legacy positions only: the long-shot rule is retired. GDP bets: /gdp")
-            if sells:
-                lines.append("   \U0001f4b8 Closed: " + ", ".join(html.escape(str(x)) for x in sells[:3]))
-            if resolved:
-                lines.append("   \U0001f3c1 Resolved: " + ", ".join(html.escape(str(x)) for x in resolved[:3]))
             return
 
         if module_name == "kalshi_sports":
@@ -1225,7 +1214,6 @@ class TradingTelegramBot:
             "config": self._cmd_config,
             "polymarket": self._cmd_polymarket,
             "rotation": self._cmd_rotation,
-            "predict": self._cmd_predictions,
             "gdp": self._cmd_gdp,
             "perps": self._cmd_kalshi_perps,
             "sports": self._cmd_kalshi_sports,
@@ -1274,7 +1262,7 @@ class TradingTelegramBot:
             "/leads — current watchlist (skipped buys + top targets)\n"
             "\n"
             "<b>Run</b>\n"
-            "/crypto /stocks /rotation /predict /perps /sports /polymarket /btc5min /markov /options\n"
+            "/crypto /stocks /rotation /gdp /perps /sports /polymarket /btc5min /markov /options\n"
             "/gdp — GDP nowcast vs Kalshi prices (read-only, no orders)\n"
             "/backtest [range]\n"
             "\n"
@@ -1536,19 +1524,6 @@ class TradingTelegramBot:
             return
         try:
             result = await asyncio.to_thread(self._service.run, "options")
-            result["force_send"] = True
-            await self.send_trade_alert(result)
-        except Exception as exc:
-            await update.message.reply_text(f"Error: {exc}")  # type: ignore[union-attr]
-
-    async def _cmd_predictions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._check_auth(update):
-            return
-        if self._service is None:
-            await update.message.reply_text("Service not initialized.")  # type: ignore[union-attr]
-            return
-        try:
-            result = self._service.run("predictions")
             result["force_send"] = True
             await self.send_trade_alert(result)
         except Exception as exc:
@@ -2493,7 +2468,6 @@ class TradingTelegramBot:
             f"Rotation    {'on' if cfg.altcoin_rotation.enabled else 'off'}  "
             f"fee {cfg.altcoin_rotation.fee_pct*100:.1f}% x{cfg.altcoin_rotation.scout_multiplier}  "
             f"{rotation_mem}",
-            f"Kalshi      long-shot rule retired; legacy exits {'on' if cfg.predictions.enabled else 'off'}",
             f"GDP         {'on' if cfg.gdp_nowcast.enabled else 'off'}  edge>={cfg.gdp_nowcast.min_edge * 100:.0f}c",
             f"Polymarket  {'on' if cfg.polymarket_strategy.enabled else 'off'}",
             "",

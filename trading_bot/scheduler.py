@@ -40,7 +40,6 @@ class SchedulerService:
         self._last_btc5min_run: datetime | None = None
         self._last_polymarket_run: datetime | None = None
         self._last_rotation_run: datetime | None = None
-        self._last_predictions_run: datetime | None = None
         self._last_stock_run: datetime | None = None
         self._last_heartbeat: datetime | None = None
         self._last_latency_arb_run: datetime | None = None
@@ -67,12 +66,11 @@ class SchedulerService:
         await self.notifier.notify_startup(self.config.paper_mode, self.config.volatility.enabled)
 
         self.logger.info(
-            "Scheduler started. crypto=%dm btc5min=%dm rotation=%dm predictions=%dm stock_hour=%d "
+            "Scheduler started. crypto=%dm btc5min=%dm rotation=%dm stock_hour=%d "
             "heartbeat=%dm poll=%.1fs latency_arb=%s(%.1fs)",
             self.scheduler_config.crypto_interval_minutes,
             self.scheduler_config.btc5min_interval_minutes,
             self.config.altcoin_rotation.check_interval_minutes,
-            self.config.predictions.check_interval_minutes,
             self.scheduler_config.stock_check_hour,
             self.scheduler_config.heartbeat_interval_minutes,
             self._effective_poll_interval,
@@ -191,18 +189,6 @@ class SchedulerService:
             if result is not None:
                 module_results.append(result)
             self._last_markov_run = now
-            if result is not None and result.get("risk", {}).get("kill_switch_active"):
-                await self._finalize_trade_notifications(module_results)
-                trade_notification_sent = bool(module_results)
-                await self._handle_kill_switch(result)
-                return
-
-        # Predictions cycle
-        if self._should_run_predictions(now):
-            result = await self._run_module("predictions", now)
-            if result is not None:
-                module_results.append(result)
-            self._last_predictions_run = now
             if result is not None and result.get("risk", {}).get("kill_switch_active"):
                 await self._finalize_trade_notifications(module_results)
                 trade_notification_sent = bool(module_results)
@@ -418,15 +404,6 @@ class SchedulerService:
             return True
         elapsed = (now - self._last_rotation_run).total_seconds()
         return elapsed >= self.config.altcoin_rotation.check_interval_minutes * 60
-
-    def _should_run_predictions(self, now: datetime) -> bool:
-        if not self.config.predictions.enabled:
-            return False
-        if self._last_predictions_run is None:
-            return True
-        elapsed = (now - self._last_predictions_run).total_seconds()
-        # Uses same interval as crypto (scheduler config) or prediction config, whichever is set
-        return elapsed >= self.config.predictions.check_interval_minutes * 60
 
     def _should_run_polymarket(self, now: datetime) -> bool:
         if not self.config.polymarket_strategy.enabled:

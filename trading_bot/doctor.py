@@ -128,12 +128,10 @@ def diagnose(env: Mapping[str, str]) -> list[Finding]:
         "PREDICTION_MARKET_CATEGORIES", "PREDICTION_CAPITAL_PCT", "PREDICTION_MIN_VOLUME_USD",
         "PREDICTION_MAX_SPREAD_USD", "PREDICTION_MIN_TRADE_USD", "PREDICTION_REQUIRE_CRYPTO_FNG",
         "PREDICTION_MARKOV_GATE", "PREDICTION_MAX_PAGES_PER_SERIES", "PREDICTION_DISCOVER_SERIES",
+        "PREDICTION_ENABLED", "PREDICTION_TAKE_PROFIT", "PREDICTION_STOP_LOSS_PCT", "PREDICTION_CHECK_INTERVAL_MINUTES",
     ) if _value(env, n))
     if retired:
         out.append(Finding(INFO, "Retired settings still set (nothing reads them; safe to remove): " + ", ".join(retired) + "."))
-    if _flag(env, "PREDICTION_ENABLED", False):
-        out.append(Finding(INFO, "PREDICTION_ENABLED only manages positions the retired long-shot rule opened earlier. "
-                                 "It opens no new bets."))
     if _flag(env, "GDP_NOWCAST_ENABLED", True) and not kalshi and not paper:
         out.append(Finding(WARN, "GDP forecast bets are on (the default) but there is no Kalshi key, so they cannot trade."))
 

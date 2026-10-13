@@ -37,7 +37,6 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | Strategy | What it trades | On by default? | With `PAPER_MODE=false` |
 | --- | --- | --- | --- |
 | **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues, plus automatic same-game parlays. Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. | Yes | Real Kalshi orders |
-| **Kalshi predictions** | Retired. The old rule bought whichever side of a market was cheap, with no view of the real odds. It opens no bets now; `PREDICTION_ENABLED` only sells or settles positions it opened earlier (see [Other Kalshi markets](#other-kalshi-markets-no-forecast-no-bet)) | Exits only (`PREDICTION_ENABLED`) | Sells only |
 | **GDP nowcast** | Kalshi GDP markets ("GDP above 3.5%"), bet only when the Atlanta Fed's GDPNow estimate, turned into a probability, beats the price after fees (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) | Yes (`GDP_NOWCAST_ENABLED`) | Real Kalshi orders |
 | **Latency arbitrage** | Short-dated Kalshi crypto contracts when the Coinbase price feed moves before Kalshi does | No (`LATENCY_ARB_ENABLED`) | Real Kalshi orders |
 | **Kalshi perpetuals** | Kalshi crypto perpetuals (BTC, ETH, SOL, XRP) on momentum, leverage capped | No (`KALSHI_PERP_ENABLED`) | Real Kalshi orders |
@@ -147,7 +146,6 @@ Set these yourself and never commit them. `FMP_API_KEY` from older versions is n
 | `PAPER_MODE` | `true` | `false` places real orders. Leave `true` until you trust it. |
 | `INITIAL_CASH` | `100000` | Starting balance in paper mode |
 | `KALSHI_SPORTS_ENABLED` | `true` | Turn the sports strategy on or off |
-| `PREDICTION_ENABLED` | `false` | Only sells or settles positions the retired long-shot rule opened earlier. Opens no new bets. |
 | `GDP_NOWCAST_ENABLED` | `true` | Turn the GDP nowcast strategy off with `false` (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) |
 | `KALSHI_SPORTS_LEAGUES` | all major leagues | Which leagues to scan |
 | `KALSHI_SPORTS_KELLY_FRACTION` | `0.25` | Fraction of Kelly to stake |
@@ -188,7 +186,6 @@ Only the chat in `TELEGRAM_CHAT_ID` is answered. You can also type plain English
 | Command | What it does |
 | --- | --- |
 | `/sports` | Run the Kalshi sports strategy and show the mode (LIVE or PAPER), build, balance by shard, cash, what was bought and why nothing was |
-| `/predict` | Settle and manage positions the retired long-shot rule opened earlier (opens nothing new) |
 | `/gdp` | GDP nowcast against Kalshi's prices, read-only: shows what the model would bet and why not (no orders) |
 | `/perps` | Kalshi crypto perpetuals |
 | `/crypto` | BTC and ETH on Fear & Greed |
@@ -371,7 +368,7 @@ Zulubot also trades crypto on **Coinbase**. It is **off for real money by defaul
 
 Kalshi lists far more than sports and GDP: inflation, the Fed, jobs, stock indexes, crypto prices, weather, politics. The bot has **one rule for all of them: it only bets where it has a probability model** that beats the price after Kalshi's fee. Sports has one (the [sports model](#how-the-sports-model-works)). GDP has one ([below](#gdp-markets-a-forecast-not-a-rule)). Nothing else does yet, so nothing else is bet on automatically.
 
-**Why the old rule was retired.** The first prediction strategy bought whichever side of a market was cheap (a "long shot"), with no idea what the true odds were. That has a built-in cost. Studies of hundreds of thousands of Kalshi contracts (for example Bürgi, Deng and Whelan) find contracts priced under 10 cents lose over 60% of the money put in, and Kalshi's fee is a large share of the price on contracts that cheap. Buying the cheap side every time therefore loses on average, and a few lucky wins do not change that. It now opens no bets. `PREDICTION_ENABLED=true` only sells or settles positions it opened earlier; with it off, those positions stay open until they settle, unless you sell them in the Kalshi app.
+**Why the old rule was retired.** The first prediction strategy bought whichever side of a market was cheap (a "long shot"), with no idea what the true odds were. That has a built-in cost. Studies of hundreds of thousands of Kalshi contracts (for example Bürgi, Deng and Whelan) find contracts priced under 10 cents lose over 60% of the money put in, and Kalshi's fee is a large share of the price on contracts that cheap. Buying the cheap side every time therefore loses on average, and a few lucky wins do not change that. Its code has been deleted. Positions it opened earlier stay open until they settle, unless you sell them in the Kalshi app; your balance and holdings are still read from Kalshi.
 
 **Where each category stands**
 
@@ -434,7 +431,7 @@ Be realistic: sportsbooks, Polymarket and Kalshi usually agree within a point or
 
 ```
 trading_bot/
-  strategies/     sports, GDP nowcast, legacy prediction exits, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
+  strategies/     sports, GDP nowcast, latency arb, perpetuals, BTC 5-min, Polymarket, stocks, crypto, rotation, Markov, options
   integrations/   AI analysis, analyst personas, Freqtrade, slip reader, plain-text router
   service.py      core orchestrator
   scheduler.py    daemon loop

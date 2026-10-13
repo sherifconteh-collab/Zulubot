@@ -37,8 +37,8 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("PREDICTION_BUY_YES_THRESHOLD", text)
         self.assertNotIn("Retired settings", texts({}))
 
-    def test_prediction_enabled_says_it_opens_nothing(self):
-        self.assertIn("opens no new bets", texts({"PREDICTION_ENABLED": "true"}, INFO))
+    def test_prediction_enabled_is_a_retired_setting(self):
+        self.assertIn("PREDICTION_ENABLED", texts({"PREDICTION_ENABLED": "true"}, INFO))
 
     def test_gdp_without_a_key_in_live_mode_warns(self):
         env = {"PAPER_MODE": "false", "GDP_NOWCAST_ENABLED": "true"}

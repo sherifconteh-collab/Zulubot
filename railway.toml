@@ -130,10 +130,8 @@ POLYMARKET_STOP_LOSS = "0.15"
 POLYMARKET_MAX_POSITIONS = "5"
 POLYMARKET_USE_TRADING_AGENTS = "false"
 
-# Kalshi: forecast-based GDP bets (the old cheap-side prediction rule was retired)
+# Kalshi: forecast-based GDP bets
 GDP_NOWCAST_ENABLED = "true"
-# Legacy exits for positions the retired rule opened earlier (opens nothing new)
-PREDICTION_ENABLED = "false"
 
 # Latency arb
 LATENCY_ARB_ENABLED = "false"
