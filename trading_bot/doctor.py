@@ -91,7 +91,6 @@ def diagnose(env: Mapping[str, str]) -> list[Finding]:
     wanting_kalshi = [
         label for label, name, default in (
             ("sports", "KALSHI_SPORTS_ENABLED", True),
-            ("predictions", "PREDICTION_ENABLED", False),
             ("latency arbitrage", "LATENCY_ARB_ENABLED", False),
             ("perpetuals", "KALSHI_PERP_ENABLED", False),
         ) if _flag(env, name, default)
@@ -122,6 +121,19 @@ def diagnose(env: Mapping[str, str]) -> list[Finding]:
             out.append(Finding(INFO, "Railway: BOT_STORAGE_DIR is not set, so the bot's own notes (daily counters, "
                                      "learned weights) reset on every redeploy. Balance and holdings are always "
                                      "read from Kalshi. Optional: attach a Volume at /data and set BOT_STORAGE_DIR=/data."))
+
+    # The cheap-side prediction rule is gone: say so rather than let old settings look active.
+    retired = sorted(n for n in (
+        "PREDICTION_BUY_YES_THRESHOLD", "PREDICTION_BUY_NO_THRESHOLD", "PREDICTION_MAX_POSITIONS",
+        "PREDICTION_MARKET_CATEGORIES", "PREDICTION_CAPITAL_PCT", "PREDICTION_MIN_VOLUME_USD",
+        "PREDICTION_MAX_SPREAD_USD", "PREDICTION_MIN_TRADE_USD", "PREDICTION_REQUIRE_CRYPTO_FNG",
+        "PREDICTION_MARKOV_GATE", "PREDICTION_MAX_PAGES_PER_SERIES", "PREDICTION_DISCOVER_SERIES",
+        "PREDICTION_ENABLED", "PREDICTION_TAKE_PROFIT", "PREDICTION_STOP_LOSS_PCT", "PREDICTION_CHECK_INTERVAL_MINUTES",
+    ) if _value(env, n))
+    if retired:
+        out.append(Finding(INFO, "Retired settings still set (nothing reads them; safe to remove): " + ", ".join(retired) + "."))
+    if _flag(env, "GDP_NOWCAST_ENABLED", True) and not kalshi and not paper:
+        out.append(Finding(WARN, "GDP forecast bets are on (the default) but there is no Kalshi key, so they cannot trade."))
 
     # Leftover keys nothing reads.
     if _has(env, "FMP_API_KEY"):

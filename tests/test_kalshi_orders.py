@@ -12,9 +12,8 @@ import requests
 
 from trading_bot.broker import PaperBroker
 from trading_bot.clients_kalshi import KalshiClient, order_fill_count
-from trading_bot.config import KalshiSportsConfig, PredictionConfig
+from trading_bot.config import KalshiSportsConfig
 from trading_bot.models import PortfolioState, Position
-from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
 from trading_bot.strategies.kalshi_sports import KalshiSportsStrategy
 
 _NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
@@ -370,58 +369,6 @@ class SportsLiveBookingTests(unittest.TestCase):
     def test_unknown_response_shape_trusts_the_request_for_the_sync_backstop(self):
         _, _, pos = self._run({"order": {"order_id": "o", "status": "executed"}})
         self.assertEqual(pos.quantity, 40)        # 20 / 0.50: live entry is the ask, Kalshi bills the fee
-
-
-def _pred_strategy(kalshi) -> CoinbasePredictionStrategy:
-    return CoinbasePredictionStrategy(
-        config=PredictionConfig(enabled=True), kalshi_client=kalshi,
-        logger=logging.getLogger("t"), live_trading_enabled=True,
-    )
-
-
-def _pred_position(qty=10):
-    return Position(symbol="KX:T:yes", asset_type="prediction", strategy="coinbase_predictions",
-                    quantity=qty, entry_price=0.4, current_price=0.4, opened_at="x",
-                    meta={"ticker": "T", "side": "yes", "cash_bucket": "kalshi"})
-
-
-class PredictionSellTests(unittest.TestCase):
-    def _close(self, kalshi):
-        strat = _pred_strategy(kalshi)
-        state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 0.0})
-        pos = _pred_position()
-        state.positions[pos.symbol] = pos
-        broker = PaperBroker(False, logging.getLogger("t"))
-        result = {"sells": [], "decisions": []}
-        strat._close_position(state, broker, pos.symbol, pos, 0.55, "take_profit", result)
-        return state, result
-
-    def test_failed_sell_keeps_the_position_open(self):
-        kalshi = MagicMock()
-        kalshi.sell_to_close.side_effect = RuntimeError("No yes bid")
-        state, result = self._close(kalshi)
-        self.assertIn("KX:T:yes", state.positions)
-        self.assertEqual(result["sells"], [])
-
-    def test_unfilled_sell_keeps_the_position_open(self):
-        kalshi = MagicMock()
-        kalshi.sell_to_close.return_value = {"order": {"fill_count": 0}}
-        state, _ = self._close(kalshi)
-        self.assertIn("KX:T:yes", state.positions)
-
-    def test_partial_sell_shrinks_the_position(self):
-        kalshi = MagicMock()
-        kalshi.sell_to_close.return_value = {"order": {"fill_count": 4}}
-        state, result = self._close(kalshi)
-        self.assertEqual(state.positions["KX:T:yes"].quantity, 6)
-        self.assertEqual(result["sells"], [])
-
-    def test_full_sell_closes_the_position(self):
-        kalshi = MagicMock()
-        kalshi.sell_to_close.return_value = {"order": {"fill_count": 10}}
-        state, result = self._close(kalshi)
-        self.assertNotIn("KX:T:yes", state.positions)
-        self.assertEqual(result["sells"], ["KX:T:yes"])
 
 
 if __name__ == "__main__":

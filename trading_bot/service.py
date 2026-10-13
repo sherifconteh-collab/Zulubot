@@ -30,7 +30,6 @@ from trading_bot.state import StateStore
 from trading_bot.coinbase_feed import CoinbasePriceFeed
 from trading_bot.strategies.altcoin_rotation import AltcoinRotationStrategy
 from trading_bot.strategies.btc_5min import BTC5MinSpreadStrategy
-from trading_bot.strategies.coinbase_predictions import CoinbasePredictionStrategy
 from trading_bot.strategies.gdp_nowcast import GdpNowcastStrategy
 from trading_bot.clients_nowcast import GdpNowClient
 from trading_bot.strategies.crypto import CryptoSentimentFundingStrategy
@@ -221,21 +220,13 @@ class TradingBotService:
             protected_symbols=config.protected_symbols,
         )
 
-        # Kalshi prediction markets strategy
+        # Kalshi API client (sports, GDP, perpetuals, latency arbitrage)
         self.kalshi_client = KalshiClient(
-            key_id=config.predictions.kalshi_key_id,
-            private_key_pem=config.predictions.kalshi_private_key,
+            key_id=config.kalshi.key_id,
+            private_key_pem=config.kalshi.private_key,
             timeout_seconds=config.request_timeout_seconds,
             logger=logger,
             retry_config=config.http_retry,
-        )
-        self.prediction_strategy = CoinbasePredictionStrategy(
-            config=config.predictions,
-            kalshi_client=self.kalshi_client,
-            logger=logger,
-            ai_service=self.ai_service,
-            live_trading_enabled=not config.paper_mode and self.kalshi_client.can_trade,
-            learning_config=config.learning,
         )
 
         # Kalshi Crypto Perpetuals strategy
@@ -433,16 +424,6 @@ class TradingBotService:
             module_results["markov"] = self._run_module(
                 "markov",
                 lambda: self.markov_strategy.run(
-                    state,
-                    broker=self.broker,
-                    risk_manager=self.risk_manager,
-                    now=now,
-                ),
-            )
-        if command in {"predictions", "all"}:
-            module_results["predictions"] = self._run_module(
-                "predictions",
-                lambda: self.prediction_strategy.run(
                     state,
                     broker=self.broker,
                     risk_manager=self.risk_manager,

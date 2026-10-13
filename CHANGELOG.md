@@ -4,6 +4,17 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### GDP forecast bets are on by default
+- `GDP_NOWCAST_ENABLED` now defaults to `true` (as for sports), so nothing needs adding to Railway's Variables. It still places real orders only with `PAPER_MODE=false` and Kalshi keys, and the retired `PREDICTION_*` variables can simply be deleted. Set `GDP_NOWCAST_ENABLED=false` to stop it.
+
+### The long-shot prediction strategy is deleted: no bet without a forecast
+- The Kalshi predictions strategy bought whichever side of a market was cheap, with no view of the true odds, and lost to fees and the favorite-longshot bias. It is removed completely: its code and tests, the `/predict` command, the `predictions` one-shot command and every `PREDICTION_*` setting (`python -m trading_bot doctor` lists any still set; deleting them from Railway is optional, nothing reads them). Positions it opened earlier stay on the account until they settle or you sell them in the Kalshi app.
+- The Kalshi key settings (`KALSHI_KEY_ID`, `KALSHI_PRIVATE_KEY`) are unchanged; they now live in their own `KalshiConfig` instead of the predictions settings.
+- Automatic Kalshi bets now come only from strategies with a probability model: sports and the GDP nowcast.
+- README: the "Prediction markets" section is now "Other Kalshi markets: no forecast, no bet", with a table of which categories have a model, which do not and why, and what adding one takes. `/config` shows the GDP strategy.
+- New `scripts/backtest_calibration.py`: read-only, public data. Reports what buying Kalshi contracts at the ask returned by price range and category on settled markets, fee included, with intervals that resample whole events. Slow because Kalshi rate-limits. Removed `scripts/probe_kalshi_markets.py`, which only previewed the deleted rule.
+- `python -m trading_bot doctor` also warns when `GDP_NOWCAST_ENABLED=true` has no Kalshi key in live mode.
+
 ### GDP nowcast strategy (replaces the long-shot rule for GDP markets)
 - New `gdp_nowcast` strategy for Kalshi's GDP markets, off by default (`GDP_NOWCAST_ENABLED`). It reads the Atlanta Fed's GDPNow estimate (public FRED CSV, no key), converts it into a probability for each "GDP above X%" strike using the nowcast's forecast error (wider further from the release), averages it with the market's own price, and buys YES or NO only when that probability beats the ask price plus Kalshi's fee by 7 cents. Sizing is a quarter of the Kelly stake, capped at 5% of the Kalshi bankroll per bet and 15% for all GDP bets, at most 2 strikes per quarter, hold to settlement unless the bid beats its own value by a margin.
 - Fails closed: no nowcast (or older than 48 hours), a nowcast for another quarter, more than 21 days to the release, a spread over 6 cents, tail prices, a model that disagrees with the market by over 35 points, an unreadable account, a halt or the kill switch all mean no bet. GDP exposure already on the account counts toward the cap.

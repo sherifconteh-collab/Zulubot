@@ -30,6 +30,20 @@ class DoctorTests(unittest.TestCase):
         env = {"KALSHI_KEY_ID": "abc", "KALSHI_PRIVATE_KEY": "not a key"}
         self.assertIn("does not look like a PEM key", texts(env, FAIL))
 
+    def test_retired_prediction_settings_are_called_out(self):
+        env = {"PREDICTION_BUY_YES_THRESHOLD": "0.35", "PREDICTION_CAPITAL_PCT": "0.4"}
+        text = texts(env, INFO)
+        self.assertIn("Retired settings still set", text)
+        self.assertIn("PREDICTION_BUY_YES_THRESHOLD", text)
+        self.assertNotIn("Retired settings", texts({}))
+
+    def test_prediction_enabled_is_a_retired_setting(self):
+        self.assertIn("PREDICTION_ENABLED", texts({"PREDICTION_ENABLED": "true"}, INFO))
+
+    def test_gdp_without_a_key_in_live_mode_warns(self):
+        env = {"PAPER_MODE": "false", "GDP_NOWCAST_ENABLED": "true"}
+        self.assertIn("GDP forecast bets are on (the default) but there is no Kalshi key", texts(env, WARN))
+
     def test_half_configured_telegram_is_a_failure(self):
         self.assertIn("TELEGRAM_CHAT_ID is missing", texts({"TELEGRAM_BOT_TOKEN": "123:abc"}, FAIL))
         self.assertIn("TELEGRAM_BOT_TOKEN is missing", texts({"TELEGRAM_CHAT_ID": "42"}, FAIL))
