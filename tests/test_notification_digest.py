@@ -124,6 +124,25 @@ class DigestTests(unittest.TestCase):
         run(go())
         self.assertEqual(tg.sent, ["error:Kill switch triggered. Bot paused."])
 
+    def test_default_is_one_digest_a_day_and_a_day_of_alerts_is_kept(self):
+        from trading_bot.config import TelegramConfig
+        self.assertEqual(TelegramConfig().digest_hours, 24.0)
+        d, tg, clock = _make(hours=24)
+
+        async def go():
+            for i in range(100):
+                await d.notify_trade({"n": i})
+            clock.t += 23 * 3600
+            await d.flush_if_due()
+            self.assertEqual(tg.sent, [])           # nothing before the day is up
+            clock.t += 2 * 3600
+            await d.notify_trade({"n": 100})
+        run(go())
+        text = "\n".join(tg.sent)
+        self.assertIn("24-hour update", text)
+        self.assertIn("trade:0", text)               # the first alert of the day is still there
+        self.assertIn("trade:100", text)
+
     def test_digest_off_sends_immediately(self):
         d, tg, _ = _make(hours=0)
         run(d.notify_trade({"n": 1}))

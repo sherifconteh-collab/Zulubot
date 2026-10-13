@@ -177,7 +177,7 @@ class TelegramConfig:
     # Routine alerts (cycle summaries, risk banners, leads, heartbeats) are batched into one
     # message every this many hours. 0 sends each alert immediately. Replies to commands
     # (/status, /sports, ...) and a kill switch firing are always immediate.
-    digest_hours: float = 6.0
+    digest_hours: float = 24.0
     # Plain-text messages are understood by Claude (needs ANTHROPIC_API_KEY) and run the same
     # commands as the slash versions. Buying always still needs a yes/confirm.
     natural_language: bool = True
@@ -724,7 +724,7 @@ class AppConfig:
             telegram=TelegramConfig(
                 bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
                 chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
-                digest_hours=_env_float("TELEGRAM_DIGEST_HOURS", 6.0),
+                digest_hours=_env_float("TELEGRAM_DIGEST_HOURS", 24.0),
                 natural_language=_env_bool("TELEGRAM_NATURAL_LANGUAGE", True),
                 nl_model=os.getenv("TELEGRAM_NL_MODEL", "claude-haiku-4-5-20251001").strip(),
             ),
