@@ -1,6 +1,6 @@
 # Zulubot
 
-A multi-strategy trading bot with a **Kalshi sports-betting engine** **crypto trading on Coinbase** and **Kalshi prediction markets** (the stock market, the economy, politics, weather and more), controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
+A multi-strategy trading bot with a **Kalshi sports-betting engine**, **crypto trading on Coinbase** and **Kalshi prediction markets** (the stock market, the economy, politics, weather and more), controlled from Telegram. It runs as a long-lived async daemon (built for [Railway](https://railway.app)). It starts in **paper mode** (simulated money) so nothing is risked until you choose; with `PAPER_MODE=false` and Kalshi credentials its Kalshi strategies (sports bets, automatic parlays, predictions) place **real orders with real money**. Its crypto strategies trade on Coinbase only when you also turn that on (see [Crypto trading](#crypto-trading)). Stocks and Polymarket are always paper-only.
 
 [![Tests](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/test.yml)
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
@@ -9,7 +9,7 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine** **crypto tr
 [![Release](https://img.shields.io/badge/Release-v2026.10.0-green)](RELEASE_NOTES.md)
 
 > ### ⚠️ Read this first
-> **This is experimental software, not financial advice.** Trading and betting can lose money, including all of it. When `PAPER_MODE=false` the bot places **real orders with real money** on Kalshi. It is provided as is, with no warranty (see [LICENSE](LICENSE)). The sports model finds small edges at best; prediction markets are efficient and fees are real. Run it in paper mode first, read the code, start with small stakes, and only risk money you can afford to lose. You are responsible for following the laws and the terms of service that apply to you. Never commit your API keys.
+> **This is experimental software, not financial advice.** Trading and betting can lose money, including all of it. When `PAPER_MODE=false` the bot places **real orders with real money** on Kalshi, and on Coinbase if you also enable crypto trading. It is provided as is, with no warranty (see [LICENSE](LICENSE)). The sports model finds small edges at best; prediction markets are efficient and fees are real. Run it in paper mode first, read the code, start with small stakes, and only risk money you can afford to lose. You are responsible for following the laws and the terms of service that apply to you. Never commit your API keys.
 
 ## Contents
 
@@ -36,7 +36,7 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | Strategy | What it trades | On by default? | With `PAPER_MODE=false` |
 | --- | --- | --- | --- |
 | **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues, plus automatic same-game parlays. Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. | Yes | Real Kalshi orders |
-| **Kalshi predictions** | Crypto, economics, finance, politics, weather and other Kalshi markets, on price thresholds spread across categories | No (`PREDICTION_ENABLED`) | Real Kalshi orders |
+| **Kalshi predictions** | Economics, stock indexes, crypto, politics, weather and other Kalshi markets: small bets on cheap long shots, spread across categories (see [Prediction markets](#prediction-markets-stocks-economy-politics-weather)) | No (`PREDICTION_ENABLED`) | Real Kalshi orders |
 | **Latency arbitrage** | Short-dated Kalshi crypto contracts when the Coinbase price feed moves before Kalshi does | No (`LATENCY_ARB_ENABLED`) | Real Kalshi orders |
 | **Kalshi perpetuals** | Kalshi crypto perpetuals (BTC, ETH, SOL, XRP) on momentum, leverage capped | No (`KALSHI_PERP_ENABLED`) | Real Kalshi orders |
 | **BTC 5-minute spread** | Kalshi and Polymarket implied BTC price vs Coinbase spot | Yes (`BTC5MIN_ENABLED`) | Kalshi leg is real; the Polymarket leg is skipped; spot leg needs Coinbase trading |
@@ -145,6 +145,7 @@ Set these yourself and never commit them. `FMP_API_KEY` from older versions is n
 | `PAPER_MODE` | `true` | `false` places real orders. Leave `true` until you trust it. |
 | `INITIAL_CASH` | `100000` | Starting balance in paper mode |
 | `KALSHI_SPORTS_ENABLED` | `true` | Turn the sports strategy on or off |
+| `PREDICTION_ENABLED` | `false` | Turn the Kalshi predictions strategy (stocks, economy, politics, weather) on |
 | `KALSHI_SPORTS_LEAGUES` | all major leagues | Which leagues to scan |
 | `KALSHI_SPORTS_KELLY_FRACTION` | `0.25` | Fraction of Kelly to stake |
 | `KALSHI_SPORTS_MAX_POSITION_PCT` | `0.10` | Largest single automatic bet, as a share of bankroll |
@@ -184,7 +185,7 @@ Only the chat in `TELEGRAM_CHAT_ID` is answered. You can also type plain English
 | Command | What it does |
 | --- | --- |
 | `/sports` | Run the Kalshi sports strategy and show the mode (LIVE or PAPER), build, balance by shard, cash, what was bought and why nothing was |
-| `/predict` | Kalshi prediction markets (crypto, economics, politics, weather) |
+| `/predict` | Kalshi prediction markets (economics, stock indexes, crypto, politics, weather, and more) |
 | `/perps` | Kalshi crypto perpetuals |
 | `/crypto` | BTC and ETH on Fear & Greed |
 | `/rotation` | Altcoin rotation |
@@ -255,7 +256,7 @@ Combos have no order book. After you confirm, the bot creates the combo market, 
 - the model's fair probability for all legs when it has a view on every leg, otherwise Kalshi's own mid prices multiplied (the model has no view on player stats);
 - or your `max <cents>`; for a slip screenshot with every leg matched, the slip's own price if that is higher.
 
-Contracts are sized so the worst-case cost stays within your stake (default `KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT` = 2% of bankroll, capped at 25%). If no maker quotes at or under the ceiling, **nothing is bought** and you are told the best price offered. Makers price combos above the product of the legs, and same-game legs are correlated, so expect "no quote" at the default ceiling. Raising `max` means paying their margin, an expected cost rather than an edge. After execution the bot reads the position back from Kalshi and warns if it holds the opposite side. Parlays need live trading. The bot never builds or buys a parlay on its own.
+Contracts are sized so the worst-case cost stays within your stake (default `KALSHI_SPORTS_USER_PARLAY_DEFAULT_PCT` = 2% of bankroll, capped at 25%). If no maker quotes at or under the ceiling, **nothing is bought** and you are told the best price offered. Makers price combos above the product of the legs, and same-game legs are correlated, so expect "no quote" at the default ceiling. Raising `max` means paying their margin, an expected cost rather than an edge. After execution the bot reads the position back from Kalshi and warns if it holds the opposite side. Parlays need live trading. A parlay you build (`/parlay`, `/stack` or a slip) is only bought when you confirm it; separately, in live mode the bot buys small automatic parlays on its own (see [Automatic parlays](#automatic-parlays)).
 
 ### Same-game stacks (`/stack`)
 
@@ -376,7 +377,7 @@ Kalshi lists far more than sports. The **predictions strategy** (`/predict`) sca
 | **politics** | Trump, presidential, Senate and House markets |
 | **weather** | temperature and hurricane markets |
 | **entertainment** | Rotten Tomatoes, Spotify and Netflix ranking markets |
-| **sports** | game winners and series (also covered, far better, by the [sports engine](#how-the-sports-model-works)) |
+| **sports** | game winners and series (the dedicated [sports engine](#how-the-sports-model-works) models these properly) |
 | **other** | the next pope |
 
 Pick the categories with `PREDICTION_MARKET_CATEGORIES` (default: all except "other"). Set `PREDICTION_DISCOVER_SERIES=true` to also pick up new Kalshi series automatically. Markets need at least $3,000 of volume (`PREDICTION_MIN_VOLUME_USD`) and a bid-ask spread under 20 cents (`PREDICTION_MAX_SPREAD_USD`), and the scan rotates through the categories so one busy category (CPI) cannot fill every slot.
@@ -400,7 +401,7 @@ To use it: set `PREDICTION_ENABLED=true` (in Railway's Variables panel), make su
 
 ## Safety and risk controls
 
-- **Paper by default, real money when you switch it.** `PAPER_MODE=true` unless you change it; nothing reaches a broker until you set `PAPER_MODE=false` and Kalshi credentials. In live mode the bot spends real money without asking, within the caps below. Parlays refuse to run in paper mode.
+- **Paper by default, real money when you switch it.** `PAPER_MODE=true` unless you change it; nothing reaches a broker until you set `PAPER_MODE=false` and add credentials (Kalshi keys for Kalshi; Coinbase keys and `COINBASE_TRADING_ENABLED=true` for Coinbase). In live mode the bot spends real money without asking, within the caps below. Parlays refuse to run in paper mode.
 - **Coinbase is data-only** unless `COINBASE_TRADING_ENABLED=true` (with it off and `PAPER_MODE=false`, the crypto and rotation strategies do not run at all). Live orders go to Kalshi, plus Coinbase and Robinhood only when you enable them. Stocks and Polymarket are simulated only.
 - **No doubling up.** Before it buys, the bot reads your Kalshi positions and skips any market, or any other market in the same event, that your account already holds, even if the bot's own record was lost. If it cannot read your positions in live mode, it places no new bets that cycle.
 - **Orders are checked, not assumed.** A failed or unfilled order is never booked. Live Kalshi balance and positions are synced, settled positions are pruned, and the drawdown peak uses the same equity as the risk check.
