@@ -385,9 +385,9 @@ class FormatTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_off_by_default_with_conservative_settings(self):
+    def test_on_by_default_with_conservative_settings(self):
         cfg = GdpNowcastConfig()
-        self.assertFalse(cfg.enabled)
+        self.assertTrue(cfg.enabled)
         self.assertEqual((cfg.model_weight, cfg.kelly_fraction, cfg.max_position_pct), (0.5, 0.25, 0.05))
         self.assertLessEqual(cfg.capital_allocation_pct, 0.15)
 

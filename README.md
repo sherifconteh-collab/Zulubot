@@ -38,7 +38,7 @@ Zulubot runs several independent strategies on a schedule, sizes every trade thr
 | --- | --- | --- | --- |
 | **Kalshi sports** | Game-winner markets across NFL, college football, NBA, college basketball, WNBA, MLB, NHL and major soccer leagues, plus automatic same-game parlays. Fuses ESPN, sportsbook lines, Polymarket and Kalshi's own book. | Yes | Real Kalshi orders |
 | **Kalshi predictions** | Retired. The old rule bought whichever side of a market was cheap, with no view of the real odds. It opens no bets now; `PREDICTION_ENABLED` only sells or settles positions it opened earlier (see [Other Kalshi markets](#other-kalshi-markets-no-forecast-no-bet)) | Exits only (`PREDICTION_ENABLED`) | Sells only |
-| **GDP nowcast** | Kalshi GDP markets ("GDP above 3.5%"), bet only when the Atlanta Fed's GDPNow estimate, turned into a probability, beats the price after fees (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) | No (`GDP_NOWCAST_ENABLED`) | Real Kalshi orders |
+| **GDP nowcast** | Kalshi GDP markets ("GDP above 3.5%"), bet only when the Atlanta Fed's GDPNow estimate, turned into a probability, beats the price after fees (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) | Yes (`GDP_NOWCAST_ENABLED`) | Real Kalshi orders |
 | **Latency arbitrage** | Short-dated Kalshi crypto contracts when the Coinbase price feed moves before Kalshi does | No (`LATENCY_ARB_ENABLED`) | Real Kalshi orders |
 | **Kalshi perpetuals** | Kalshi crypto perpetuals (BTC, ETH, SOL, XRP) on momentum, leverage capped | No (`KALSHI_PERP_ENABLED`) | Real Kalshi orders |
 | **BTC 5-minute spread** | Kalshi and Polymarket implied BTC price vs Coinbase spot | Yes (`BTC5MIN_ENABLED`) | Kalshi leg is real; the Polymarket leg is skipped; spot leg needs Coinbase trading |
@@ -148,7 +148,7 @@ Set these yourself and never commit them. `FMP_API_KEY` from older versions is n
 | `INITIAL_CASH` | `100000` | Starting balance in paper mode |
 | `KALSHI_SPORTS_ENABLED` | `true` | Turn the sports strategy on or off |
 | `PREDICTION_ENABLED` | `false` | Only sells or settles positions the retired long-shot rule opened earlier. Opens no new bets. |
-| `GDP_NOWCAST_ENABLED` | `false` | Turn the GDP nowcast strategy on (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) |
+| `GDP_NOWCAST_ENABLED` | `true` | Turn the GDP nowcast strategy off with `false` (see [GDP markets](#gdp-markets-a-forecast-not-a-rule)) |
 | `KALSHI_SPORTS_LEAGUES` | all major leagues | Which leagues to scan |
 | `KALSHI_SPORTS_KELLY_FRACTION` | `0.25` | Fraction of Kelly to stake |
 | `KALSHI_SPORTS_MAX_POSITION_PCT` | `0.10` | Largest single automatic bet, as a share of bankroll |
@@ -390,7 +390,7 @@ Adding a category means adding a model, not loosening a threshold: a forecast, i
 
 ## GDP markets: a forecast, not a rule
 
-The retired long-shot rule had no view of the number it was betting on. For GDP there is a public forecast, so the **GDP nowcast strategy** uses it. It is **off by default** (`GDP_NOWCAST_ENABLED=false`), needs no extra key, and places real Kalshi orders only with `PAPER_MODE=false` and your Kalshi keys. No other strategy touches GDP markets.
+The retired long-shot rule had no view of the number it was betting on. For GDP there is a public forecast, so the **GDP nowcast strategy** uses it. It is **on by default** like sports (set `GDP_NOWCAST_ENABLED=false` to stop it), needs no extra key, and places real Kalshi orders only with `PAPER_MODE=false` and your Kalshi keys. No other strategy touches GDP markets.
 
 **How it decides**
 1. **Forecast:** it reads the Atlanta Fed's GDPNow estimate for the quarter being tracked from FRED's public CSV (`GDPNOW`).

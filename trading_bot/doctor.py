@@ -134,8 +134,8 @@ def diagnose(env: Mapping[str, str]) -> list[Finding]:
     if _flag(env, "PREDICTION_ENABLED", False):
         out.append(Finding(INFO, "PREDICTION_ENABLED only manages positions the retired long-shot rule opened earlier. "
                                  "It opens no new bets."))
-    if _flag(env, "GDP_NOWCAST_ENABLED", False) and not kalshi and not paper:
-        out.append(Finding(WARN, "GDP_NOWCAST_ENABLED=true but there is no Kalshi key, so it cannot trade."))
+    if _flag(env, "GDP_NOWCAST_ENABLED", True) and not kalshi and not paper:
+        out.append(Finding(WARN, "GDP forecast bets are on (the default) but there is no Kalshi key, so they cannot trade."))
 
     # Leftover keys nothing reads.
     if _has(env, "FMP_API_KEY"):

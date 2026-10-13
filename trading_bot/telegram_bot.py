@@ -439,7 +439,7 @@ def _format_gdp(result: dict[str, Any]) -> str:
     )
     enabled = result.get("enabled")
     if enabled is not None:
-        lines.append("Trading: ON" if enabled else "Trading: OFF (set GDP_NOWCAST_ENABLED=true to bet)")
+        lines.append("Trading: ON" if enabled else "Trading: OFF (GDP_NOWCAST_ENABLED=false)")
     for event in result.get("events") or []:
         rows = event.get("rows") or []
         if not rows:

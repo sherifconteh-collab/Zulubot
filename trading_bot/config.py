@@ -585,9 +585,9 @@ class OptionsStrategyConfig:
 
 @dataclass(frozen=True)
 class GdpNowcastConfig:
-    """Kalshi GDP markets, bet only where a nowcast-based probability beats the price (opt-in)."""
+    """Kalshi GDP markets, bet only where a nowcast-based probability beats the price."""
 
-    enabled: bool = False
+    enabled: bool = True                    # still trades only with PAPER_MODE=false and Kalshi keys
     check_interval_minutes: int = 30
     series: str = "KXGDP"
     # Atlanta Fed GDPNow as published by FRED (public CSV, no key). Latest row = quarter being tracked.
@@ -989,7 +989,7 @@ class AppConfig:
                 take_profit_pct=_env_float("KALSHI_SPORTS_TAKE_PROFIT", 0.0),
             ),
             gdp_nowcast=GdpNowcastConfig(
-                enabled=_env_bool("GDP_NOWCAST_ENABLED", False),
+                enabled=_env_bool("GDP_NOWCAST_ENABLED", True),
                 check_interval_minutes=_env_int("GDP_NOWCAST_INTERVAL_MINUTES", 30),
                 series=os.getenv("GDP_NOWCAST_SERIES", "KXGDP").strip() or "KXGDP",
                 source_url=os.getenv(

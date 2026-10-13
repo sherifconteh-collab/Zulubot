@@ -42,7 +42,7 @@ class DoctorTests(unittest.TestCase):
 
     def test_gdp_without_a_key_in_live_mode_warns(self):
         env = {"PAPER_MODE": "false", "GDP_NOWCAST_ENABLED": "true"}
-        self.assertIn("GDP_NOWCAST_ENABLED=true but there is no Kalshi key", texts(env, WARN))
+        self.assertIn("GDP forecast bets are on (the default) but there is no Kalshi key", texts(env, WARN))
 
     def test_half_configured_telegram_is_a_failure(self):
         self.assertIn("TELEGRAM_CHAT_ID is missing", texts({"TELEGRAM_BOT_TOKEN": "123:abc"}, FAIL))

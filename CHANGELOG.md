@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### GDP forecast bets are on by default
+- `GDP_NOWCAST_ENABLED` now defaults to `true` (as for sports), so nothing needs adding to Railway's Variables. It still places real orders only with `PAPER_MODE=false` and Kalshi keys, and the retired `PREDICTION_*` variables can simply be deleted. Set `GDP_NOWCAST_ENABLED=false` to stop it.
+
 ### The long-shot prediction rule is retired: no bet without a forecast
 - The Kalshi predictions strategy used to buy whichever side of a market was cheap, with no view of the true odds, and lost to fees and the favorite-longshot bias. It now opens **no** bets. `PREDICTION_ENABLED=true` only sells or settles positions it opened earlier (take profit at 50 cents, stop loss 15 cents below entry, settlement), so existing holdings are still booked correctly.
 - Removed settings (nothing reads them any more; `python -m trading_bot doctor` lists any still set): `PREDICTION_BUY_YES_THRESHOLD`, `PREDICTION_BUY_NO_THRESHOLD`, `PREDICTION_MAX_POSITIONS`, `PREDICTION_MARKET_CATEGORIES`, `PREDICTION_CAPITAL_PCT`, `PREDICTION_MIN_VOLUME_USD`, `PREDICTION_MAX_SPREAD_USD`, `PREDICTION_MIN_TRADE_USD`, `PREDICTION_REQUIRE_CRYPTO_FNG`, `PREDICTION_MARKOV_GATE`, `PREDICTION_MAX_PAGES_PER_SERIES`, `PREDICTION_DISCOVER_SERIES`. The market-scanning code and its tests were deleted.
