@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Automatic parlays get shorter after each unanswered quote request
+- `/sports` showed that every automatic parlay request got no answer at all from Kalshi's market makers ("No market maker quoted it"), so the price ceiling was not the problem. Each game's three tries now ask for a shorter parlay each time (4 legs, then 3, then 2; never below 2), since makers are likelier to price a short combo and a failed try costs nothing. `KALSHI_SPORTS_AUTO_PARLAY_LEGS` is still the starting length.
+
 ### Automatic parlays pay up to 30% over fair
 - `KALSHI_SPORTS_AUTO_PARLAY_MAX_PREMIUM` now defaults to 0.30 (was 0.10) at the owner's request: with a 10% ceiling market makers almost never quoted low enough, so no parlay was bought. Each parlay is still about $5, 3 a day at most, with open parlays under 25% of the bankroll, so the expected cost is roughly $1 per parlay at the full premium. Lower the setting for fewer, cheaper parlays.
 

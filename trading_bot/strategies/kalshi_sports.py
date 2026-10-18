@@ -2108,7 +2108,10 @@ class KalshiSportsStrategy:
             waited = (now.timestamp() - self.session.parlay_last_try.get(code, 0.0)) / 60.0
             if waited < cfg.auto_parlay_retry_minutes:
                 continue  # space the tries out: quotes are likelier closer to kickoff
-            built = self._stack_from_props(game, props, cfg.auto_parlay_legs, cfg.auto_parlay_leg_prob)
+            # Every unanswered quote request makes the next one simpler: 4 legs, then 3, then 2. Market makers
+            # are likelier to price a short parlay, and a failed try costs nothing.
+            legs_wanted = max(2, cfg.auto_parlay_legs - self.session.parlay_tries.get(code, 0))
+            built = self._stack_from_props(game, props, legs_wanted, cfg.auto_parlay_leg_prob)
             if not built.get("ok"):
                 skip("no_liquid_stack", game=game, why=str(built.get("reason", ""))[:100])
                 continue
