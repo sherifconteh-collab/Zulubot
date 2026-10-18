@@ -513,7 +513,7 @@ class KalshiSportsConfig:
     auto_parlay_min_stake_usd: float = 5.0   # never smaller: market makers don't quote tiny requests
     auto_parlays_per_day: int = 3
     auto_parlay_exposure_pct: float = 0.25   # cap on open parlay cost, % of bankroll
-    auto_parlay_max_premium: float = 0.10    # pay up to this much above the legs' own fair price
+    auto_parlay_max_premium: float = 0.30    # pay up to this much above the legs' own fair price
     auto_parlay_hours_ahead: float = 12.0    # only games starting within this window
     auto_parlay_min_minutes: float = 15.0    # leave time for quotes before kickoff
     auto_parlay_tries_per_game: int = 3      # quote requests per game per day
@@ -1000,7 +1000,7 @@ class AppConfig:
                 auto_parlay_min_stake_usd=_env_float("KALSHI_SPORTS_AUTO_PARLAY_MIN_STAKE_USD", 5.0),
                 auto_parlays_per_day=_env_int("KALSHI_SPORTS_AUTO_PARLAYS_PER_DAY", 3),
                 auto_parlay_exposure_pct=_env_float("KALSHI_SPORTS_AUTO_PARLAY_EXPOSURE_PCT", 0.25),
-                auto_parlay_max_premium=_env_float("KALSHI_SPORTS_AUTO_PARLAY_MAX_PREMIUM", 0.10),
+                auto_parlay_max_premium=_env_float("KALSHI_SPORTS_AUTO_PARLAY_MAX_PREMIUM", 0.30),
                 auto_parlay_hours_ahead=_env_float("KALSHI_SPORTS_AUTO_PARLAY_HOURS_AHEAD", 12.0),
                 auto_parlay_min_minutes=_env_float("KALSHI_SPORTS_AUTO_PARLAY_MIN_MINUTES", 15.0),
                 auto_parlay_tries_per_game=_env_int("KALSHI_SPORTS_AUTO_PARLAY_TRIES_PER_GAME", 3),

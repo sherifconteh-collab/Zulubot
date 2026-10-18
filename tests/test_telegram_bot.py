@@ -270,6 +270,20 @@ class ModuleContextTests(unittest.TestCase):
         self.assertIn("20d SMA", joined)
 
 
+class ParlayLogFormatTests(unittest.TestCase):
+    def test_lists_what_was_tried_and_why_it_did_not_fill(self):
+        from trading_bot.telegram_bot import _format_parlay_log
+        text = "\n".join(_format_parlay_log([
+            {"game": "Bills @ Ravens", "ok": False, "why": "Nothing bought: no quote at or under 31\u00a2. The best price offered was 38\u00a2 all-in."},
+            {"game": "Jets @ Patriots", "ok": True, "why": ""},
+        ]))
+        self.assertIn("2 tried, 1 bought", text)
+        self.assertIn("Bills @ Ravens: Nothing bought: no quote at or under 31", text)
+        self.assertIn("Jets @ Patriots: bought", text)
+        self.assertEqual(_format_parlay_log([]), [])
+        self.assertEqual(_format_parlay_log(None), [])
+
+
 class CommandSurfacesNewSettingsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         config = SimpleNamespace(bot_token="token", chat_id="123", is_configured=True)

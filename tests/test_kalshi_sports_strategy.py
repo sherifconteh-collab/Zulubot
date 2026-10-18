@@ -1612,7 +1612,7 @@ class AutoParlayTests(unittest.TestCase):
 
     def test_never_pays_above_the_ceiling_and_stops_trying_a_game(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.40)  # well over reference + 10%
+        self._quote_at(kalshi, strat, 1.60)  # well over reference + 30%
         for k in range(5):
             state, result = self._run(strat, now=_NOW + timedelta(minutes=50 * k))
             self.assertEqual(result["auto_parlays"], [])
@@ -1621,9 +1621,45 @@ class AutoParlayTests(unittest.TestCase):
         self.assertEqual(kalshi.accept_rfq_quote.call_count, 0)
         self.assertEqual(kalshi.create_rfq.call_count, 3)
 
+    def test_every_attempt_and_its_reason_is_kept_for_the_sports_report(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.60)
+        _, result = self._run(strat)
+        self.assertEqual(len(strat.session.parlay_log), 1)
+        entry = strat.session.parlay_log[0]
+        self.assertFalse(entry["ok"])
+        self.assertIn("no quote at or under", entry["why"])
+        self.assertEqual(result["parlay_log"], strat.session.parlay_log)
+
+    def test_a_quote_kalshi_refuses_is_reported_as_refused_not_as_missing(self):
+        strat, kalshi = self._ready()
+        self._quote_at(kalshi, strat, 1.0)
+        kalshi.accept_rfq_quote.side_effect = RuntimeError("HTTP 400: insufficient_balance")
+        _, result = self._run(strat)
+        self.assertEqual(result["auto_parlays"], [])
+        why = strat.session.parlay_log[0]["why"]
+        self.assertIn("Kalshi refused it", why)
+        self.assertIn("insufficient_balance", why)
+        self.assertNotIn("no quote at or under", why)
+
+    def test_the_attempt_log_survives_a_restart_is_capped_and_resets_each_day(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.json"
+            session = DailySession(path, logging.getLogger("t.s"))
+            session.update("2026-10-18", 100.0)
+            for i in range(12):
+                session.record_parlay_result(f"game{i}", False, "no quote", float(i))
+            self.assertEqual(len(session.parlay_log), 8)
+            reloaded = DailySession(path, logging.getLogger("t.s"))
+            self.assertEqual([r["game"] for r in reloaded.parlay_log], [f"game{i}" for i in range(4, 12)])
+            reloaded.update("2026-10-19", 100.0)
+            self.assertEqual(reloaded.parlay_log, [])
+
     def test_tries_for_a_game_are_spaced_out(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.40)
+        self._quote_at(kalshi, strat, 1.60)
         for k in range(4):  # a cycle every 10 minutes: only the first and the one after 45 minutes try
             self._run(strat, now=_NOW + timedelta(minutes=10 * k))
         self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 1)

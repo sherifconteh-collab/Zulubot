@@ -606,6 +606,19 @@ def _skip_reason_summary(decisions: Any, limit: int = 4) -> str:
     return ", ".join(f"{reason} x{n}" for reason, n in ranked)
 
 
+def _format_parlay_log(log: Any, limit: int = 4) -> list[str]:
+    """Today's automatic parlay attempts, newest last: what was tried and why it did not fill."""
+    rows = [r for r in (log or []) if isinstance(r, dict)]
+    if not rows:
+        return []
+    bought = sum(1 for r in rows if r.get("ok"))
+    lines = [f"Auto parlays today: {len(rows)} tried, {bought} bought"]
+    for row in rows[-limit:]:
+        mark = "bought" if row.get("ok") else _clip_text(str(row.get("why") or "not filled"), 200)
+        lines.append(f"  \u2022 {html.escape(str(row.get('game', '?')))}: {html.escape(mark)}")
+    return lines
+
+
 _WHY_REASONS = ("order_failed", "order_not_filled", "parlay_not_filled", "props_unavailable", "no_liquid_stack")
 
 
@@ -1690,6 +1703,7 @@ class TradingTelegramBot:
             for sym in module.get("buys") or []:
                 lines.append(f"BUY  {html.escape(str(sym))}")
             lines.extend(_format_auto_parlays(module.get("auto_parlays")))
+            lines.extend(_format_parlay_log(module.get("parlay_log")))
             why = _skip_reason_summary(module.get("decisions"))
             if why and not (module.get("buys") or []):
                 lines.append(f"Nothing bought. Skipped: {html.escape(why)}")

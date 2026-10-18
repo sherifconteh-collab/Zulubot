@@ -328,6 +328,7 @@ class DailySession:
         self.dogs = 0             # ...of which backed an underdog (win prob < 50%)
         self.parlays = 0          # automatic parlays bought today
         self.parlay_tries: dict[str, int] = {}   # game code -> quote requests made today
+        self.parlay_log: list[dict[str, Any]] = []   # today's automatic parlay attempts: game, ok, why
         self.parlay_last_try: dict[str, float] = {}   # game code -> epoch seconds of the last request
         if path is not None and path.exists():
             try:
@@ -340,6 +341,8 @@ class DailySession:
                 self.parlays = int(data.get("parlays", 0))
                 self.parlay_tries = {str(k): int(v) for k, v in dict(data.get("parlay_tries", {})).items()}
                 self.parlay_last_try = {str(k): float(v) for k, v in dict(data.get("parlay_last_try", {})).items()}
+                self.parlay_log = [dict(row) for row in list(data.get("parlay_log", []))[-self._PARLAY_LOG_MAX:]
+                                   if isinstance(row, dict)]
             except (OSError, ValueError) as exc:
                 self.logger.warning("Could not load sports session (%s); starting fresh.", exc)
 
@@ -352,6 +355,7 @@ class DailySession:
                 "date": self.date, "start": self.start, "peak": self.peak,
                 "actions": self.actions, "dogs": self.dogs,
                 "parlays": self.parlays, "parlay_tries": self.parlay_tries, "parlay_last_try": self.parlay_last_try,
+                "parlay_log": self.parlay_log,
             }))
         except OSError as exc:
             self.logger.warning("Could not save sports session: %s", exc)
@@ -369,6 +373,14 @@ class DailySession:
         self.parlay_last_try[game_code] = when
         self._save()
 
+    _PARLAY_LOG_MAX = 8
+
+    def record_parlay_result(self, game: str, ok: bool, why: str, when: float = 0.0) -> None:
+        """Keep the reason for each automatic parlay attempt so /sports can say why none were bought."""
+        self.parlay_log.append({"game": game, "ok": bool(ok), "why": why[:300], "at": when})
+        del self.parlay_log[:-self._PARLAY_LOG_MAX]
+        self._save()
+
     def record_parlay(self) -> None:
         """Count one automatic parlay against today's allowance."""
         self.parlays += 1
@@ -378,7 +390,7 @@ class DailySession:
         """Record the current bankroll; returns day PnL and drawdown from the day's peak."""
         if self.date != today:
             self.date, self.start, self.peak, self.actions, self.dogs = today, equity, equity, 0, 0
-            self.parlays, self.parlay_tries, self.parlay_last_try = 0, {}, {}
+            self.parlays, self.parlay_tries, self.parlay_last_try, self.parlay_log = 0, {}, {}, []
         elif equity > self.peak:
             self.peak = equity
         self._save()
