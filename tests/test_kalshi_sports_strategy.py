@@ -1583,6 +1583,12 @@ class AutoParlayTests(unittest.TestCase):
         strat._auto_parlays(state, broker, now, result)
         return state, result
 
+    @staticmethod
+    def _quote_too_dear(kalshi):
+        """A maker quote of 99.5c all-in: above the ceiling whatever the number of legs."""
+        kalshi.get_rfq_quotes.return_value = [
+            {"id": "q-1", "status": "open", "no_bid_dollars": "0.0050", "contracts_fp": "9999.00"}]
+
     def _quote_at(self, kalshi, strat, price_over_reference):
         """Maker quotes every parlay at (reference * price_over_reference); the position then reads back."""
         built = strat.build_stack(_NOW, "bills ravens", strat.config.auto_parlay_legs, strat.config.auto_parlay_leg_prob)
@@ -1612,7 +1618,7 @@ class AutoParlayTests(unittest.TestCase):
 
     def test_never_pays_above_the_ceiling_and_stops_trying_a_game(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.60)  # well over reference + 30%
+        self._quote_too_dear(kalshi)  # above the ceiling at any number of legs
         for k in range(5):
             state, result = self._run(strat, now=_NOW + timedelta(minutes=50 * k))
             self.assertEqual(result["auto_parlays"], [])
@@ -1623,7 +1629,7 @@ class AutoParlayTests(unittest.TestCase):
 
     def test_every_attempt_and_its_reason_is_kept_for_the_sports_report(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.60)
+        self._quote_too_dear(kalshi)
         _, result = self._run(strat)
         self.assertEqual(len(strat.session.parlay_log), 1)
         entry = strat.session.parlay_log[0]
@@ -1657,9 +1663,19 @@ class AutoParlayTests(unittest.TestCase):
             reloaded.update("2026-10-19", 100.0)
             self.assertEqual(reloaded.parlay_log, [])
 
+    def test_each_unanswered_try_asks_for_a_shorter_parlay(self):
+        strat, kalshi = self._ready(auto_parlay_legs=4)
+        self._quote_too_dear(kalshi)              # nobody quotes within the ceiling
+        for k in range(3):
+            self._run(strat, now=_NOW + timedelta(minutes=50 * k))
+        sizes = [len(call.args[1]) for call in kalshi.create_combo_market.call_args_list]
+        self.assertEqual(len(sizes), 3)
+        self.assertEqual(sizes, sorted(sizes, reverse=True))      # never longer than the try before
+        self.assertGreaterEqual(min(sizes), 2)                    # and never below two legs
+
     def test_tries_for_a_game_are_spaced_out(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.60)
+        self._quote_too_dear(kalshi)
         for k in range(4):  # a cycle every 10 minutes: only the first and the one after 45 minutes try
             self._run(strat, now=_NOW + timedelta(minutes=10 * k))
         self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 1)

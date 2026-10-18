@@ -283,7 +283,7 @@ The limits (`KALSHI_SPORTS_AUTO_PARLAY*` in `.env.example`):
 
 | Limit | Default |
 |---|---|
-| Legs per parlay / target chance per leg | 4 / 85% |
+| Legs per parlay / target chance per leg | 4 / 85% (a game's second and third tries drop to 3 and then 2 legs if nobody quotes) |
 | Stake per parlay | 2% of bankroll, never under $5 (market makers don't quote tiny requests) |
 | Parlays per day | 3 |
 | Open parlay cost at once | 25% of bankroll |
