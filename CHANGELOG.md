@@ -4,6 +4,10 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### `/sports` says why automatic parlays are not being bought
+- The bot now keeps today's automatic parlay attempts and the reason each one did not fill (no maker quoted, best price offered against the ceiling, and so on), saves them with the daily session so a restart does not lose them, and `/sports` prints them: `Auto parlays today: 4 tried, 0 bought` with one line per game.
+- A quote that was within the ceiling but that Kalshi refused to accept (for example because the funds sit on another shard) is now reported as refused, with Kalshi's error, instead of as "no quote at or under".
+
 ### `/gdp` says what a thin edge is up against
 - A strike skipped for a small edge now reads "edge too small (+6.0c after fee, needs 7c)" instead of "edge too small after fee (+6.0c)", which looked like a positive edge being refused. The requirement comes from `GDP_NOWCAST_MIN_EDGE`.
 ### Crypto price markets: automatic BTC and ETH bets from a price model

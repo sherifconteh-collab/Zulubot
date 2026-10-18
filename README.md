@@ -292,7 +292,7 @@ The limits (`KALSHI_SPORTS_AUTO_PARLAY*` in `.env.example`):
 
 It never buys the same game twice, never pays above the ceiling, and an outcome it can't confirm stops it for the cycle. **Expect it to lose a little on average:** the model has no view on player props, so these are priced at Kalshi's own odds, and you pay the fee and up to the 10% premium. The point is consistent action within a small, fixed budget, not an edge. Singles on game winners (when the model finds an edge or picks the best value) are separate and unchanged.
 
-Send `/sports` to see the mode (**LIVE** or **PAPER**, including the case where `PAPER_MODE=false` but the Kalshi credentials are missing, which silently runs on paper), what was bought and why nothing was.
+Send `/sports` to see the mode (**LIVE** or **PAPER**, today's automatic parlay attempts and why each did or did not fill, including the case where `PAPER_MODE=false` but the Kalshi credentials are missing, which silently runs on paper), what was bought and why nothing was.
 
 ### Paste a list of legs instead (no AI, no API cost)
 

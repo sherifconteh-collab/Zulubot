@@ -486,7 +486,7 @@ class KalshiSportsStrategy:
             "markets_matched": 0,
             "predictions": [],
             "parlays": [],
-            "auto_parlays": [],
+            "auto_parlays": [], "parlay_log": [],
             "bankroll": {},
             "decisions": [],
             "can_trade_live": self.live_trading_enabled,
@@ -1919,6 +1919,7 @@ class KalshiSportsStrategy:
         best_seen: float | None = None
         accepted: dict[str, Any] | None = None
         tried: set[str] = set()
+        refusals: list[str] = []
         while accepted is None:
             try:
                 quotes = self.kalshi.get_rfq_quotes(rfq_id)
@@ -1940,6 +1941,7 @@ class KalshiSportsStrategy:
                     self.kalshi.accept_rfq_quote(rfq_id, str(quote["id"]), "no")
                 except Exception as exc:
                     self.logger.warning("Accepting parlay quote failed: %s", exc)
+                    refusals.append(f"{cost * 100:.0f}¢: {exc}")
                     continue
                 accepted = {"quote": quote, "cost": cost}
                 break
@@ -1952,6 +1954,11 @@ class KalshiSportsStrategy:
                 self.kalshi.delete_rfq(rfq_id)
             except Exception as exc:
                 self.logger.debug("Could not delete RFQ %s: %s", rfq_id, exc)
+            if refusals:
+                # A quote was within the ceiling but Kalshi would not take it (for example the funds sit on a
+                # different shard): say so, instead of reporting it as a missing quote.
+                return {"ok": False, "best_seen": best_seen, "reason": (
+                    f"A quote within {ceiling * 100:.0f}¢ was offered but Kalshi refused it: {refusals[-1]}")}
             seen = (f" The best price offered was {best_seen * 100:.0f}¢ all-in." if best_seen is not None
                     else " No market maker quoted it.")
             return {"ok": False, "reason": (
@@ -2111,6 +2118,7 @@ class KalshiSportsStrategy:
             outcome = self.place_user_parlay(
                 state, broker, legs=built["legs"], amount=stake, max_price=ceiling, now=now, auto=True,
             )
+            self.session.record_parlay_result(game, bool(outcome.get("ok")), str(outcome.get("reason", "")), now.timestamp())
             if not outcome.get("ok"):
                 skip("parlay_not_filled", game=game, why=str(outcome.get("reason", ""))[:160])
                 if outcome.get("uncertain"):
@@ -2136,6 +2144,7 @@ class KalshiSportsStrategy:
                 "strategy": "kalshi_sports", "symbol": symbol, "action": "buy", "reason": "auto_parlay",
                 "signals": summary,
             })
+        result["parlay_log"] = list(self.session.parlay_log)
         if not placed_any and not result["auto_parlays"]:
             skip("no_parlay_this_cycle", games_seen=len(games))
 
