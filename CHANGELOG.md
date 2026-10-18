@@ -4,6 +4,9 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### Automatic parlays pay up to 30% over fair
+- `KALSHI_SPORTS_AUTO_PARLAY_MAX_PREMIUM` now defaults to 0.30 (was 0.10) at the owner's request: with a 10% ceiling market makers almost never quoted low enough, so no parlay was bought. Each parlay is still about $5, 3 a day at most, with open parlays under 25% of the bankroll, so the expected cost is roughly $1 per parlay at the full premium. Lower the setting for fewer, cheaper parlays.
+
 ### `/sports` says why automatic parlays are not being bought
 - The bot now keeps today's automatic parlay attempts and the reason each one did not fill (no maker quoted, best price offered against the ceiling, and so on), saves them with the daily session so a restart does not lose them, and `/sports` prints them: `Auto parlays today: 4 tried, 0 bought` with one line per game.
 - A quote that was within the ceiling but that Kalshi refused to accept (for example because the funds sit on another shard) is now reported as refused, with Kalshi's error, instead of as "no quote at or under".

@@ -1612,7 +1612,7 @@ class AutoParlayTests(unittest.TestCase):
 
     def test_never_pays_above_the_ceiling_and_stops_trying_a_game(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.40)  # well over reference + 10%
+        self._quote_at(kalshi, strat, 1.60)  # well over reference + 30%
         for k in range(5):
             state, result = self._run(strat, now=_NOW + timedelta(minutes=50 * k))
             self.assertEqual(result["auto_parlays"], [])
@@ -1623,7 +1623,7 @@ class AutoParlayTests(unittest.TestCase):
 
     def test_every_attempt_and_its_reason_is_kept_for_the_sports_report(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.40)
+        self._quote_at(kalshi, strat, 1.60)
         _, result = self._run(strat)
         self.assertEqual(len(strat.session.parlay_log), 1)
         entry = strat.session.parlay_log[0]
@@ -1659,7 +1659,7 @@ class AutoParlayTests(unittest.TestCase):
 
     def test_tries_for_a_game_are_spaced_out(self):
         strat, kalshi = self._ready()
-        self._quote_at(kalshi, strat, 1.40)
+        self._quote_at(kalshi, strat, 1.60)
         for k in range(4):  # a cycle every 10 minutes: only the first and the one after 45 minutes try
             self._run(strat, now=_NOW + timedelta(minutes=10 * k))
         self.assertEqual(strat.session.parlay_tries["26OCT04BUFBAL"], 1)
