@@ -1,2 +1,2 @@
 -r requirements.txt
-freqtrade>=2024.1,<2027.0
+freqtrade>=2026.9,<2027.0
