@@ -1,5 +1,52 @@
 # Release notes
 
+## v2026.10.1 — 2026-10-19
+
+> **Version**: 2026.10.1 · **Released**: 2026-10-19
+
+### Automatic parlays get shorter after each unanswered quote request
+- `/sports` showed that every automatic parlay request got no answer at all from Kalshi's market makers ("No market maker quoted it"), so the price ceiling was not the problem. Each game's three tries now ask for a shorter parlay each time (4 legs, then 3, then 2; never below 2), since makers are likelier to price a short combo and a failed try costs nothing. `KALSHI_SPORTS_AUTO_PARLAY_LEGS` is still the starting length.
+
+### Automatic parlays pay up to 30% over fair
+- `KALSHI_SPORTS_AUTO_PARLAY_MAX_PREMIUM` now defaults to 0.30 (was 0.10) at the owner's request: with a 10% ceiling market makers almost never quoted low enough, so no parlay was bought. Each parlay is still about $5, 3 a day at most, with open parlays under 25% of the bankroll, so the expected cost is roughly $1 per parlay at the full premium. Lower the setting for fewer, cheaper parlays.
+
+### `/sports` says why automatic parlays are not being bought
+- The bot now keeps today's automatic parlay attempts and the reason each one did not fill (no maker quoted, best price offered against the ceiling, and so on), saves them with the daily session so a restart does not lose them, and `/sports` prints them: `Auto parlays today: 4 tried, 0 bought` with one line per game.
+- A quote that was within the ceiling but that Kalshi refused to accept (for example because the funds sit on another shard) is now reported as refused, with Kalshi's error, instead of as "no quote at or under".
+
+### `/gdp` says what a thin edge is up against
+- A strike skipped for a small edge now reads "edge too small (+6.0c after fee, needs 7c)" instead of "edge too small after fee (+6.0c)", which looked like a positive edge being refused. The requirement comes from `GDP_NOWCAST_MIN_EDGE`.
+### Crypto price markets: automatic BTC and ETH bets from a price model
+- New `crypto_markets` strategy for Kalshi's hourly Bitcoin and Ethereum price ladders (`KXBTCD`, `KXETHD`), on by default (`CRYPTO_MARKETS_ENABLED`; it still trades only with `PAPER_MODE=false` and Kalshi keys). The live Coinbase price is the center, recent realized volatility sets the spread (larger of the last 3 hours and the last day, widened 15%, plus a basis allowance for the settlement index), the price at settlement is log-normal, and it buys YES or NO only when the probability, averaged 50/50 with the market's own price, beats the ask plus Kalshi's fee by 8 cents. Sizing is a fifth of the Kelly stake, at most 2% of the Kalshi bankroll per bet and 6% in total, 2 strikes per event.
+- Built-in check against bad data: it fits the market's own ladder to find the price and spread the quotes imply, and bets only if its volatility is within a factor of two of the market's and its price within one model spread of the ladder's center; the spot price must also agree with the last Coinbase candle. It also needs 4 or more strikes priced between 10 and 90 cents. Missing or stale (over 20 minutes) Coinbase data, settling in under 20 minutes or over 6 hours, wide books, extreme prices, an unreadable account, a halt or the kill switch all mean no bet.
+- `/cryptomarkets` shows the prices, model-versus-market spread and each near-the-money strike (read-only, no orders). `CRYPTO_MARKETS_*` settings are in `.env.example`.
+- GDP and crypto share one `forecast_engine`: the checks, Kelly sizing, caps, IOC orders, fill booking and early-exit logic live in one place, and a new market type needs only a model. GDP behaviour is unchanged (its 36 tests pass untouched).
+
+### GDP forecast bets are on by default
+- `GDP_NOWCAST_ENABLED` now defaults to `true` (as for sports), so nothing needs adding to Railway's Variables. It still places real orders only with `PAPER_MODE=false` and Kalshi keys, and the retired `PREDICTION_*` variables can simply be deleted. Set `GDP_NOWCAST_ENABLED=false` to stop it.
+
+### The long-shot prediction strategy is deleted: no bet without a forecast
+- The Kalshi predictions strategy bought whichever side of a market was cheap, with no view of the true odds, and lost to fees and the favorite-longshot bias. It is removed completely: its code and tests, the `/predict` command, the `predictions` one-shot command and every `PREDICTION_*` setting (`python -m trading_bot doctor` lists any still set; deleting them from Railway is optional, nothing reads them). Positions it opened earlier stay on the account until they settle or you sell them in the Kalshi app.
+- The Kalshi key settings (`KALSHI_KEY_ID`, `KALSHI_PRIVATE_KEY`) are unchanged; they now live in their own `KalshiConfig` instead of the predictions settings.
+- Automatic Kalshi bets now come only from strategies with a probability model: sports and the GDP nowcast.
+- README: the "Prediction markets" section is now "Other Kalshi markets: no forecast, no bet", with a table of which categories have a model, which do not and why, and what adding one takes. `/config` shows the GDP strategy.
+- New `scripts/backtest_calibration.py`: read-only, public data. Reports what buying Kalshi contracts at the ask returned by price range and category on settled markets, fee included, with intervals that resample whole events. Slow because Kalshi rate-limits. Removed `scripts/probe_kalshi_markets.py`, which only previewed the deleted rule.
+- `python -m trading_bot doctor` also warns when `GDP_NOWCAST_ENABLED=true` has no Kalshi key in live mode.
+
+### GDP nowcast strategy (replaces the long-shot rule for GDP markets)
+- New `gdp_nowcast` strategy for Kalshi's GDP markets, off by default (`GDP_NOWCAST_ENABLED`). It reads the Atlanta Fed's GDPNow estimate (public FRED CSV, no key), converts it into a probability for each "GDP above X%" strike using the nowcast's forecast error (wider further from the release), averages it with the market's own price, and buys YES or NO only when that probability beats the ask price plus Kalshi's fee by 7 cents. Sizing is a quarter of the Kelly stake, capped at 5% of the Kalshi bankroll per bet and 15% for all GDP bets, at most 2 strikes per quarter, hold to settlement unless the bid beats its own value by a margin.
+- Fails closed: no nowcast (or older than 48 hours), a nowcast for another quarter, more than 21 days to the release, a spread over 6 cents, tail prices, a model that disagrees with the market by over 35 points, an unreadable account, a halt or the kill switch all mean no bet. GDP exposure already on the account counts toward the cap.
+- `/gdp` shows the nowcast against every open strike (read-only, no orders). `GDP_NOWCAST_*` settings are in `.env.example`.
+- The predictions strategy no longer scans `KXGDP`; its cheap-long-shot rule had no view of GDP and lost to fees and the favorite-longshot bias.
+
+### README: Crypto trading and Prediction markets sections
+- New "Crypto trading" section: what the crypto sentiment and altcoin rotation strategies do (Fear & Greed thresholds, trend filter, funding rate, take profit and stop loss, sizing, rotation fees and the "never go backwards" rule), the three switches needed for real Coinbase trading (`PAPER_MODE=false`, `COINBASE_TRADING_ENABLED=true`, Coinbase keys), step-by-step setup, which risk controls cover crypto, and honest expectations. The intro, contents and strategy table link to it, and it notes the Kalshi-side crypto strategies and the Markov gate.
+- New "Prediction markets" section for the Kalshi predictions strategy: the categories and series it scans (economics, finance and stock indexes, crypto, politics, weather, entertainment), the long-shot threshold rule (buys the cheap, unlikely side of a market), take profit and stop loss (the stop is 15 cents, not 15 percent), sizing and limits, the guards, and an honest note that the rule has no probability model and loses a little after fees.
+
+### Telegram digest is once a day
+- `TELEGRAM_DIGEST_HOURS` now defaults to 24 (was 6): routine alerts (cycle summaries, bet and parlay alerts, risk banners, leads, heartbeats) arrive as one digest a day, headed "24-hour update". The buffer holds 120 messages (was 40) so a full day is not cut off. Replies to your commands and the kill switch firing are still immediate, a redeploy still sends what is held right away, and `/sports` shows the current picture any time. Set `TELEGRAM_DIGEST_HOURS=6` (or `0` for immediate) to change it; a value set in Railway's Variables panel overrides the default.
+
+
 ## v2026.10.0 — 2026-10-12
 
 > **Version**: 2026.10.0 · **Released**: 2026-10-12

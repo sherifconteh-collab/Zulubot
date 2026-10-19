@@ -6,7 +6,7 @@ A multi-strategy trading bot with a **Kalshi sports-betting engine**, **crypto t
 [![Security checks](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml/badge.svg)](https://github.com/sherifconteh-collab/Zulubot/actions/workflows/security.yml)
 [![License: AGPL-3.0 or commercial](https://img.shields.io/badge/License-AGPL--3.0_or_commercial-blue.svg)](LICENSE)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
-[![Release](https://img.shields.io/badge/Release-v2026.10.0-green)](RELEASE_NOTES.md)
+[![Release](https://img.shields.io/badge/Release-v2026.10.1-green)](RELEASE_NOTES.md)
 
 > ### ⚠️ Read this first
 > **This is experimental software, not financial advice.** Trading and betting can lose money, including all of it. When `PAPER_MODE=false` the bot places **real orders with real money** on Kalshi, and on Coinbase if you also enable crypto trading. It is provided as is, with no warranty (see [LICENSE](LICENSE)). The sports model finds small edges at best; prediction markets are efficient and fees are real. Run it in paper mode first, read the code, start with small stakes, and only risk money you can afford to lose. You are responsible for following the laws and the terms of service that apply to you. Never commit your API keys.

@@ -4,6 +4,8 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+## [2026.10.1] — 2026-10-19
+
 ### Automatic parlays get shorter after each unanswered quote request
 - `/sports` showed that every automatic parlay request got no answer at all from Kalshi's market makers ("No market maker quoted it"), so the price ceiling was not the problem. Each game's three tries now ask for a shorter parlay each time (4 legs, then 3, then 2; never below 2), since makers are likelier to price a short combo and a failed try costs nothing. `KALSHI_SPORTS_AUTO_PARLAY_LEGS` is still the starting length.
 
