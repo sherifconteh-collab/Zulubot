@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 from trading_bot.broker import PaperBroker
 from trading_bot.clients_espn import (
@@ -107,6 +108,34 @@ def _run(strategy, state=None):
     broker = PaperBroker(True, logging.getLogger("test_kalshi_sports.broker"))
     result = strategy.run(state, broker=broker, risk_manager=MagicMock(), now=_NOW)
     return state, broker, result
+
+
+class ShardRetryTests(unittest.TestCase):
+    def test_funding_refusal_retries_after_rebalancing_but_missing_market_waits(self):
+        for status, text, delay in ((400, "insufficient_balance", 30),
+                                    (400, "insufficient_shard_balance", 30),
+                                    (400, "Exchange user not found", 30),
+                                    (404, "market not found", 6 * 3600)):
+            with self.subTest(status=status, text=text):
+                strat, kalshi = _strategy(_config(), [], [])
+                strat.live_trading_enabled = True
+                error = RuntimeError(text)
+                error.response = SimpleNamespace(status_code=status, text=text)
+                kalshi.place_order.side_effect = [error, {"order": {"fill_count": 0}}]
+                state = PortfolioState(cash=0.0, cash_reserves={"kalshi": 100.0})
+                broker = PaperBroker(True, logging.getLogger("t"))
+                cand = {"market": _market(), "game": _game(),
+                        "decision": SimpleNamespace(side="yes", price=0.4, fee=0.01)}
+                with patch("trading_bot.strategies.kalshi_sports.time.monotonic", return_value=100) as clock:
+                    strat._place_bet(state, broker, cand, 5.0, _NOW, None)
+                    self.assertEqual(kalshi.place_order.call_count, 1)
+                    clock.return_value = 100 + delay - 1
+                    strat._place_bet(state, broker, cand, 5.0, _NOW, None)
+                    self.assertEqual(kalshi.place_order.call_count, 1)
+                    clock.return_value = 100 + delay
+                    strat._place_bet(state, broker, cand, 5.0, _NOW, None)
+                    self.assertEqual(kalshi.place_order.call_count, 2)
+                    self.assertEqual(state.positions, {})
 
 
 class MathTests(unittest.TestCase):

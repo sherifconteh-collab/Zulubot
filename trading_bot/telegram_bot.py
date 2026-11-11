@@ -619,8 +619,10 @@ def _shard_allocation_line(status: Any) -> str:
     if state == "failed":
         return ("Shard rebalancing: NOT on (" + html.escape(_clip_text(str(status.get("error", "")), 160)) + "). "
                 "Orders fail when a market's shard is empty: set a split at kalshi.com/account/exchange-indexes")
-    if state == "off":
-        return "Shard rebalancing: off (KALSHI_AUTO_REBALANCE=false). Keep money on the shards of the markets you bet on."
+    if state == "unmanaged":
+        return ("Shard rebalancing: bot management disabled (KALSHI_AUTO_REBALANCE=false). "
+                "Kalshi may still rebalance using its saved split; view or disable it at "
+                "kalshi.com/account/exchange-indexes")
     return ""
 
 

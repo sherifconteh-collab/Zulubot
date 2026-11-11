@@ -561,6 +561,8 @@ class TradingBotService:
             status["state"] = "paper"
             return status
         if not cfg.auto_rebalance:
+            # This flag controls bot management, not Kalshi's persistent account setting.
+            status["state"] = "unmanaged"
             return status
         try:
             current = self.kalshi_client.get_target_allocation()

@@ -90,6 +90,16 @@ class EnsureAllocationTests(unittest.TestCase):
             svc.ensure_shard_allocation()
         put.assert_not_called()
 
+    def test_disabled_management_does_not_claim_remote_rebalancing_is_off(self):
+        api = MagicMock()
+        status = _service(auto=False, get_target_allocation=api, set_target_allocation=api).ensure_shard_allocation()
+        self.assertEqual(status["state"], "unmanaged")
+        line = _shard_allocation_line(status)
+        self.assertIn("bot management disabled", line)
+        self.assertIn("Kalshi may still rebalance", line)
+        self.assertIn("kalshi.com/account/exchange-indexes", line)
+        api.assert_not_called()
+
     def test_a_refusal_or_an_unconfirmed_setting_is_reported_not_hidden(self):
         boom = MagicMock(side_effect=RuntimeError("403 forbidden"))
         status = _service(get_target_allocation=MagicMock(return_value=[]), set_target_allocation=boom).ensure_shard_allocation()
