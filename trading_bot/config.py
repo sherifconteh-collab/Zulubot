@@ -34,6 +34,23 @@ def _env_int(name: str, default: int) -> int:
     return int(raw_value)
 
 
+_DEFAULT_SHARD_TARGETS = ((0, 60), (1, 15), (2, 10), (3, 15))
+
+
+def _parse_shard_targets(raw: str) -> tuple[tuple[int, int], ...]:
+    """``"0:60,1:15,2:10,3:15"`` -> ((0, 60), ...); anything malformed or not totalling 100 gives the default."""
+    if not raw.strip():
+        return _DEFAULT_SHARD_TARGETS
+    try:
+        pairs = tuple(sorted((int(a), int(b)) for a, b in (part.split(":") for part in raw.split(",") if part.strip())))
+    except ValueError:
+        return _DEFAULT_SHARD_TARGETS
+    if not pairs or sum(p for _, p in pairs) != 100 or any(i < 0 or not 0 <= p <= 100 for i, p in pairs) \
+            or len({i for i, _ in pairs}) != len(pairs):
+        return _DEFAULT_SHARD_TARGETS
+    return pairs
+
+
 def _env_list(name: str, default: list[str]) -> list[str]:
     raw_value = os.getenv(name)
     if raw_value is None or not raw_value.strip():
@@ -422,6 +439,12 @@ class KalshiConfig:
 
     key_id: str = ""                     # Kalshi API key ID
     private_key: str = ""                # Kalshi RSA private key PEM
+    # Kalshi holds funds per "exchange shard" and an API order only works if its market's shard has the money.
+    # With this on, the bot asks Kalshi to keep your balance split like this (percent per shard, totalling
+    # 100) unless you already set your own split. Shard 0 holds most sports and GDP markets, 1 parlays,
+    # 2 BTC/ETH prices and 3 NBA.
+    auto_rebalance: bool = True
+    shard_targets: tuple[tuple[int, int], ...] = ((0, 60), (1, 15), (2, 10), (3, 15))
 
 
 @dataclass(frozen=True)
@@ -854,6 +877,8 @@ class AppConfig:
             kalshi=KalshiConfig(
                 key_id=os.getenv("KALSHI_KEY_ID", "").strip(),
                 private_key=os.getenv("KALSHI_PRIVATE_KEY", "").strip(),
+                auto_rebalance=_env_bool("KALSHI_AUTO_REBALANCE", True),
+                shard_targets=_parse_shard_targets(os.getenv("KALSHI_SHARD_TARGETS", "")),
             ),
             freqtrade=FreqtradeConfig(
                 enabled=_env_bool("FREQTRADE_ENABLED", False),

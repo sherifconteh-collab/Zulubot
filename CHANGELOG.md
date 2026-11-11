@@ -4,6 +4,11 @@ Every pull request adds its entry under **[Unreleased]**. A weekly workflow (`.g
 
 ## [Unreleased]
 
+### The bot keeps your Kalshi balance on the shards it bets on
+- Kalshi holds funds per exchange shard and an API order only works if its market's shard has the money; orders placed in the Kalshi app are moved for you, API orders are not. With a balance sitting on one shard (the owner's was $47.95 on the parlay shard and $0.72 on the one holding game winners, props and GDP) nearly every order was refused with `insufficient_balance` and the market series skipped for 6 hours, so the bot went quiet.
+- The bot now turns on Kalshi's own Auto-Rebalancing (`POST /portfolio/target_balance_allocation`, which Kalshi runs every 10 seconds) at start-up and re-checks every 6 hours: if no split is set, it sets 60% / 15% / 10% / 15% for shards 0 / 1 / 2 / 3, confirms it by reading it back, and says so in Telegram. A split you set yourself is never overwritten. `KALSHI_AUTO_REBALANCE=false` turns it off; `KALSHI_SHARD_TARGETS` changes the percentages.
+- `/sports` shows whether rebalancing is on, and says plainly when an order was refused because a shard is empty. A Kalshi POST that answers with an empty body is now handled instead of raising.
+
 ## [2026.10.1] — 2026-10-19
 
 ### Automatic parlays get shorter after each unanswered quote request

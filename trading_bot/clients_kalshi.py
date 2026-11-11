@@ -234,7 +234,7 @@ class KalshiClient:
             retry_config=self.retry_config,
         )
         resp.raise_for_status()
-        return resp.json()
+        return resp.json() if resp.content else {}      # some endpoints answer 200 with an empty body
 
     def _put(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.can_trade:
@@ -632,6 +632,33 @@ class KalshiClient:
             except (KeyError, TypeError, ValueError):
                 continue
         return sorted(rows)
+
+    def get_target_allocation(self) -> list[tuple[int, int]]:
+        """Kalshi's automatic shard rebalancing target as ``[(exchange_index, percent), ...]`` (empty = off).
+
+        Kalshi checks every 10 seconds and moves funds between your own shards to keep this split, so an
+        order placed through the API finds money on the shard its market lives on.
+        """
+        if not self.can_trade:
+            return []
+        result = self._get("/portfolio/target_balance_allocation", auth=True)
+        if not isinstance(result, dict) or "allocations" not in result:
+            raise RuntimeError("Unexpected Kalshi target allocation response (no allocations)")
+        rows: list[tuple[int, int]] = []
+        for item in result.get("allocations") or []:
+            try:
+                rows.append((int(item["exchange_index"]), int(item["percent"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return sorted(rows)
+
+    def set_target_allocation(self, targets: dict[int, int]) -> None:
+        """Turn on automatic rebalancing with these percentages (they must total 100)."""
+        if sum(targets.values()) != 100 or any(p < 0 or p > 100 for p in targets.values()):
+            raise ValueError("Shard percentages must be between 0 and 100 and total 100")
+        self._post("/portfolio/target_balance_allocation", {
+            "allocations": [{"exchange_index": int(i), "percent": int(p)} for i, p in sorted(targets.items())],
+        })
 
     # ------------------------------------------------------------------
     # Perpetuals (requires auth for trading; discovery is public)
