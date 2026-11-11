@@ -442,10 +442,11 @@ class KalshiSportsStrategy:
         self._sleep = time.sleep
         # Live orders that failed or didn't fill this cycle, so /sports can say why nothing was bought.
         self._order_issues: list[dict[str, Any]] = []
-        # Market series Kalshi refused for a shard/funding reason -> when it happened (monotonic seconds).
+        # Market series Kalshi refused -> retry deadline (monotonic seconds).
         self._unroutable: dict[str, float] = {}
 
     _UNROUTABLE_SECONDS = 6 * 3600.0
+    _SHARD_RETRY_SECONDS = 30.0  # Allow Kalshi's 10-second rebalancer to fund a shard.
 
     @staticmethod
     def _is_shard_problem(exc: BaseException) -> bool:
@@ -1179,8 +1180,8 @@ class KalshiSportsStrategy:
             return None
         series = ticker.split("-", 1)[0]
         if self.live_trading_enabled and not cand.get("user_bet"):
-            since = self._unroutable.get(series)
-            if since is not None and time.monotonic() - since < self._UNROUTABLE_SECONDS:
+            retry_at = self._unroutable.get(series)
+            if retry_at is not None and time.monotonic() < retry_at:
                 return None  # Kalshi refused this series for a shard/funding reason: don't keep asking
             if sum(i["reason"] == "order_failed" and not i.get("shard") for i in self._order_issues) >= 3:
                 return None  # Kalshi keeps rejecting orders for other reasons: stop instead of trying every game
@@ -1217,7 +1218,10 @@ class KalshiSportsStrategy:
                 self.logger.error("Live Kalshi sports order failed for %s: %s", ticker, exc)
                 shard = self._is_shard_problem(exc)
                 if shard:
-                    self._unroutable[series] = time.monotonic()
+                    response = getattr(exc, "response", None)
+                    delay = (self._UNROUTABLE_SECONDS if getattr(response, "status_code", None) == 404
+                             else self._SHARD_RETRY_SECONDS)
+                    self._unroutable[series] = time.monotonic() + delay
                 self._order_issues.append({
                     "ticker": ticker, "reason": "order_failed", "shard": shard,
                     "error": f"{ticker} {side} x{quantity} @ {ask:.2f}: {self._describe_order_error(exc)}"})

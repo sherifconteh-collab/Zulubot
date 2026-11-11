@@ -221,6 +221,7 @@ class TradingBotService:
             protected_symbols=config.protected_symbols,
         )
 
+        self.shard_allocation: dict[str, Any] = {}
         # Kalshi API client (sports, GDP, perpetuals, latency arbitrage)
         self.kalshi_client = KalshiClient(
             key_id=config.kalshi.key_id,
@@ -541,6 +542,43 @@ class TradingBotService:
         summary = self._build_summary(state, pre_risk=pre_risk, post_risk=post_risk, modules=module_results)
         self.logger.info("Run summary: %s", summary)
         return summary
+
+    # ------------------------------------------------------------------ shard funding
+
+    def ensure_shard_allocation(self) -> dict[str, Any]:
+        """Ask Kalshi to keep the account's money spread over its exchange shards, unless you already did.
+
+        An API order only works if its market's shard holds the money, and Kalshi's own app-side auto
+        transfer does not apply to the API. Kalshi runs the rebalancing itself, every 10 seconds, so the
+        bot only has to set the target split once. An existing split of yours is never overwritten.
+        Read-only apart from that one setting; touches no portfolio state, so it takes no lock.
+        """
+        cfg = self.config.kalshi
+        now = datetime.now(self.config.timezone).isoformat(timespec="seconds")
+        status: dict[str, Any] = {"state": "off", "targets": list(cfg.shard_targets), "error": "", "at": now}
+        self.shard_allocation = status
+        if self.config.paper_mode or not self.kalshi_client.can_trade:
+            status["state"] = "paper"
+            return status
+        if not cfg.auto_rebalance:
+            # This flag controls bot management, not Kalshi's persistent account setting.
+            status["state"] = "unmanaged"
+            return status
+        try:
+            current = self.kalshi_client.get_target_allocation()
+            if current:
+                status.update(state="yours", targets=current)
+                return status
+            self.kalshi_client.set_target_allocation(dict(cfg.shard_targets))
+            confirmed = self.kalshi_client.get_target_allocation()
+            if confirmed:
+                status.update(state="set", targets=confirmed)
+            else:
+                status.update(state="failed", error="Kalshi accepted the setting but still shows no allocation")
+        except Exception as exc:
+            status.update(state="failed", error=f"{type(exc).__name__}: {exc}"[:240])
+            self.logger.warning("Could not turn on Kalshi shard rebalancing: %s", status["error"])
+        return status
 
     def gdp_preview(self) -> dict[str, Any]:
         """Model versus market for the open GDP strikes, read-only (the /gdp command).

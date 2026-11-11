@@ -48,6 +48,7 @@ class SchedulerService:
         self._last_kalshi_perps_run: datetime | None = None
         self._last_kalshi_sports_run: datetime | None = None
         self._last_gdp_run: datetime | None = None
+        self._last_shard_check: datetime | None = None
         self._last_crypto_markets_run: datetime | None = None
         self._paused_by_kill_switch = False
 
@@ -117,6 +118,7 @@ class SchedulerService:
     async def _tick(self) -> None:
         await self.notifier.flush_if_due()
         now = datetime.now(self.config.timezone)
+        await self._check_shard_allocation(now)
         module_results: list[dict[str, Any]] = []
         trade_notification_sent = False
 
@@ -440,6 +442,30 @@ class SchedulerService:
             return True
         elapsed = (now - self._last_markov_run).total_seconds()
         return elapsed >= self.config.markov.run_interval_minutes * 60
+
+    async def _check_shard_allocation(self, now: datetime) -> None:
+        """At start-up and every 6 hours: make sure Kalshi spreads the balance over the shards the bot bets on."""
+        last = self._last_shard_check
+        if last is not None and (now - last).total_seconds() < 6 * 3600:
+            return
+        self._last_shard_check = now
+        try:
+            status = await asyncio.to_thread(self.service.ensure_shard_allocation)
+        except Exception as exc:
+            self.logger.warning("Shard allocation check failed: %s", exc)
+            return
+        if status.get("state") == "set":
+            targets = ", ".join(f"#{i} {p}%" for i, p in status["targets"])
+            try:
+                await self.telegram.send_message(
+                    f"Turned on Kalshi auto-rebalancing so every market type has funds: {targets}. "
+                    "Change it any time at kalshi.com/account/exchange-indexes "
+                    "(a split you set yourself is never overwritten).")
+            except Exception as exc:  # no Telegram, or it is down: the log line below is enough
+                self.logger.info("Could not announce the shard rebalancing: %s", exc)
+            self.logger.info("Kalshi shard rebalancing turned on: %s", targets)
+        elif status.get("state") == "failed":
+            self.logger.warning("Kalshi shard rebalancing is not on: %s", status.get("error"))
 
     def _should_run_gdp_nowcast(self, now: datetime) -> bool:
         if not self.config.gdp_nowcast.enabled:

@@ -606,6 +606,26 @@ def _skip_reason_summary(decisions: Any, limit: int = 4) -> str:
     return ", ".join(f"{reason} x{n}" for reason, n in ranked)
 
 
+def _shard_allocation_line(status: Any) -> str:
+    """One line on whether Kalshi is keeping your money spread over the shards the bot bets on."""
+    if not isinstance(status, dict) or not status:
+        return ""
+    state = status.get("state")
+    split = ", ".join(f"#{i} {p}%" for i, p in status.get("targets") or [])
+    if state == "set":
+        return f"Shard rebalancing: on, set by the bot ({split})"
+    if state == "yours":
+        return f"Shard rebalancing: on, your own split ({split})"
+    if state == "failed":
+        return ("Shard rebalancing: NOT on (" + html.escape(_clip_text(str(status.get("error", "")), 160)) + "). "
+                "Orders fail when a market's shard is empty: set a split at kalshi.com/account/exchange-indexes")
+    if state == "unmanaged":
+        return ("Shard rebalancing: bot management disabled (KALSHI_AUTO_REBALANCE=false). "
+                "Kalshi may still rebalance using its saved split; view or disable it at "
+                "kalshi.com/account/exchange-indexes")
+    return ""
+
+
 def _format_parlay_log(log: Any, limit: int = 4) -> list[str]:
     """Today's automatic parlay attempts, newest last: what was tried and why it did not fill."""
     rows = [r for r in (log or []) if isinstance(r, dict)]
@@ -1673,6 +1693,9 @@ class TradingTelegramBot:
             if len(shards) > 1:
                 lines.append("Kalshi balance by shard: " + ", ".join(
                     f"#{int(s['index'])} ${float(s['balance']):.2f}" for s in shards))
+            shard_line = _shard_allocation_line(getattr(self._service, "shard_allocation", None))
+            if shard_line:
+                lines.append(shard_line)
             if bank:
                 lines.append(
                     f"Bankroll ${float(bank.get('equity', 0)):.2f} (today {float(bank.get('day_pnl', 0)):+.2f}) | "
@@ -1707,8 +1730,12 @@ class TradingTelegramBot:
             why = _skip_reason_summary(module.get("decisions"))
             if why and not (module.get("buys") or []):
                 lines.append(f"Nothing bought. Skipped: {html.escape(why)}")
-            for example in _skip_examples(module.get("decisions")):
+            examples = _skip_examples(module.get("decisions"))
+            for example in examples:
                 lines.append(f"  \u2022 {example}")
+            if any("insufficient_balance" in e or "shard" in e.lower() for e in examples):
+                lines.append("A market's shard has no money. Move funds or turn on rebalancing: "
+                             "kalshi.com/account/exchange-indexes")
             if module.get("error"):
                 lines.append(f"Error: {html.escape(_clip_text(module['error'], 140))}")
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")  # type: ignore[union-attr]
