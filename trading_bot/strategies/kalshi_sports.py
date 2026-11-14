@@ -444,6 +444,7 @@ class KalshiSportsStrategy:
         self._order_issues: list[dict[str, Any]] = []
         # Market series Kalshi refused -> retry deadline (monotonic seconds).
         self._unroutable: dict[str, float] = {}
+        self._shard_cache: tuple[float, list[tuple[int, float]]] | None = None
 
     _UNROUTABLE_SECONDS = 6 * 3600.0
     _SHARD_RETRY_SECONDS = 30.0  # Allow Kalshi's 10-second rebalancer to fund a shard.
@@ -583,6 +584,26 @@ class KalshiSportsStrategy:
         except Exception as exc:
             self.logger.debug("Could not read the per-shard balance: %s", exc)
             return []
+
+    _SHARD_CACHE_SECONDS = 10.0
+
+    def _largest_shard_balance(self) -> float | None:
+        """Most dollars any single shard can spend right now (cached briefly); None if Kalshi doesn't say.
+
+        An order is filled from one shard only, so it can never be larger than the richest shard. The
+        market's own shard is not exposed, so this is an upper bound, not a guarantee.
+        """
+        cached = self._shard_cache
+        if cached is not None and time.monotonic() - cached[0] < self._SHARD_CACHE_SECONDS:
+            rows = cached[1]
+        else:
+            try:
+                rows = self.kalshi.get_balance_breakdown()
+            except Exception as exc:
+                self.logger.debug("Could not read the per-shard balance: %s", exc)
+                rows = []
+            self._shard_cache = (time.monotonic(), rows)
+        return max((balance for _, balance in rows), default=None)
 
     def _score_past_forecasts(self) -> None:
         """Teach the model which sources were right: score forecasts for settled games."""
@@ -1191,6 +1212,15 @@ class KalshiSportsStrategy:
         entry_price = ask if self.live_trading_enabled else ask + decision.fee
         if self.live_trading_enabled:
             notional = min(notional, broker.get_cash_balance(state, cash_bucket=_CASH_BUCKET) * 0.95)
+            if quantity is None:
+                richest = self._largest_shard_balance()
+                if richest is not None:
+                    if richest < entry_price:
+                        self._order_issues.append({
+                            "ticker": ticker, "reason": "shard_underfunded", "shard": True,
+                            "error": f"no Kalshi shard holds enough (largest ${richest:.2f}); orders skipped until funds move"})
+                        return None
+                    notional = min(notional, richest * 0.95)
         if quantity is None:
             quantity = math.floor(notional / entry_price)
         if quantity < 1:

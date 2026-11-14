@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, PropertyMock, patch
 from trading_bot.clients_kalshi import KalshiClient
 from trading_bot.config import KalshiConfig, _parse_shard_targets
 from trading_bot.service import TradingBotService
-from trading_bot.telegram_bot import _shard_allocation_line
+from trading_bot.strategies.kalshi_sports import KalshiSportsStrategy
+from trading_bot.telegram_bot import _shard_allocation_line, _shard_drift_line
 
 
 def _client(pages):
@@ -118,6 +119,45 @@ class LineTests(unittest.TestCase):
         self.assertIn("kalshi.com/account/exchange-indexes", failed)
         self.assertEqual(_shard_allocation_line({}), "")
         self.assertEqual(_shard_allocation_line({"state": "paper"}), "")
+
+
+class DriftLineTests(unittest.TestCase):
+    SPLIT = {"state": "yours", "targets": [(0, 60), (1, 15), (2, 10), (3, 15)]}
+
+    def test_warns_when_money_sits_on_one_shard_despite_the_split(self):
+        shards = [{"index": 0, "balance": 0.21}, {"index": 1, "balance": 47.95},
+                  {"index": 2, "balance": 0.0}, {"index": 3, "balance": 0.0}]
+        line = _shard_drift_line(shards, self.SPLIT)
+        self.assertIn("WARNING", line)
+        self.assertIn("kalshi.com/account/exchange-indexes", line)
+
+    def test_quiet_when_balances_follow_the_split_or_nothing_is_known(self):
+        shards = [{"index": 0, "balance": 30.0}, {"index": 1, "balance": 8.0},
+                  {"index": 2, "balance": 5.0}, {"index": 3, "balance": 7.0}]
+        self.assertEqual(_shard_drift_line(shards, self.SPLIT), "")
+        self.assertEqual(_shard_drift_line([], self.SPLIT), "")
+        self.assertEqual(_shard_drift_line(shards, {"state": "failed"}), "")
+
+
+class LargestShardTests(unittest.TestCase):
+    def _strategy(self, rows):
+        strat = KalshiSportsStrategy.__new__(KalshiSportsStrategy)
+        strat.logger = logging.getLogger("t")
+        strat._shard_cache = None
+        strat.kalshi = SimpleNamespace(get_balance_breakdown=MagicMock(return_value=rows))
+        return strat
+
+    def test_returns_the_richest_shard_and_caches_the_read(self):
+        strat = self._strategy([(0, 0.21), (1, 47.95), (2, 0.0)])
+        self.assertEqual(strat._largest_shard_balance(), 47.95)
+        strat._largest_shard_balance()
+        self.assertEqual(strat.kalshi.get_balance_breakdown.call_count, 1)
+
+    def test_none_when_kalshi_reports_nothing_or_fails(self):
+        self.assertIsNone(self._strategy([])._largest_shard_balance())
+        strat = self._strategy([])
+        strat.kalshi.get_balance_breakdown.side_effect = RuntimeError("down")
+        self.assertIsNone(strat._largest_shard_balance())
 
 
 if __name__ == "__main__":
