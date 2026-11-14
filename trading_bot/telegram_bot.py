@@ -626,6 +626,26 @@ def _shard_allocation_line(status: Any) -> str:
     return ""
 
 
+_SHARD_DRIFT_WARN_POINTS = 25.0
+
+
+def _shard_drift_line(shards: Any, status: Any) -> str:
+    """Warn when rebalancing says it is on but the actual balances are far from the split."""
+    if not isinstance(status, dict) or status.get("state") not in ("set", "yours"):
+        return ""
+    targets = {int(i): float(p) for i, p in status.get("targets") or []}
+    balances = {int(s["index"]): float(s["balance"]) for s in shards or [] if isinstance(s, dict)}
+    total = sum(balances.values())
+    if not targets or total <= 0:
+        return ""
+    worst = max(abs(100.0 * balances.get(i, 0.0) / total - targets.get(i, 0.0)) for i in set(targets) | set(balances))
+    if worst < _SHARD_DRIFT_WARN_POINTS:
+        return ""
+    return ("WARNING: rebalancing is on but balances are far from the split (off by up to "
+            f"{worst:.0f} points). Kalshi is not moving the money, so orders on empty shards will fail. "
+            "Move funds at kalshi.com/account/exchange-indexes")
+
+
 def _format_parlay_log(log: Any, limit: int = 4) -> list[str]:
     """Today's automatic parlay attempts, newest last: what was tried and why it did not fill."""
     rows = [r for r in (log or []) if isinstance(r, dict)]
@@ -1693,9 +1713,13 @@ class TradingTelegramBot:
             if len(shards) > 1:
                 lines.append("Kalshi balance by shard: " + ", ".join(
                     f"#{int(s['index'])} ${float(s['balance']):.2f}" for s in shards))
-            shard_line = _shard_allocation_line(getattr(self._service, "shard_allocation", None))
+            shard_status = getattr(self._service, "shard_allocation", None)
+            shard_line = _shard_allocation_line(shard_status)
             if shard_line:
                 lines.append(shard_line)
+            drift_line = _shard_drift_line(shards, shard_status)
+            if drift_line:
+                lines.append(drift_line)
             if bank:
                 lines.append(
                     f"Bankroll ${float(bank.get('equity', 0)):.2f} (today {float(bank.get('day_pnl', 0)):+.2f}) | "
